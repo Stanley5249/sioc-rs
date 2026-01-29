@@ -1,0 +1,32 @@
+[package]
+name = "sioc"
+version = "0.1.0"
+edition = "2024"
+authors = ["Sioc Contributors"]
+description = "High-performance async Socket.IO client for Rust with zero-copy design"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yourusername/sioc"
+documentation = "https://docs.rs/sioc"
+readme = "README.md"
+keywords = ["socketio", "websocket", "async", "networking", "realtime"]
+categories = ["network-programming", "asynchronous", "web-programming"]
+
+[dependencies]
+# Workspace dependencies
+bytes.workspace = true
+sioc-core.workspace = true
+sioc-macros.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+
+[features]
+default = []
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

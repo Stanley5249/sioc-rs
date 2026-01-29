@@ -1,0 +1,40 @@
+[workspace]
+members = ["sioc-core", "sioc-macros", "sioc", "sioc-engine"]
+resolver = "3"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+
+# Zero-copy buffers
+bytes = "1"
+
+# Stack-allocated vectors
+smallvec = { version = "1", features = ["write"] }
+
+# Error handling
+thiserror = "2"
+miette = { version = "7", features = ["fancy"] }
+
+# HTTP and WebSocket clients
+reqwest = { version = "0.13", default-features = false, features = ["stream"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
+
+# Procedural macro dependencies
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+darling = "0.23"
+
+# Local workspace members
+sioc-core = { path = "./sioc-core" }
+sioc-macros = { path = "./sioc-macros" }
+sioc-engine = { path = "./sioc-engine" }
+
+[workspace.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

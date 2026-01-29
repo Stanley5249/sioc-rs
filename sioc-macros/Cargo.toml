@@ -1,0 +1,25 @@
+[package]
+name = "sioc-macros"
+version = "0.1.0"
+edition = "2024"
+authors = ["Sioc Contributors"]
+description = "Procedural macros for Sioc - derive SiocEmit and SiocReceive"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yourusername/sioc"
+keywords = ["socketio", "macros", "procedural-macro", "codegen"]
+categories = ["network-programming", "development-tools::procedural-macro-helpers"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+# Workspace dependencies
+darling.workspace = true
+proc-macro2.workspace = true
+quote.workspace = true
+serde_json.workspace = true
+syn.workspace = true
+
+[dev-dependencies]
+# Test macro expansions
+trybuild = "1"

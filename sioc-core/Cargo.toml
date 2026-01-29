@@ -1,0 +1,30 @@
+[package]
+name = "sioc-core"
+version = "0.1.0"
+edition = "2024"
+authors = ["Sioc Contributors"]
+description = "Core types and client implementation for Sioc - async Socket.IO client"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yourusername/sioc"
+keywords = ["socketio", "websocket", "async", "networking"]
+categories = ["network-programming", "asynchronous", "web-programming"]
+
+[dependencies]
+# Workspace dependencies
+bytes.workspace = true
+miette.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+smallvec.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+# Other dependencies
+futures-util = "0.3"
+url = "2"
+
+# Engine.IO dependency
+sioc-engine = { path = "../sioc-engine" }
+
+[dev-dependencies]
+tokio-test = "0.4"
