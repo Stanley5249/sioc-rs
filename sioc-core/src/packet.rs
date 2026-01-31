@@ -10,357 +10,259 @@ use std::convert::TryFrom;
 /// Type alias for binary attachments collection.
 pub type Attachments = SmallVec<[Bytes; 1]>;
 
-/// Payload for Event packets (Socket.IO types 2 and 5).
-///
-/// Contains the event data, optional acknowledgement ID, and any binary attachments.
+/// Packet for sending/receiving events (types 2/5).
 #[derive(Debug, Clone)]
-pub struct EventPayload {
-    /// Request ID. If `Some`, this is an active request expecting a reply.
+pub struct EventPacket {
+    /// Namespace for the event.
+    pub ns: String,
+    /// Optional acknowledgement ID.
     pub id: Option<u64>,
-    /// Raw, pre-serialized JSON payload.
+    /// Event data payload.
     pub data: Bytes,
-    /// Binary attachments (if any).
+    /// Binary attachments.
     pub attachments: Attachments,
+    /// Number of expected attachments.
+    pub attachment_count: usize,
 }
 
-impl EventPayload {
-    /// Create a new EventPayload with the given data.
-    pub fn new(data: Bytes) -> Self {
+impl EventPacket {
+    /// Create a new EventPacket with the given namespace and data.
+    pub fn new(ns: String, data: Bytes) -> Self {
         Self {
+            ns,
             id: None,
             data,
-            attachments: Attachments::new(),
+            attachments: SmallVec::new(),
+            attachment_count: 0,
         }
     }
-    /// Add binary attachments to this EventPayload.
-    pub fn with_attachments(mut self, attachments: Vec<Bytes>) -> Self {
-        self.attachments = Attachments::from_vec(attachments);
-        self
-    }
-    /// Set the acknowledgement ID for this EventPayload.
-    pub fn with_id(mut self, id: u64) -> Self {
-        self.id = Some(id);
-        self
-    }
-    /// Check if this EventPayload has binary attachments.
-    pub fn has_attachments(&self) -> bool {
-        !self.attachments.is_empty()
-    }
+
     /// Get the number of binary attachments.
     pub fn attachment_count(&self) -> usize {
         self.attachments.len()
     }
 }
 
-/// Payload for Ack packets (Socket.IO types 3 and 6).
-///
-/// Contains the acknowledgement ID and response data with optional attachments.
+/// Packet for acknowledgements (types 3/6).
 #[derive(Debug, Clone)]
-pub struct AckPayload {
-    /// Target ID. This is a passive reply to a previous request.
-    pub ack_id: u64,
-    /// Raw, pre-serialized JSON payload.
-    pub data: Bytes,
-    /// Binary attachments (if any).
-    pub attachments: Attachments,
-}
-
-impl AckPayload {
-    /// Create a new AckPayload with the given acknowledgement ID and data.
-    pub fn new(ack_id: u64, data: Bytes) -> Self {
-        Self {
-            ack_id,
-            data,
-            attachments: Attachments::new(),
-        }
-    }
-    /// Add binary attachments to this AckPayload.
-    pub fn with_attachments(mut self, attachments: Vec<Bytes>) -> Self {
-        self.attachments = Attachments::from_vec(attachments);
-        self
-    }
-    /// Check if this AckPayload has binary attachments.
-    pub fn has_attachments(&self) -> bool {
-        !self.attachments.is_empty()
-    }
-    /// Get the number of binary attachments.
-    pub fn attachment_count(&self) -> usize {
-        self.attachments.len()
-    }
-}
-
-/// Unified payload enum for all Socket.IO packet types.
-///
-/// This enum encapsulates the different kinds of messages that can be sent
-/// or received over a Socket.IO connection.
-#[derive(Debug, Clone)]
-pub enum Payload {
-    /// Connect to a namespace (type 0).
-    Connect,
-    /// Disconnect from a namespace (type 1).
-    Disconnect,
-    /// Connection error from server (type 4).
-    ConnectError(String),
-    /// Event packet with JSON payload (types 2/5).
-    Event(EventPayload),
-    /// Acknowledgement response (types 3/6).
-    Ack(AckPayload),
-}
-
-/// Core packet structure - the atomic unit of Socket.IO communication.
-///
-/// A packet represents a single message exchanged between client and server.
-/// The `inner` field contains the typed payload data.
-#[derive(Debug, Clone)]
-pub struct Packet {
-    /// Namespace (usually "/" for default).
+pub struct AckPacket {
+    /// Namespace for the acknowledgement.
     pub ns: String,
-    /// The payload data for this packet.
-    pub inner: Payload,
+    /// Acknowledgement ID.
+    pub ack_id: u64,
+    /// Response data payload.
+    pub data: Bytes,
+    /// Binary attachments.
+    pub attachments: Attachments,
+    /// Number of expected attachments.
+    pub attachment_count: usize,
+}
+
+impl AckPacket {
+    /// Get the number of binary attachments.
+    pub fn attachment_count(&self) -> usize {
+        self.attachments.len()
+    }
+}
+
+/// Top-level Packet Enum.
+#[derive(Debug, Clone)]
+pub enum Packet {
+    /// Connect to a namespace (type 0).
+    Connect {
+        /// Namespace.
+        ns: String,
+        /// Optional session ID.
+        sid: Option<String>,
+    },
+    /// Disconnect from a namespace (type 1).
+    Disconnect {
+        /// Namespace.
+        ns: String,
+    },
+    /// Connection error from server (type 4).
+    ConnectError {
+        /// Namespace.
+        ns: String,
+        /// Error message.
+        message: String,
+    },
+    /// Event packet with JSON payload (types 2/5).
+    Event(EventPacket),
+    /// Acknowledgement response (types 3/6).
+    Ack(AckPacket),
 }
 
 impl Packet {
-    /// Set the namespace for this packet.
-    pub fn with_namespace<S: Into<String>>(mut self, ns: S) -> Self {
-        self.ns = ns.into();
-        self
-    }
-
     /// Convert this Socket.IO packet to an Engine.IO packet for transmission.
     pub fn to_engine_packet(&self) -> EnginePacket {
         let mut buf = BytesMut::new();
-        let (type_char, has_attachments) = match &self.inner {
-            Payload::Connect => ('0', false),
-            Payload::Disconnect => ('1', false),
-            Payload::Event(p) => (
-                if p.has_attachments() { '5' } else { '2' },
-                p.has_attachments(),
-            ),
-            Payload::Ack(p) => (
-                if p.has_attachments() { '6' } else { '3' },
-                p.has_attachments(),
-            ),
-            Payload::ConnectError(_) => ('4', false),
+
+        // 1. Determine Type & Attachments
+        let (type_char, has_attachments, count) = match self {
+            Packet::Connect { .. } => ('0', false, 0),
+            Packet::Disconnect { .. } => ('1', false, 0),
+            Packet::Event(p) => {
+                let has = !p.attachments.is_empty();
+                (if has { '5' } else { '2' }, has, p.attachments.len())
+            }
+            Packet::Ack(p) => {
+                let has = !p.attachments.is_empty();
+                (if has { '6' } else { '3' }, has, p.attachments.len())
+            }
+            Packet::ConnectError { .. } => ('4', false, 0),
         };
 
         buf.put_u8(type_char as u8);
 
+        // 2. Attachments Count
         if has_attachments {
-            let count = match &self.inner {
-                Payload::Event(p) => p.attachment_count(),
-                Payload::Ack(p) => p.attachment_count(),
-                _ => 0,
-            };
             buf.put(format!("{}-", count).as_bytes());
         }
 
-        if self.ns != "/" {
-            buf.put(self.ns.as_bytes());
+        // 3. Namespace (if not default)
+        let ns = match self {
+            Packet::Connect { ns, .. } => ns,
+            Packet::Disconnect { ns } => ns,
+            Packet::ConnectError { ns, .. } => ns,
+            Packet::Event(p) => &p.ns,
+            Packet::Ack(p) => &p.ns,
+        };
+        if ns != "/" {
+            buf.put(ns.as_bytes());
             buf.put_u8(b',');
         }
 
-        match &self.inner {
-            Payload::Event(p) if p.id.is_some() => buf.put(p.id.unwrap().to_string().as_bytes()),
-            Payload::Ack(p) => buf.put(p.ack_id.to_string().as_bytes()),
+        // 4. ID
+        match self {
+            Packet::Event(p) if p.id.is_some() => buf.put(p.id.unwrap().to_string().as_bytes()),
+            Packet::Ack(p) => buf.put(p.ack_id.to_string().as_bytes()),
             _ => {}
         }
 
-        let data = match &self.inner {
-            Payload::Event(p) => p.data.clone(),
-            Payload::Ack(p) => p.data.clone(),
-            Payload::ConnectError(e) => Bytes::from(e.clone()),
-            _ => Bytes::new(),
+        // 5. Data
+        let data = match self {
+            Packet::Event(p) => &p.data,
+            Packet::Ack(p) => &p.data,
+            Packet::ConnectError { message, .. } => {
+                return EnginePacket::Message(EngineMessage::Text(Bytes::from(message.clone())));
+            }
+            _ => &Bytes::new(),
         };
-        buf.put(data);
+        buf.put(data.clone());
 
         EnginePacket::Message(EngineMessage::Text(buf.freeze()))
+    }
+}
+
+// Modular Parsing Functions
+
+/// Parses packet type and attachment count. Returns (type_char, attachment_count, remaining).
+fn parse_type(input: &str) -> Result<(char, usize, &str)> {
+    let mut chars = input.chars();
+    let type_char = chars.next().ok_or(Error::InvalidPacket)?;
+    let mut rest = &input[1..];
+
+    let mut attachments = 0;
+    if type_char == '5' || type_char == '6' {
+        // Binary types
+        if let Some((count_str, r)) = rest.split_once('-') {
+            attachments = count_str.parse().map_err(|_| Error::InvalidPacket)?;
+            rest = r;
+        } else {
+            return Err(Error::InvalidPacket);
+        }
+    }
+    Ok((type_char, attachments, rest))
+}
+
+/// Parses namespace. Returns (namespace, remaining).
+fn parse_namespace(input: &str) -> Result<(&str, &str)> {
+    if input.starts_with('/') {
+        if let Some((ns, rest)) = input.split_once(',') {
+            Ok((ns, rest))
+        } else {
+            Ok((input, ""))
+        }
+    } else {
+        Ok(("/", input))
+    }
+}
+
+/// Parses packet ID. Returns (id, remaining).
+fn parse_id(input: &str) -> Result<(Option<u64>, &str)> {
+    if input.is_empty() {
+        return Ok((None, input));
+    }
+
+    let end_idx = input
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(input.len());
+    if end_idx > 0 {
+        let id = input[..end_idx].parse().map_err(|_| Error::InvalidPacket)?;
+        Ok((Some(id), &input[end_idx..]))
+    } else {
+        Ok((None, input))
     }
 }
 
 impl TryFrom<EnginePacket> for Packet {
     type Error = Error;
 
-    fn try_from(engine_packet: EnginePacket) -> Result<Self> {
-        let EnginePacket::Message(message) = engine_packet else {
+    fn try_from(packet: EnginePacket) -> Result<Self> {
+        // STRICT CHECK: Only accept Message packets.
+        let EnginePacket::Message(msg) = packet else {
             return Err(Error::InvalidPacket);
         };
-        let bytes = match message {
+
+        let bytes = match msg {
             EngineMessage::Text(b) => b,
             _ => return Err(Error::InvalidPacket),
         };
-        if bytes.is_empty() {
+
+        let text = std::str::from_utf8(&bytes)?;
+        if text.is_empty() {
             return Err(Error::InvalidPacket);
         }
 
-        let mut cursor = 0;
-        let type_char = bytes[cursor] as char;
-        cursor += 1;
+        // Use modular functions
+        let (type_char, attachments, rest) = parse_type(text)?;
+        let (ns_str, rest) = parse_namespace(rest)?;
+        let (id, rest) = parse_id(rest)?;
 
-        let (ns, packet_type) = match type_char {
-            '0' => ("/".to_string(), Payload::Connect),
-            '1' => ("/".to_string(), Payload::Disconnect),
-            '2' => {
-                let (ns, id, data) = parse_event_data(&bytes, cursor)?;
-                (
-                    ns,
-                    Payload::Event(EventPayload {
-                        id,
-                        data,
-                        attachments: Attachments::new(),
-                    }),
-                )
-            }
-            '3' => {
-                let (ns, ack_id, data) = parse_ack_data(&bytes, cursor)?;
-                (
-                    ns,
-                    Payload::Ack(AckPayload {
-                        ack_id,
-                        data,
-                        attachments: Attachments::new(),
-                    }),
-                )
-            }
-            '4' => {
-                let error_msg =
-                    std::str::from_utf8(&bytes[cursor..]).map_err(|_| Error::InvalidPacket)?;
-                (
-                    "/".to_string(),
-                    Payload::ConnectError(error_msg.to_string()),
-                )
-            }
-            '5' => {
-                let (_attachment_count, new_cursor) = parse_attachments(&bytes, cursor)?;
-                cursor = new_cursor;
-                let (ns, new_cursor) = parse_namespace(&bytes, cursor)?;
-                cursor = new_cursor;
-                let (id, new_cursor) = parse_id(&bytes, cursor)?;
-                cursor = new_cursor;
-                let data = bytes.slice(cursor..);
-                (
-                    ns,
-                    Payload::Event(EventPayload {
-                        id,
-                        data,
-                        attachments: Attachments::new(), // Will be filled by caller
-                    }),
-                )
-            }
-            '6' => {
-                let (_attachment_count, new_cursor) = parse_attachments(&bytes, cursor)?;
-                cursor = new_cursor;
-                let (ns, new_cursor) = parse_namespace(&bytes, cursor)?;
-                cursor = new_cursor;
-                let (ack_id, new_cursor) = parse_id(&bytes, cursor)?;
-                cursor = new_cursor;
-                let data = bytes.slice(cursor..);
-                let ack_id = ack_id.ok_or(Error::InvalidPacket)?;
-                (
-                    ns,
-                    Payload::Ack(AckPayload {
-                        ack_id,
-                        data,
-                        attachments: Attachments::new(), // Will be filled by caller
-                    }),
-                )
-            }
-            _ => return Err(Error::InvalidPacket),
-        };
+        let ns = ns_str.to_string();
+        let data = Bytes::copy_from_slice(rest.as_bytes());
 
-        Ok(Packet {
-            ns,
-            inner: packet_type,
-        })
-    }
-}
-
-fn parse_attachments(bytes: &[u8], mut cursor: usize) -> Result<(u8, usize)> {
-    let mut attachment_count = 0;
-    if cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
-        let start = cursor;
-        while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
-            cursor += 1;
-        }
-        if cursor < bytes.len() && bytes[cursor] == b'-' {
-            let count_str =
-                std::str::from_utf8(&bytes[start..cursor]).map_err(|_| Error::InvalidPacket)?;
-            attachment_count = count_str.parse().map_err(|_| Error::InvalidPacket)?;
-            cursor += 1; // skip '-'
-        } else {
-            cursor = start; // reset if not followed by '-'
+        match type_char {
+            '0' => Ok(Packet::Connect { ns, sid: None }),
+            '1' => Ok(Packet::Disconnect { ns }),
+            '2' | '5' => Ok(Packet::Event(EventPacket {
+                ns,
+                id,
+                data,
+                attachments: SmallVec::new(), // Filled later by router
+                attachment_count: attachments,
+            })),
+            '3' | '6' => {
+                let ack_id = id.ok_or(Error::InvalidPacket)?;
+                Ok(Packet::Ack(AckPacket {
+                    ns,
+                    ack_id,
+                    data,
+                    attachments: SmallVec::new(),
+                    attachment_count: attachments,
+                }))
+            }
+            '4' => Ok(Packet::ConnectError {
+                ns,
+                message: rest.to_string(),
+            }),
+            _ => Err(Error::InvalidPacket),
         }
     }
-    Ok((attachment_count, cursor))
-}
-
-fn parse_namespace(bytes: &[u8], mut cursor: usize) -> Result<(String, usize)> {
-    let mut ns = "/".to_string();
-    if cursor < bytes.len() && bytes[cursor] == b'/' {
-        let start = cursor;
-        cursor += 1; // skip '/'
-        while cursor < bytes.len() && bytes[cursor] != b',' {
-            cursor += 1;
-        }
-        if cursor < bytes.len() {
-            ns = std::str::from_utf8(&bytes[start..cursor])
-                .map_err(|_| Error::InvalidPacket)?
-                .to_string();
-            cursor += 1; // skip ','
-        } else {
-            return Err(Error::InvalidPacket);
-        }
-    }
-    Ok((ns, cursor))
-}
-
-fn parse_id(bytes: &[u8], mut cursor: usize) -> Result<(Option<u64>, usize)> {
-    let mut id = None;
-    if cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
-        let start = cursor;
-        while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
-            cursor += 1;
-        }
-        let id_str =
-            std::str::from_utf8(&bytes[start..cursor]).map_err(|_| Error::InvalidPacket)?;
-        id = Some(id_str.parse().map_err(|_| Error::InvalidPacket)?);
-    }
-    Ok((id, cursor))
-}
-
-fn parse_event_data(bytes: &[u8], cursor: usize) -> Result<(String, Option<u64>, Bytes)> {
-    let (ns, cursor) = parse_namespace(bytes, cursor)?;
-    let (id, cursor) = parse_id(bytes, cursor)?;
-    let data = Bytes::copy_from_slice(&bytes[cursor..]);
-    Ok((ns, id, data))
-}
-
-fn parse_ack_data(bytes: &[u8], cursor: usize) -> Result<(String, u64, Bytes)> {
-    let (ns, cursor) = parse_namespace(bytes, cursor)?;
-    let (id, cursor) = parse_id(bytes, cursor)?;
-    let id = id.ok_or(Error::InvalidPacket)?;
-    let data = Bytes::copy_from_slice(&bytes[cursor..]);
-    Ok((ns, id, data))
 }
 
 /// Placeholder for binary data in JSON payloads.
-///
-/// When sending binary events, the JSON payload contains `BinaryPlaceholder` placeholders
-/// that reference positions in the `attachments` array.
-///
-/// # Wire Format
-///
-/// Serializes to: `{"_placeholder":true,"num":<index>}`
-///
-/// # Example
-///
-/// ```rust
-/// use sioc_core::packet::BinaryPlaceholder;
-///
-/// let idx = BinaryPlaceholder::new(0);
-/// let json = serde_json::to_string(&idx).unwrap();
-/// assert!(json.contains("_placeholder"));
-/// assert!(json.contains("\"num\":0"));
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BinaryPlaceholder {
     /// Always `true` to identify this as a placeholder.
@@ -372,6 +274,9 @@ pub struct BinaryPlaceholder {
 }
 impl BinaryPlaceholder {
     /// Create a new binary index placeholder.
+    ///
+    /// # Arguments
+    /// * `index` - The index into the attachments array
     ///
     /// # Example
     ///

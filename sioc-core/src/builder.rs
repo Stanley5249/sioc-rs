@@ -6,9 +6,7 @@
 
 use crate::client::SocketSender;
 use crate::error::Result;
-use crate::event::Event;
-use crate::packet::Attachments;
-use crate::packet::Payload;
+use crate::packet::EventPacket;
 use bytes::Bytes;
 use tokio::sync::oneshot;
 
@@ -17,34 +15,22 @@ use tokio::sync::oneshot;
 /// Provides a fluent API for attaching binary data and choosing
 /// between Fast Path and Safe Path emission.
 #[derive(Debug)]
-pub struct EventBuilder<'a, E: Event> {
+pub struct EventBuilder<'a> {
     /// The socket sender.
     sender: &'a SocketSender,
 
-    /// Namespace for the event.
-    ns: String,
-
-    /// The event data.
-    event: E,
-
-    /// Binary attachments to include.
-    attachments: Attachments,
+    /// The event packet.
+    packet: EventPacket,
 }
 
-impl<'a, E: Event> EventBuilder<'a, E> {
+impl<'a> EventBuilder<'a> {
     /// Create a new EventBuilder.
     ///
     /// # Arguments
     /// * `sender` - The socket sender
-    /// * `ns` - The namespace
-    /// * `event` - The event to build
-    pub fn new(sender: &'a SocketSender, ns: String, event: E) -> Self {
-        Self {
-            sender,
-            ns,
-            event,
-            attachments: Attachments::new(),
-        }
+    /// * `packet` - The event packet
+    pub fn new(sender: &'a SocketSender, packet: EventPacket) -> Self {
+        Self { sender, packet }
     }
 
     /// Attach binary data to this event.
@@ -55,45 +41,25 @@ impl<'a, E: Event> EventBuilder<'a, E> {
     /// # Returns
     /// Self for chaining.
     pub fn attach(mut self, bin: Bytes) -> Self {
-        self.attachments.push(bin);
+        self.packet.attachments.push(bin);
         self
     }
 
     /// Emit this event via the Fast Path (no acknowledgement expected).
     ///
-    /// Serializes the event, constructs a Packet, and sends it directly
-    /// to the Engine without Router involvement.
+    /// Sends the packet directly to the Engine without Router involvement.
     pub async fn emit(self) -> Result<()> {
-        let mut payload = self.event.into_event_payload()?;
-
-        // Merge manual attachments
-        if !self.attachments.is_empty() {
-            payload.attachments.extend(self.attachments);
-        }
-
-        let packet = crate::packet::Packet {
-            ns: self.ns,
-            inner: crate::packet::Payload::Event(payload),
-        };
-
+        let packet = crate::packet::Packet::Event(self.packet);
         self.sender.emit(packet).await
     }
 
     /// Emit this event via the Safe Path (acknowledgement expected).
     ///
-    /// Serializes the event, constructs an EventPayload, and sends it
-    /// through the Router for ID assignment and reply registration.
+    /// Sends the packet through the Router for ID assignment and reply registration.
     ///
     /// # Returns
     /// A oneshot receiver for the acknowledgement reply.
-    pub async fn ack(self) -> Result<oneshot::Receiver<Payload>> {
-        let mut payload = self.event.into_event_payload()?;
-
-        // Merge manual attachments
-        if !self.attachments.is_empty() {
-            payload.attachments.extend(self.attachments);
-        }
-
-        self.sender.emit_with_ack(self.ns, payload).await
+    pub async fn ack(self) -> Result<oneshot::Receiver<crate::packet::Packet>> {
+        self.sender.emit_with_ack(self.packet).await
     }
 }

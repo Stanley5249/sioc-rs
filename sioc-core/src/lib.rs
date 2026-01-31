@@ -12,6 +12,7 @@
 pub mod builder;
 pub mod client;
 pub mod error;
+/// Event handling traits and types.
 pub mod event;
 pub mod packet;
 pub mod router;
@@ -27,9 +28,7 @@ pub mod prelude {
     pub use crate::client::{SocketReceiver, SocketSender, connect, emit, event};
     pub use crate::error::{Error, Result};
     pub use crate::event::Event;
-    pub use crate::packet::{
-        AckPayload, Attachments, BinaryPlaceholder, EventPayload, Packet, Payload,
-    };
+    pub use crate::packet::{AckPacket, Attachments, BinaryPlaceholder, EventPacket, Packet};
     pub use crate::router::RouterCommand;
 }
 

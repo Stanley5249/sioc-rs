@@ -11,6 +11,11 @@ pub enum Error {
     #[diagnostic(code(sioc::json_error))]
     Json(#[from] serde_json::Error),
 
+    /// UTF-8 decoding error
+    #[error("UTF-8 error: {0}")]
+    #[diagnostic(code(sioc::utf8_error))]
+    Utf8(#[from] std::str::Utf8Error),
+
     /// Network I/O error
     #[error("Network error: {0}")]
     #[diagnostic(code(sioc::network_error))]

@@ -5,10 +5,9 @@
 //! - `SocketReceiver` streams incoming packets
 //! - `Client` is the public handle for connection management
 
-use crate::builder::EventBuilder;
 use crate::error::Result;
 use crate::event::Event;
-use crate::packet::{EventPayload, Packet, Payload};
+use crate::packet::Packet;
 use crate::router::{RouterCommand, router_loop};
 use sioc_engine::prelude::EngineSender;
 use tokio::sync::{mpsc, oneshot};
@@ -60,8 +59,10 @@ pub async fn connect(url: String) -> Result<((SocketSender, SocketReceiver), Joi
 ///
 /// # Returns
 /// An `EventBuilder` for chaining attachments and choosing emission path.
-pub fn event<E: Event>(sender: &SocketSender, event: E) -> EventBuilder<'_, E> {
-    EventBuilder::new(sender, "/".to_string(), event)
+pub fn event<E: Event>(sender: &SocketSender, event: E) -> crate::builder::EventBuilder<'_> {
+    let data = event.to_json().expect("Serialization failed");
+    let packet = crate::packet::EventPacket::new("/".into(), data);
+    crate::builder::EventBuilder::new(sender, packet)
 }
 
 /// Emits a packet directly to the server (Fast Path).
@@ -91,7 +92,6 @@ impl SocketSender {
     /// Use this for events that don't expect acknowledgements.
     /// The packet goes directly to the Engine for immediate network write.
     pub async fn emit(&self, packet: Packet) -> Result<()> {
-        // CHANGED: Use strict conversion
         let engine_packet = packet.to_engine_packet();
         self.engine_tx
             .send(engine_packet)
@@ -99,7 +99,7 @@ impl SocketSender {
             .map_err(|_| crate::error::Error::Closed)
     }
 
-    /// Emit an event payload expecting an acknowledgement (Safe Path).
+    /// Emit an event packet expecting an acknowledgement (Safe Path).
     ///
     /// The Router will assign an ID, register the reply channel,
     /// and ensure proper sequencing before network write.
@@ -108,15 +108,10 @@ impl SocketSender {
     /// A oneshot receiver for the acknowledgement reply.
     pub async fn emit_with_ack(
         &self,
-        ns: String,
-        payload: EventPayload,
-    ) -> Result<oneshot::Receiver<Payload>> {
-        let (tx, rx) = oneshot::channel();
-        let cmd = RouterCommand::EmitWithAck {
-            ns,
-            data: payload,
-            tx,
-        };
+        packet: crate::packet::EventPacket,
+    ) -> Result<oneshot::Receiver<crate::packet::Packet>> {
+        let (tx, rx) = oneshot::channel::<crate::packet::Packet>();
+        let cmd = RouterCommand::EmitWithAck { packet, tx };
         self.router_tx
             .send(cmd)
             .await

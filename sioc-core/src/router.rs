@@ -5,7 +5,7 @@
 //! network writes.
 
 use crate::error::Result;
-use crate::packet::{EventPayload, Packet, Payload};
+use crate::packet::{AckPacket, EventPacket, Packet};
 use sioc_engine::packet::{Message as EngineMessage, Packet as EnginePacket};
 use sioc_engine::prelude::{EngineReceiver, EngineSender};
 use std::collections::HashMap;
@@ -22,14 +22,11 @@ pub enum RouterCommand {
     /// The Router will assign a unique ID, register the reply channel,
     /// and then send the packet to the Engine.
     EmitWithAck {
-        /// Namespace for the event.
-        ns: String,
-
-        /// Event payload data (ID will be assigned by Router).
-        data: EventPayload,
+        /// Event packet data (ID will be assigned by Router).
+        packet: EventPacket,
 
         /// Channel to send the acknowledgement reply through.
-        tx: oneshot::Sender<Payload>,
+        tx: oneshot::Sender<Packet>,
     },
 }
 
@@ -51,7 +48,7 @@ pub async fn router_loop(
     mut cmd_rx: mpsc::Receiver<RouterCommand>,
     event_tx: mpsc::Sender<Packet>,
 ) {
-    let mut acks: HashMap<u64, oneshot::Sender<Payload>> = HashMap::new();
+    let mut acks: HashMap<u64, oneshot::Sender<Packet>> = HashMap::new();
     let mut next_id = 0u64;
 
     loop {
@@ -59,24 +56,13 @@ pub async fn router_loop(
             // Handle Safe Path commands
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
-                    RouterCommand::EmitWithAck { ns, mut data, tx } => {
-                        // Inject unique ID
-                        data.id = Some(next_id);
-
-                        // Register acknowledgement channel
+                    RouterCommand::EmitWithAck { mut packet, tx } => {
+                        packet.id = Some(next_id);
                         acks.insert(next_id, tx);
-
-                        // Increment for next event
                         next_id += 1;
 
-                        // Construct and send packet
-                        let packet = Packet {
-                            ns,
-                            inner: Payload::Event(data),
-                        };
-
-                        if send_packet_with_attachments(&engine_tx, &packet).await.is_err() {
-                            // If send fails, remove from acks
+                        let full_packet = Packet::Event(packet);
+                        if send_packet_with_attachments(&engine_tx, &full_packet).await.is_err() {
                             acks.remove(&(next_id - 1));
                         }
                     }
@@ -106,14 +92,12 @@ pub async fn router_loop(
 
 /// Send a Socket.IO packet to the Engine, handling attachments properly.
 async fn send_packet_with_attachments(engine_tx: &EngineSender, packet: &Packet) -> Result<()> {
-    // CHANGED: Use new explicit conversion method
     let engine_packet = packet.to_engine_packet();
     engine_tx.send(engine_packet).await?;
 
-    // CHANGED: Explicit matching on payload types
-    let attachments = match &packet.inner {
-        Payload::Event(p) => &p.attachments,
-        Payload::Ack(p) => &p.attachments,
+    let attachments = match packet {
+        Packet::Event(p) => &p.attachments,
+        Packet::Ack(p) => &p.attachments,
         _ => return Ok(()),
     };
 
@@ -129,7 +113,7 @@ async fn handle_engine_packet(
     engine_packet: EnginePacket,
     engine_tx: &EngineSender,
     engine_rx: &mut EngineReceiver,
-    acks: &mut HashMap<u64, oneshot::Sender<Payload>>,
+    acks: &mut HashMap<u64, oneshot::Sender<Packet>>,
     event_tx: &mpsc::Sender<Packet>,
 ) -> Result<bool> {
     match engine_packet {
@@ -144,48 +128,55 @@ async fn handle_engine_packet(
                 Packet::try_from(EnginePacket::Message(EngineMessage::Text(bytes)))
             {
                 // Assemble attachments if needed
-                let attachment_count = match &packet.inner {
-                    Payload::Event(p) => p.attachment_count(),
-                    Payload::Ack(p) => p.attachment_count(),
-                    _ => 0,
-                };
-                if attachment_count > 0 {
-                    let attachments = match &mut packet.inner {
-                        Payload::Event(payload) => &mut payload.attachments,
-                        Payload::Ack(payload) => &mut payload.attachments,
-                        _ => return Ok(true), // Other types shouldn't have attachments
-                    };
-
-                    for _ in 0..attachment_count {
-                        loop {
-                            match engine_rx.recv().await {
-                                Ok(EnginePacket::Message(EngineMessage::Binary(bin))) => {
-                                    attachments.push(bin);
-                                    break;
+                match &mut packet {
+                    Packet::Event(p) => {
+                        for _ in 0..p.attachment_count {
+                            loop {
+                                match engine_rx.recv().await {
+                                    Ok(EnginePacket::Message(EngineMessage::Binary(bin))) => {
+                                        p.attachments.push(bin);
+                                        break;
+                                    }
+                                    Ok(EnginePacket::Ping(d)) => {
+                                        engine_tx.send(EnginePacket::Pong(d)).await?;
+                                    }
+                                    Ok(EnginePacket::Close) => return Ok(false),
+                                    _ => {} // Ignore unexpected
                                 }
-                                Ok(EnginePacket::Ping(d)) => {
-                                    engine_tx.send(EnginePacket::Pong(d)).await?;
-                                }
-                                Ok(EnginePacket::Close) => return Ok(false),
-                                _ => {} // Ignore unexpected
                             }
                         }
                     }
+                    Packet::Ack(p) => {
+                        for _ in 0..p.attachment_count {
+                            loop {
+                                match engine_rx.recv().await {
+                                    Ok(EnginePacket::Message(EngineMessage::Binary(bin))) => {
+                                        p.attachments.push(bin);
+                                        break;
+                                    }
+                                    Ok(EnginePacket::Ping(d)) => {
+                                        engine_tx.send(EnginePacket::Pong(d)).await?;
+                                    }
+                                    Ok(EnginePacket::Close) => return Ok(false),
+                                    _ => {} // Ignore unexpected
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
 
                 // Route the packet
-                match &packet.inner {
-                    Payload::Ack(payload) => {
-                        // Route acknowledgement to waiting sender
-                        if let Some(tx) = acks.remove(&payload.ack_id) {
-                            let _ = tx.send(Payload::Ack(payload.clone()));
+                match packet {
+                    Packet::Ack(p) => {
+                        if let Some(tx) = acks.remove(&p.ack_id) {
+                            let _ = tx.send(Packet::Ack(p));
                         }
                     }
-                    Payload::Event(_)
-                    | Payload::Connect
-                    | Payload::Disconnect
-                    | Payload::ConnectError(_) => {
-                        // Forward to user event stream
+                    Packet::Event(_)
+                    | Packet::Connect { .. }
+                    | Packet::Disconnect { .. }
+                    | Packet::ConnectError { .. } => {
                         let _ = event_tx.send(packet).await;
                     }
                 }
