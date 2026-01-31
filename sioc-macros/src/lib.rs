@@ -28,7 +28,7 @@ use proc_macro::TokenStream;
 use syn::{DeriveInput, parse_macro_input};
 
 mod codegen;
-mod emit;
+mod event;
 mod input;
 
 /// Derive macro for generating Event trait implementation.
@@ -58,7 +58,7 @@ mod input;
 pub fn derive_event(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
-    emit::expand(input)
+    event::expand(input)
         .unwrap_or_else(|err| err.to_compile_error())
         .into()
 }
