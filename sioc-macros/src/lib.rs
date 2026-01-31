@@ -1,3 +1,5 @@
+#![warn(missing_docs, clippy::all)]
+
 //! Procedural macros for Sioc - derive `Event`.
 //!
 //! This crate provides derive macros that generate type-safe Socket.IO protocol
@@ -11,19 +13,16 @@
 //!
 //! ```rust,ignore
 //! use sioc_macros::Event;
-//! use serde::Serialize;
 //!
-//! #[derive(Event, Serialize)]
+//! #[derive(Event)]
 //! enum OutgoingEvents {
-//!     #[event(name = "message")]
+//!     #[sioc(event = "message")]
 //!     Message(String),
 //!
-//!     #[event(name = "join")]
+//!     #[sioc(event = "join")]
 //!     JoinRoom { room: String },
 //! }
 //! ```
-
-#![warn(missing_docs, clippy::all)]
 
 use proc_macro::TokenStream;
 use syn::{DeriveInput, parse_macro_input};
@@ -39,17 +38,16 @@ mod emit;
 ///
 /// ```rust,ignore
 /// use sioc_macros::Event;
-/// use serde::Serialize;
 ///
-/// #[derive(Event, Serialize)]
+/// #[derive(Event)]
 /// enum Events {
-///     #[event(name = "ping")]
+///     #[sioc(event = "ping")]
 ///     Ping,
 ///
-///     #[event(name = "message")]
+///     #[sioc(event = "message")]
 ///     Message(String),
 ///
-///     #[event(name = "upload")]
+///     #[sioc(event = "upload")]
 ///     Upload {
 ///         filename: String,
 ///         data: BinaryIndex,
@@ -63,15 +61,15 @@ mod emit;
 ///
 /// # Attributes
 ///
-/// - #[event(name = "name")] - Required. Specifies the Socket.IO event name.
+/// - #[sioc(event = "name")] - Required. Specifies the Socket.IO event name.
 ///
 /// # Generated Code
 ///
 /// The macro generates:
 /// - name() method returning the event name
-/// - to_json() method for serialization
+/// - to_payload() method for serialization
 /// - Full Event trait implementation
-#[proc_macro_derive(Event, attributes(event))]
+#[proc_macro_derive(Event, attributes(sioc))]
 pub fn derive_event(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 

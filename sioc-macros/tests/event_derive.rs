@@ -1,55 +1,63 @@
-use serde::Serialize;
 use sioc_core::event::Event;
 use sioc_macros::Event;
 
-#[derive(Event, Serialize)]
+// No Serialize derive needed on these structs/enums!
+
+#[derive(Event)]
 enum TestEvents {
-    #[event(name = "ping")]
+    #[sioc(event = "ping")]
     Ping,
-
-    #[event(name = "message")]
+    #[sioc(event = "message")]
     Message(String),
-
-    #[event(name = "user")]
-    User { id: u32, name: String },
-
-    #[event(name = "data")]
-    Data(u32, String, bool),
 }
 
+#[derive(Event)]
+#[sioc(event = "struct_event")]
+struct MyStruct {
+    foo: String,
+    bar: i32,
+}
+
+#[derive(Event)]
+#[sioc(event = "new_type")]
+struct MyWrapper(String, i32);
+
 #[test]
-fn test_unit_variant() {
+fn test_ping_event() {
     let evt = TestEvents::Ping;
     assert_eq!(evt.name(), "ping");
-    assert_eq!(evt.to_json().unwrap().as_ref(), b"[\"ping\"]");
+    assert_eq!(evt.to_payload().unwrap().as_ref(), b"[\"ping\"]");
 }
 
 #[test]
-fn test_tuple_variant_single_field() {
-    let evt = TestEvents::Message("hello".to_string());
-    assert_eq!(evt.name(), "message");
-    assert_eq!(evt.to_json().unwrap().as_ref(), b"[\"message\",\"hello\"]");
-}
-
-#[test]
-fn test_tuple_variant_multiple_fields() {
-    let evt = TestEvents::Data(42, "test".to_string(), true);
-    assert_eq!(evt.name(), "data");
+fn test_message_event() {
+    let msg = TestEvents::Message("hello world".to_string());
+    assert_eq!(msg.name(), "message");
     assert_eq!(
-        evt.to_json().unwrap().as_ref(),
-        b"[\"data\",42,\"test\",true]"
+        msg.to_payload().unwrap().as_ref(),
+        b"[\"message\",\"hello world\"]"
     );
 }
 
 #[test]
-fn test_struct_variant() {
-    let evt = TestEvents::User {
-        id: 1,
-        name: "alice".into(),
+fn test_struct_event() {
+    let s = MyStruct {
+        foo: "a".into(),
+        bar: 1,
     };
-    assert_eq!(evt.name(), "user");
+    assert_eq!(s.name(), "struct_event");
     assert_eq!(
-        evt.to_json().unwrap().as_ref(),
-        b"[\"user\",{\"id\":1,\"name\":\"alice\"}]"
+        s.to_payload().unwrap().as_ref(),
+        b"[\"struct_event\",{\"foo\":\"a\",\"bar\":1}]"
+    );
+}
+
+#[test]
+fn test_wrapper_event() {
+    let w = MyWrapper("inner".into(), 99);
+    assert_eq!(w.name(), "new_type");
+    assert_eq!(
+        w.to_payload().unwrap().as_ref(),
+        b"[\"new_type\",\"inner\",99]"
     );
 }

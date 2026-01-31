@@ -5,9 +5,10 @@
 //! - `SocketReceiver` streams incoming packets
 //! - `Client` is the public handle for connection management
 
+use crate::builder::EventBuilder;
 use crate::error::Result;
 use crate::event::Event;
-use crate::packet::Packet;
+use crate::packet::{EventPacket, Packet};
 use crate::router::{RouterCommand, router_loop};
 use sioc_engine::prelude::EngineSender;
 use tokio::sync::{mpsc, oneshot};
@@ -59,10 +60,10 @@ pub async fn connect(url: String) -> Result<((SocketSender, SocketReceiver), Joi
 ///
 /// # Returns
 /// An `EventBuilder` for chaining attachments and choosing emission path.
-pub fn event<E: Event>(sender: &SocketSender, event: E) -> crate::builder::EventBuilder<'_> {
-    let data = event.to_json().expect("Serialization failed");
-    let packet = crate::packet::EventPacket::new("/".into(), data);
-    crate::builder::EventBuilder::new(sender, packet)
+pub fn event<E: Event>(sender: &SocketSender, event: E) -> Result<EventBuilder<'_>> {
+    let data = event.to_payload()?;
+    let packet = EventPacket::new("/".into(), data);
+    Ok(EventBuilder::new(sender, packet))
 }
 
 /// Emits a packet directly to the server (Fast Path).
@@ -108,7 +109,7 @@ impl SocketSender {
     /// A oneshot receiver for the acknowledgement reply.
     pub async fn emit_with_ack(
         &self,
-        packet: crate::packet::EventPacket,
+        packet: EventPacket,
     ) -> Result<oneshot::Receiver<crate::packet::Packet>> {
         let (tx, rx) = oneshot::channel::<crate::packet::Packet>();
         let cmd = RouterCommand::EmitWithAck { packet, tx };

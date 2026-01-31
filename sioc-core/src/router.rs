@@ -6,8 +6,9 @@
 
 use crate::error::Result;
 use crate::packet::{EventPacket, Packet};
-use sioc_engine::packet::{Message as EngineMessage, Packet as EnginePacket};
-use sioc_engine::prelude::{EngineReceiver, EngineSender};
+use sioc_engine::prelude::{
+    EngineReceiver, EngineSender, Message as EngineMessage, Packet as EnginePacket,
+};
 use std::collections::HashMap;
 use tokio::sync::{mpsc, oneshot};
 
