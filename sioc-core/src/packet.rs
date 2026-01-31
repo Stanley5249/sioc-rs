@@ -1,4 +1,4 @@
-//! Socket.IO packet types and wire protocol representation.
+//! Socket.IO packet types.
 
 use crate::error::{Error, Result};
 use bytes::{BufMut, Bytes, BytesMut};
@@ -13,15 +13,15 @@ pub type Attachments = SmallVec<[Bytes; 1]>;
 /// Packet for sending/receiving events (types 2/5).
 #[derive(Debug, Clone)]
 pub struct EventPacket {
-    /// Namespace for the event.
+    /// Namespace.
     pub ns: String,
-    /// Optional acknowledgement ID.
+    /// Optional packet ID.
     pub id: Option<u64>,
-    /// Event data payload.
+    /// Event data.
     pub data: Bytes,
     /// Binary attachments.
     pub attachments: Attachments,
-    /// Number of expected attachments.
+    /// Number of attachments.
     pub attachment_count: usize,
 }
 
@@ -46,15 +46,15 @@ impl EventPacket {
 /// Packet for acknowledgements (types 3/6).
 #[derive(Debug, Clone)]
 pub struct AckPacket {
-    /// Namespace for the acknowledgement.
+    /// Namespace.
     pub ns: String,
     /// Acknowledgement ID.
     pub ack_id: u64,
-    /// Response data payload.
+    /// Acknowledgement data.
     pub data: Bytes,
     /// Binary attachments.
     pub attachments: Attachments,
-    /// Number of expected attachments.
+    /// Number of attachments.
     pub attachment_count: usize,
 }
 
@@ -68,28 +68,28 @@ impl AckPacket {
 /// Top-level Packet Enum.
 #[derive(Debug, Clone)]
 pub enum Packet {
-    /// Connect to a namespace (type 0).
+    /// Connect packet.
     Connect {
         /// Namespace.
         ns: String,
         /// Optional session ID.
         sid: Option<String>,
     },
-    /// Disconnect from a namespace (type 1).
+    /// Disconnect packet.
     Disconnect {
         /// Namespace.
         ns: String,
     },
-    /// Connection error from server (type 4).
+    /// Connect error packet.
     ConnectError {
         /// Namespace.
         ns: String,
         /// Error message.
         message: String,
     },
-    /// Event packet with JSON payload (types 2/5).
+    /// Event packet.
     Event(EventPacket),
-    /// Acknowledgement response (types 3/6).
+    /// Acknowledgement packet.
     Ack(AckPacket),
 }
 
@@ -157,7 +157,7 @@ impl Packet {
 
 // Modular Parsing Functions
 
-/// Parses packet type and attachment count. Returns (type_char, attachment_count, remaining).
+/// Parses packet type and attachment count.
 fn parse_type(input: &str) -> Result<(char, usize, &str)> {
     let mut chars = input.chars();
     let type_char = chars.next().ok_or(Error::InvalidPacket)?;
@@ -176,7 +176,7 @@ fn parse_type(input: &str) -> Result<(char, usize, &str)> {
     Ok((type_char, attachments, rest))
 }
 
-/// Parses namespace. Returns (namespace, remaining).
+/// Parses namespace.
 fn parse_namespace(input: &str) -> Result<(&str, &str)> {
     if input.starts_with('/') {
         if let Some((ns, rest)) = input.split_once(',') {
@@ -189,7 +189,7 @@ fn parse_namespace(input: &str) -> Result<(&str, &str)> {
     }
 }
 
-/// Parses packet ID. Returns (id, remaining).
+/// Parses packet ID.
 fn parse_id(input: &str) -> Result<(Option<u64>, &str)> {
     if input.is_empty() {
         return Ok((None, input));
@@ -210,7 +210,6 @@ impl TryFrom<EnginePacket> for Packet {
     type Error = Error;
 
     fn try_from(packet: EnginePacket) -> Result<Self> {
-        // STRICT CHECK: Only accept Message packets.
         let EnginePacket::Message(msg) = packet else {
             return Err(Error::InvalidPacket);
         };
@@ -225,7 +224,6 @@ impl TryFrom<EnginePacket> for Packet {
             return Err(Error::InvalidPacket);
         }
 
-        // Use modular functions
         let (type_char, attachments, rest) = parse_type(text)?;
         let (ns_str, rest) = parse_namespace(rest)?;
         let (id, rest) = parse_id(rest)?;
@@ -240,7 +238,7 @@ impl TryFrom<EnginePacket> for Packet {
                 ns,
                 id,
                 data,
-                attachments: SmallVec::new(), // Filled later by router
+                attachments: SmallVec::new(),
                 attachment_count: attachments,
             })),
             '3' | '6' => {
@@ -265,28 +263,15 @@ impl TryFrom<EnginePacket> for Packet {
 /// Placeholder for binary data in JSON payloads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BinaryPlaceholder {
-    /// Always `true` to identify this as a placeholder.
+    /// Placeholder flag.
     #[serde(rename = "_placeholder")]
     pub placeholder: bool,
-    /// Index into the attachments array.
+    /// Index of the binary data.
     #[serde(rename = "num")]
     pub index: usize,
 }
 impl BinaryPlaceholder {
-    /// Create a new binary index placeholder.
-    ///
-    /// # Arguments
-    /// * `index` - The index into the attachments array
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use sioc_core::packet::BinaryPlaceholder;
-    ///
-    /// let idx = BinaryPlaceholder::new(0);
-    /// assert_eq!(idx.index, 0);
-    /// assert!(idx.placeholder);
-    /// ```
+    /// Create a new BinaryPlaceholder.
     pub fn new(index: usize) -> Self {
         Self {
             placeholder: true,

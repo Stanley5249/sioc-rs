@@ -1,8 +1,4 @@
 //! Router task for handling Safe Path events with acknowledgements.
-//!
-//! The Router manages ID assignment and acknowledgement registration
-//! for events that expect replies, ensuring proper sequencing before
-//! network writes.
 
 use crate::error::Result;
 use crate::packet::{EventPacket, Packet};
@@ -13,36 +9,18 @@ use std::collections::HashMap;
 use tokio::sync::{mpsc, oneshot};
 
 /// Commands sent to the Router task for Safe Path processing.
-///
-/// The Router handles events that require acknowledgement by assigning
-/// unique IDs and registering reply channels before forwarding to the Engine.
 #[derive(Debug)]
 pub enum RouterCommand {
     /// Emit an event that expects an acknowledgement.
-    ///
-    /// The Router will assign a unique ID, register the reply channel,
-    /// and then send the packet to the Engine.
     EmitWithAck {
-        /// Event packet data (ID will be assigned by Router).
+        /// Packet to emit.
         packet: EventPacket,
-
-        /// Channel to send the acknowledgement reply through.
+        /// Sender for acknowledgement.
         tx: oneshot::Sender<Packet>,
     },
 }
 
 /// The main router loop that manages Safe Path events and acknowledgements.
-///
-/// This function runs in a background task and coordinates between:
-/// - User commands (Safe Path emissions)
-/// - Engine packets (network I/O)
-/// - Acknowledgement routing
-///
-/// # Arguments
-/// * `engine_rx` - Receiver for packets from the Engine
-/// * `engine_tx` - Sender for packets to the Engine
-/// * `cmd_rx` - Receiver for Router commands
-/// * `event_tx` - Sender for user event stream
 pub async fn router_loop(
     mut engine_rx: EngineReceiver,
     engine_tx: EngineSender,
@@ -91,7 +69,7 @@ pub async fn router_loop(
     }
 }
 
-/// Send a Socket.IO packet to the Engine, handling attachments properly.
+/// Send a Socket.IO packet to the Engine.
 async fn send_packet_with_attachments(engine_tx: &EngineSender, packet: &Packet) -> Result<()> {
     let engine_packet = packet.to_engine_packet();
     engine_tx.send(engine_packet).await?;
@@ -109,7 +87,7 @@ async fn send_packet_with_attachments(engine_tx: &EngineSender, packet: &Packet)
     Ok(())
 }
 
-/// Handle an incoming Engine packet, parsing and routing appropriately.
+/// Handle an incoming Engine packet.
 async fn handle_engine_packet(
     engine_packet: EnginePacket,
     engine_tx: &EngineSender,

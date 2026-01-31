@@ -3,7 +3,7 @@
 //! Procedural macros for Sioc - derive `Event`.
 //!
 //! This crate provides derive macros that generate type-safe Socket.IO protocol
-//! definitions from Rust enums.
+//! definitions from Rust enums and structs.
 //!
 //! ## Macros
 //!
@@ -16,11 +16,11 @@
 //!
 //! #[derive(Event)]
 //! enum OutgoingEvents {
+//!     #[sioc(event = "ping")]
+//!     Ping,
+//!
 //!     #[sioc(event = "message")]
 //!     Message(String),
-//!
-//!     #[sioc(event = "join")]
-//!     JoinRoom { room: String },
 //! }
 //! ```
 
@@ -32,7 +32,7 @@ mod emit;
 /// Derive macro for generating Event trait implementation.
 ///
 /// This macro implements the `Event` trait which provides event name
-/// extraction and binary detection for Socket.IO events.
+/// extraction and JSON serialization for Socket.IO events.
 ///
 /// # Example
 ///
@@ -46,29 +46,12 @@ mod emit;
 ///
 ///     #[sioc(event = "message")]
 ///     Message(String),
-///
-///     #[sioc(event = "upload")]
-///     Upload {
-///         filename: String,
-///         data: BinaryIndex,
-///     },
 /// }
-///
-/// // Usage:
-/// // client.emit(Events::Ping).await?;
-/// // client.emit(Events::Message("hello".into())).await?;
 /// ```
 ///
 /// # Attributes
 ///
 /// - #[sioc(event = "name")] - Required. Specifies the Socket.IO event name.
-///
-/// # Generated Code
-///
-/// The macro generates:
-/// - name() method returning the event name
-/// - to_payload() method for serialization
-/// - Full Event trait implementation
 #[proc_macro_derive(Event, attributes(sioc))]
 pub fn derive_event(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);

@@ -1,9 +1,4 @@
-//! Client actor implementation for sioc-core.
-//!
-//! This module implements the "Router-Centric" architecture where:
-//! - `SocketSender` provides dual-path emission (Fast vs Safe)
-//! - `SocketReceiver` streams incoming packets
-//! - `Client` is the public handle for connection management
+//! Client implementation for sioc-core.
 
 use crate::builder::EventBuilder;
 use crate::error::Result;
@@ -14,16 +9,13 @@ use sioc_engine::prelude::EngineSender;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-/// Public Client Handle.
-///
 /// Connect to the server and spawn the background router task.
 ///
 /// # Arguments
 /// * `url` - The server URL (e.g., "http://localhost:3000")
 ///
 /// # Returns
-/// A tuple of `((SocketSender, SocketReceiver), JoinHandle)` where the handle can be used to
-/// wait for the router task to complete.
+/// A tuple of `((SocketSender, SocketReceiver), JoinHandle)`.
 pub async fn connect(url: String) -> Result<((SocketSender, SocketReceiver), JoinHandle<()>)> {
     // 1. Setup Engine (Active Actor)
     let (engine_tx, engine_rx) = sioc_engine::builder::ClientBuilder::new(url.parse()?)
@@ -59,7 +51,7 @@ pub async fn connect(url: String) -> Result<((SocketSender, SocketReceiver), Joi
 /// * `event` - The event to emit
 ///
 /// # Returns
-/// An `EventBuilder` for chaining attachments and choosing emission path.
+/// An `EventBuilder`.
 pub fn event<E: Event>(sender: &SocketSender, event: E) -> Result<EventBuilder<'_>> {
     let data = event.to_payload()?;
     let packet = EventPacket::new("/".into(), data);
@@ -68,16 +60,12 @@ pub fn event<E: Event>(sender: &SocketSender, event: E) -> Result<EventBuilder<'
 
 /// Emits a packet directly to the server (Fast Path).
 ///
-/// This bypasses the Router and sends the packet immediately.
-/// Use for packets that don't require acknowledgements.
+/// Bypasses the Router. Use for packets that don't require acknowledgements.
 pub async fn emit(sender: &SocketSender, packet: Packet) -> Result<()> {
     sender.emit(packet).await
 }
 
 /// Dual-path sender for Socket.IO packets.
-///
-/// Provides both Fast Path (direct to Engine) and Safe Path (via Router)
-/// emission strategies.
 #[derive(Clone, Debug)]
 pub struct SocketSender {
     /// Direct channel to the Engine for Fast Path.
@@ -90,8 +78,7 @@ pub struct SocketSender {
 impl SocketSender {
     /// Emit a packet via the Fast Path (bypasses Router).
     ///
-    /// Use this for events that don't expect acknowledgements.
-    /// The packet goes directly to the Engine for immediate network write.
+    /// Use for events that don't expect acknowledgements.
     pub async fn emit(&self, packet: Packet) -> Result<()> {
         let engine_packet = packet.to_engine_packet();
         self.engine_tx
@@ -101,9 +88,6 @@ impl SocketSender {
     }
 
     /// Emit an event packet expecting an acknowledgement (Safe Path).
-    ///
-    /// The Router will assign an ID, register the reply channel,
-    /// and ensure proper sequencing before network write.
     ///
     /// # Returns
     /// A oneshot receiver for the acknowledgement reply.
@@ -122,6 +106,4 @@ impl SocketSender {
 }
 
 /// Receiver for incoming Socket.IO packets.
-///
-/// This is a type alias for the packet stream from the Router.
 pub type SocketReceiver = mpsc::Receiver<Packet>;
