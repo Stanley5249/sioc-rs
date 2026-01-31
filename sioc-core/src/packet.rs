@@ -32,7 +32,7 @@ impl EventPacket {
             ns,
             id: None,
             data,
-            attachments: SmallVec::new(),
+            attachments: Attachments::new(),
             attachment_count: 0,
         }
     }
@@ -238,7 +238,7 @@ impl TryFrom<EnginePacket> for Packet {
                 ns,
                 id,
                 data,
-                attachments: SmallVec::new(),
+                attachments: Attachments::new(),
                 attachment_count: attachments,
             })),
             '3' | '6' => {
@@ -247,7 +247,7 @@ impl TryFrom<EnginePacket> for Packet {
                     ns,
                     ack_id,
                     data,
-                    attachments: SmallVec::new(),
+                    attachments: Attachments::new(),
                     attachment_count: attachments,
                 }))
             }
