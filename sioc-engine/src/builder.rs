@@ -4,14 +4,11 @@ use crate::{
     socket::{heartbeat_loop, send_loop},
     transport,
     transport::{TransportReceiver, TransportSender},
-    EngineReceiver, EngineSender,
+    EngineReceiver, EngineSender, ENGINE_IO_VERSION,
 };
 use http::HeaderMap;
 use tokio::sync::mpsc;
 use url::Url;
-
-/// The engine.io version used by this crate
-pub const ENGINE_IO_VERSION: u64 = 3;
 
 #[derive(Clone, Debug)]
 pub struct ClientBuilder {
