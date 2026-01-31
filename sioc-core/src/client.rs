@@ -54,7 +54,7 @@ pub async fn connect(url: String) -> Result<((SocketSender, SocketReceiver), Joi
 /// An `EventBuilder`.
 pub fn event<E: Event>(sender: &SocketSender, event: E) -> Result<EventBuilder<'_>> {
     let data = event.to_payload()?;
-    let packet = EventPacket::new("/".into(), data);
+    let packet = EventPacket::new("/".into(), data.into());
     Ok(EventBuilder::new(sender, packet))
 }
 

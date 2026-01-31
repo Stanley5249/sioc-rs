@@ -27,7 +27,9 @@
 use proc_macro::TokenStream;
 use syn::{DeriveInput, parse_macro_input};
 
+mod codegen;
 mod emit;
+mod input;
 
 /// Derive macro for generating Event trait implementation.
 ///

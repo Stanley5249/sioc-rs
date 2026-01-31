@@ -41,7 +41,7 @@ pub async fn send_loop(mut transport: TransportSender, mut rx: mpsc::Receiver<Pa
     while let Some(packet) = rx.recv().await {
         let is_close = matches!(packet, Packet::Close);
         let msg = packet.into_message();
-        if let Err(_) = transport.send(msg).await {
+        if transport.send(msg).await.is_err() {
             break;
         }
         if is_close {
