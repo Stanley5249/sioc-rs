@@ -15,10 +15,10 @@
 //!
 //! #[derive(Event, Serialize)]
 //! enum OutgoingEvents {
-//!     #[event("message")]
+//!     #[event(name = "message")]
 //!     Message(String),
 //!
-//!     #[event("join")]
+//!     #[event(name = "join")]
 //!     JoinRoom { room: String },
 //! }
 //! ```
@@ -29,7 +29,6 @@ use proc_macro::TokenStream;
 use syn::{DeriveInput, parse_macro_input};
 
 mod emit;
-mod util;
 
 /// Derive macro for generating Event trait implementation.
 ///
@@ -44,13 +43,13 @@ mod util;
 ///
 /// #[derive(Event, Serialize)]
 /// enum Events {
-///     #[event("ping")]
+///     #[event(name = "ping")]
 ///     Ping,
 ///
-///     #[event("message")]
+///     #[event(name = "message")]
 ///     Message(String),
 ///
-///     #[event("upload")]
+///     #[event(name = "upload")]
 ///     Upload {
 ///         filename: String,
 ///         data: BinaryIndex,
@@ -64,7 +63,7 @@ mod util;
 ///
 /// # Attributes
 ///
-/// - #[event("name")] - Required. Specifies the Socket.IO event name.
+/// - #[event(name = "name")] - Required. Specifies the Socket.IO event name.
 ///
 /// # Generated Code
 ///

@@ -5,7 +5,7 @@
 //! network writes.
 
 use crate::error::Result;
-use crate::packet::{AckPacket, EventPacket, Packet};
+use crate::packet::{EventPacket, Packet};
 use sioc_engine::packet::{Message as EngineMessage, Packet as EnginePacket};
 use sioc_engine::prelude::{EngineReceiver, EngineSender};
 use std::collections::HashMap;

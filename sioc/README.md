@@ -42,23 +42,23 @@ use async_trait::async_trait;
 // Define events you can send
 #[derive(Event, Serialize)]
 enum OutgoingEvents {
-    #[event("message")]
+    #[event(name = "message")]
     Message(String),
 
-    #[event("join")]
+    #[event(name = "join")]
     JoinRoom { room: String },
 }
 
 // Define events you can receive
 #[derive(Receive, Deserialize)]
 enum IncomingEvents {
-    #[event("welcome")]
+    #[event(name = "welcome")]
     Welcome(String),
 
-    #[event("chat")]
+    #[event(name = "chat")]
     ChatMessage { user: String, text: String },
 
-    #[event("ping")]
+    #[event(name = "ping")]
     Ping(Ack<String>),
 }
 
@@ -103,7 +103,7 @@ use serde::Serialize;
 
 #[derive(Event, Serialize)]
 enum Events {
-    #[event("upload")]
+    #[event(name = "upload")]
     Upload {
         filename: String,
         file_ptr: BinaryPlaceholder,
@@ -129,7 +129,7 @@ async fn upload_file(client: &SiocClient) -> sioc::Result<()> {
 ```rust
 #[derive(Receive, Deserialize)]
 enum Events {
-    #[event("download")]
+    #[event(name = "download")]
     Download {
         filename: String,
         file_ptr: BinaryPlaceholder,
@@ -150,7 +150,7 @@ impl EventsHandler for MyBot {
 ```rust
 #[derive(Event, Serialize)]
 enum Events {
-    #[event("login")]
+    #[event(name = "login")]
     Login { username: String, password: String },
 }
 

@@ -1,4 +1,3 @@
-use crate::util;
 use darling::{FromDeriveInput, FromVariant};
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -13,11 +12,14 @@ struct EmitInput {
 }
 
 #[derive(FromVariant)]
-#[darling(forward_attrs(event))]
+#[darling(attributes(event))]
 struct EmitVariant {
     ident: syn::Ident,
     fields: darling::ast::Fields<syn::Field>,
-    attrs: Vec<syn::Attribute>,
+
+    // Capture #[event(name = "foo")]
+    #[darling(default, rename = "name")]
+    name: Option<String>,
 }
 
 pub fn expand(input: DeriveInput) -> Result<TokenStream> {
@@ -36,8 +38,10 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream> {
     for variant in variants {
         let variant_ident = &variant.ident;
 
-        let event_name = util::parse_event_name(&variant.attrs)?
-            .ok_or_else(|| Error::new_spanned(variant_ident, "Missing #[event(...)] attribute"))?;
+        // Resolve name from darling fields
+        let event_name_str = variant.name.ok_or_else(|| {
+            Error::new_spanned(variant_ident, "Missing #[event(name = \"...\")] attribute")
+        })?;
 
         let pattern = match variant.fields.style {
             darling::ast::Style::Unit => quote! { #enum_name::#variant_ident },
@@ -46,15 +50,15 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream> {
         };
 
         event_name_arms.push(quote! {
-            #pattern => #event_name,
+            #pattern => #event_name_str,
         });
 
         match variant.fields.style {
             darling::ast::Style::Unit => {
                 to_packet_arms.push(quote! {
                     #enum_name::#variant_ident => {
-                        let json = serde_json::to_vec(&[#event_name])
-                            .map_err(Error::Json)?;
+                        let json = serde_json::to_vec(&[#event_name_str])
+                            .map_err(sioc_core::error::Error::Json)?;
                         bytes::Bytes::from(json)
                     }
                 });
@@ -64,12 +68,12 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream> {
                 let field_names: Vec<_> =
                     (0..count).map(|i| quote::format_ident!("f{}", i)).collect();
                 let pattern = quote! { #enum_name::#variant_ident( #(#field_names),* ) };
-                let tuple_elems = quote! { #event_name, #(#field_names),* };
+                let tuple_elems = quote! { #event_name_str, #(#field_names),* };
 
                 to_packet_arms.push(quote! {
                     #pattern => {
                         let json = serde_json::to_vec(&(#tuple_elems))
-                            .map_err(Error::Json)?;
+                            .map_err(sioc_core::error::Error::Json)?;
                         bytes::Bytes::from(json)
                     }
                 });
@@ -90,9 +94,9 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream> {
 
                 to_packet_arms.push(quote! {
                     #pattern => {
-                        let tuple = (#event_name, #payload);
+                        let tuple = (#event_name_str, #payload);
                         let json = serde_json::to_vec(&tuple)
-                            .map_err(Error::Json)?;
+                            .map_err(sioc_core::error::Error::Json)?;
                         bytes::Bytes::from(json)
                     }
                 });
@@ -101,12 +105,12 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream> {
     }
 
     let expanded = quote! {
-        impl #impl_generics Event for #enum_name #ty_generics #where_clause {
+        impl #impl_generics sioc_core::event::Event for #enum_name #ty_generics #where_clause {
             fn name(&self) -> &'static str {
                 match self { #(#event_name_arms)* }
             }
 
-            fn to_json(&self) -> Result<bytes::Bytes> {
+            fn to_json(&self) -> sioc_core::error::Result<bytes::Bytes> {
                 Ok(match self {
                     #(#to_packet_arms)*
                 })
