@@ -53,32 +53,66 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream> {
 
                 match variant.fields.style {
                     darling::ast::Style::Unit => {
+                        // Unit variant: ["event_name"]
                         to_packet_arms.push(quote! {
                             #struct_name::#variant_ident => {
-                                let json = serde_json::to_vec(&[#event_name_str])
+                                struct SerAdapter;
+
+                                impl serde::Serialize for SerAdapter {
+                                    fn serialize<S>(&self, serializer: S) -> ::core::result::Result<S::Ok, S::Error>
+                                    where
+                                        S: serde::Serializer,
+                                    {
+                                        use serde::ser::SerializeTuple;
+                                        let mut tuple = serializer.serialize_tuple(1)?;
+                                        tuple.serialize_element(#event_name_str)?;
+                                        tuple.end()
+                                    }
+                                }
+
+                                let json = serde_json::to_vec(&SerAdapter)
                                     .map_err(sioc_core::error::Error::Json)?;
                                 bytes::Bytes::from(json)
                             }
                         });
                     }
                     darling::ast::Style::Tuple => {
+                        // Tuple variant: ["event_name", field0, field1, ...]
                         let count = variant.fields.len();
                         let field_names: Vec<_> =
                             (0..count).map(|i| quote::format_ident!("f{}", i)).collect();
+                        let field_types: Vec<_> =
+                            variant.fields.fields.iter().map(|f| &f.ty).collect();
+                        let field_indices: Vec<syn::Index> =
+                            (0..count).map(syn::Index::from).collect();
                         let pattern = quote! { #struct_name::#variant_ident( #(#field_names),* ) };
-
-                        // Serialize Tuple Refs: (name, &f0, &f1...)
-                        let tuple_elems = quote! { #event_name_str, #(#field_names),* };
 
                         to_packet_arms.push(quote! {
                             #pattern => {
-                                let json = serde_json::to_vec(&(#tuple_elems))
+                                struct SerAdapter<'a>(#(&'a #field_types),*);
+
+                                impl<'a> serde::Serialize for SerAdapter<'a> {
+                                    fn serialize<S>(&self, serializer: S) -> ::core::result::Result<S::Ok, S::Error>
+                                    where
+                                        S: serde::Serializer,
+                                    {
+                                        use serde::ser::SerializeTuple;
+                                        let mut tuple = serializer.serialize_tuple(1 + #count)?;
+                                        tuple.serialize_element(#event_name_str)?;
+                                        #(tuple.serialize_element(&self.#field_indices)?;)*
+                                        tuple.end()
+                                    }
+                                }
+
+                                let adapter = SerAdapter(#(#field_names),*);
+                                let json = serde_json::to_vec(&adapter)
                                     .map_err(sioc_core::error::Error::Json)?;
                                 bytes::Bytes::from(json)
                             }
                         });
                     }
                     darling::ast::Style::Struct => {
+                        // Named struct variant: FLATTENED ["event_name", val1, val2, ...]
                         let field_names: Vec<_> = variant
                             .fields
                             .fields
@@ -87,29 +121,31 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream> {
                             .collect();
                         let field_types: Vec<_> =
                             variant.fields.fields.iter().map(|f| &f.ty).collect();
+                        let field_count = field_names.len();
+                        let field_indices: Vec<syn::Index> =
+                            (0..field_count).map(syn::Index::from).collect();
 
                         let pattern = quote! { #struct_name::#variant_ident { #(#field_names),* } };
 
-                        // Shadow Struct for serialization
-                        let shadow_struct = quote! {
-                            #[derive(serde::Serialize)]
-                            struct ShadowPayload<'a> {
-                                #(#field_names: &'a #field_types),*
-                            }
-                        };
-
-                        let shadow_init = quote! {
-                            ShadowPayload {
-                                #(#field_names: #field_names),*
-                            }
-                        };
-
                         to_packet_arms.push(quote! {
                             #pattern => {
-                                #shadow_struct
-                                let payload = #shadow_init;
-                                let tuple = (#event_name_str, payload);
-                                let json = serde_json::to_vec(&tuple)
+                                struct SerAdapter<'a>(#(&'a #field_types),*);
+
+                                impl<'a> serde::Serialize for SerAdapter<'a> {
+                                    fn serialize<S>(&self, serializer: S) -> ::core::result::Result<S::Ok, S::Error>
+                                    where
+                                        S: serde::Serializer,
+                                    {
+                                        use serde::ser::SerializeTuple;
+                                        let mut tuple = serializer.serialize_tuple(1 + #field_count)?;
+                                        tuple.serialize_element(#event_name_str)?;
+                                        #(tuple.serialize_element(&self.#field_indices)?;)*
+                                        tuple.end()
+                                    }
+                                }
+
+                                let adapter = SerAdapter(#(#field_names),*);
+                                let json = serde_json::to_vec(&adapter)
                                     .map_err(sioc_core::error::Error::Json)?;
                                 bytes::Bytes::from(json)
                             }
@@ -133,47 +169,87 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream> {
 
             let json_logic = match fields.style {
                 darling::ast::Style::Unit => {
+                    // Unit struct: ["event_name"]
                     quote! {
-                        let json = serde_json::to_vec(&[#event_name_str])
+                        struct SerAdapter;
+
+                        impl serde::Serialize for SerAdapter {
+                            fn serialize<S>(&self, serializer: S) -> ::core::result::Result<S::Ok, S::Error>
+                            where
+                                S: serde::Serializer,
+                            {
+                                use serde::ser::SerializeTuple;
+                                let mut tuple = serializer.serialize_tuple(1)?;
+                                tuple.serialize_element(#event_name_str)?;
+                                tuple.end()
+                            }
+                        }
+
+                        let json = serde_json::to_vec(&SerAdapter)
                             .map_err(sioc_core::error::Error::Json)?;
                         bytes::Bytes::from(json)
                     }
                 }
                 darling::ast::Style::Tuple => {
-                    let indices: Vec<_> = (0..fields.len()).map(syn::Index::from).collect();
-                    let tuple_elems = quote! { #event_name_str, #(&self.#indices),* };
+                    // Tuple struct: ["event_name", field0, field1, ...]
+                    let count = fields.len();
+                    let field_types: Vec<_> = fields.fields.iter().map(|f| &f.ty).collect();
+                    let indices: Vec<syn::Index> = (0..count).map(syn::Index::from).collect();
+                    let self_indices = indices.clone();
+
                     quote! {
-                        let json = serde_json::to_vec(&(#tuple_elems))
+                        struct SerAdapter<'a>(#(&'a #field_types),*);
+
+                        impl<'a> serde::Serialize for SerAdapter<'a> {
+                            fn serialize<S>(&self, serializer: S) -> ::core::result::Result<S::Ok, S::Error>
+                            where
+                                S: serde::Serializer,
+                            {
+                                use serde::ser::SerializeTuple;
+                                let mut tuple = serializer.serialize_tuple(1 + #count)?;
+                                tuple.serialize_element(#event_name_str)?;
+                                #(tuple.serialize_element(&self.#indices)?;)*
+                                tuple.end()
+                            }
+                        }
+
+                        let adapter = SerAdapter(#(&self.#self_indices),*);
+                        let json = serde_json::to_vec(&adapter)
                             .map_err(sioc_core::error::Error::Json)?;
                         bytes::Bytes::from(json)
                     }
                 }
                 darling::ast::Style::Struct => {
+                    // Named struct: FLATTENED ["event_name", val1, val2, ...]
                     let field_names: Vec<_> = fields
                         .fields
                         .iter()
                         .map(|f| f.ident.as_ref().unwrap())
                         .collect();
                     let field_types: Vec<_> = fields.fields.iter().map(|f| &f.ty).collect();
-
-                    let shadow_struct = quote! {
-                        #[derive(serde::Serialize)]
-                        struct ShadowPayload<'a> {
-                            #(#field_names: &'a #field_types),*
-                        }
-                    };
-
-                    let shadow_init = quote! {
-                        ShadowPayload {
-                            #(#field_names: &self.#field_names),*
-                        }
-                    };
+                    let field_count = field_names.len();
+                    let field_indices: Vec<syn::Index> =
+                        (0..field_count).map(syn::Index::from).collect();
+                    let self_field_names = field_names.clone();
 
                     quote! {
-                        #shadow_struct
-                        let payload = #shadow_init;
-                        let tuple = (#event_name_str, payload);
-                        let json = serde_json::to_vec(&tuple)
+                        struct SerAdapter<'a>(#(&'a #field_types),*);
+
+                        impl<'a> serde::Serialize for SerAdapter<'a> {
+                            fn serialize<S>(&self, serializer: S) -> ::core::result::Result<S::Ok, S::Error>
+                            where
+                                S: serde::Serializer,
+                            {
+                                use serde::ser::SerializeTuple;
+                                let mut tuple = serializer.serialize_tuple(1 + #field_count)?;
+                                tuple.serialize_element(#event_name_str)?;
+                                #(tuple.serialize_element(&self.#field_indices)?;)*
+                                tuple.end()
+                            }
+                        }
+
+                        let adapter = SerAdapter(#(&self.#self_field_names),*);
+                        let json = serde_json::to_vec(&adapter)
                             .map_err(sioc_core::error::Error::Json)?;
                         bytes::Bytes::from(json)
                     }
