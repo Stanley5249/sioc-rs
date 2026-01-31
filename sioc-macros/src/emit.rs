@@ -1,6 +1,6 @@
 use darling::{FromDeriveInput, FromVariant};
 use proc_macro2::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::{DeriveInput, Error, Result};
 
 #[derive(FromDeriveInput)]
@@ -10,7 +10,6 @@ struct EmitInput {
     ident: syn::Ident,
     generics: syn::Generics,
     data: darling::ast::Data<EmitVariant, syn::Field>,
-
     #[darling(default)]
     event: Option<String>,
 }
@@ -20,7 +19,6 @@ struct EmitInput {
 struct EmitVariant {
     ident: syn::Ident,
     fields: darling::ast::Fields<syn::Field>,
-
     #[darling(default)]
     event: Option<String>,
 }
@@ -30,246 +28,152 @@ pub fn expand(input: DeriveInput) -> Result<TokenStream> {
     let struct_name = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
-    let (name_body, payload_body) = match input.data {
-        darling::ast::Data::Enum(variants) => {
-            let mut event_name_arms = Vec::new();
-            let mut to_packet_arms = Vec::new();
+    let name_body = generate_name_match(&input, struct_name)?;
+    let serialize_body = generate_serialization(&input, struct_name)?;
 
-            for variant in variants {
-                let variant_ident = &variant.ident;
-                let event_name_str = variant.event.ok_or_else(|| {
-                    Error::new_spanned(variant_ident, "Missing #[sioc(event = \"...\")] attribute")
-                })?;
-
-                let pattern = match variant.fields.style {
-                    darling::ast::Style::Unit => quote! { #struct_name::#variant_ident },
-                    darling::ast::Style::Tuple => quote! { #struct_name::#variant_ident(..) },
-                    darling::ast::Style::Struct => quote! { #struct_name::#variant_ident { .. } },
-                };
-
-                event_name_arms.push(quote! {
-                    #pattern => #event_name_str,
-                });
-
-                match variant.fields.style {
-                    darling::ast::Style::Unit => {
-                        // Unit variant: ["event_name"]
-                        to_packet_arms.push(quote! {
-                            #struct_name::#variant_ident => {
-                                struct SerAdapter;
-
-                                impl serde::Serialize for SerAdapter {
-                                    fn serialize<S>(&self, serializer: S) -> ::core::result::Result<S::Ok, S::Error>
-                                    where
-                                        S: serde::Serializer,
-                                    {
-                                        use serde::ser::SerializeTuple;
-                                        let mut tuple = serializer.serialize_tuple(1)?;
-                                        tuple.serialize_element(#event_name_str)?;
-                                        tuple.end()
-                                    }
-                                }
-
-                                let json = serde_json::to_vec(&SerAdapter)
-                                    .map_err(sioc_core::error::Error::Json)?;
-                                bytes::Bytes::from(json)
-                            }
-                        });
-                    }
-                    darling::ast::Style::Tuple => {
-                        // Tuple variant: ["event_name", field0, field1, ...]
-                        let count = variant.fields.len();
-                        let field_names: Vec<_> =
-                            (0..count).map(|i| quote::format_ident!("f{}", i)).collect();
-                        let field_types: Vec<_> =
-                            variant.fields.fields.iter().map(|f| &f.ty).collect();
-                        let field_indices: Vec<syn::Index> =
-                            (0..count).map(syn::Index::from).collect();
-                        let pattern = quote! { #struct_name::#variant_ident( #(#field_names),* ) };
-
-                        to_packet_arms.push(quote! {
-                            #pattern => {
-                                struct SerAdapter<'a>(#(&'a #field_types),*);
-
-                                impl<'a> serde::Serialize for SerAdapter<'a> {
-                                    fn serialize<S>(&self, serializer: S) -> ::core::result::Result<S::Ok, S::Error>
-                                    where
-                                        S: serde::Serializer,
-                                    {
-                                        use serde::ser::SerializeTuple;
-                                        let mut tuple = serializer.serialize_tuple(1 + #count)?;
-                                        tuple.serialize_element(#event_name_str)?;
-                                        #(tuple.serialize_element(&self.#field_indices)?;)*
-                                        tuple.end()
-                                    }
-                                }
-
-                                let adapter = SerAdapter(#(#field_names),*);
-                                let json = serde_json::to_vec(&adapter)
-                                    .map_err(sioc_core::error::Error::Json)?;
-                                bytes::Bytes::from(json)
-                            }
-                        });
-                    }
-                    darling::ast::Style::Struct => {
-                        // Named struct variant: FLATTENED ["event_name", val1, val2, ...]
-                        let field_names: Vec<_> = variant
-                            .fields
-                            .fields
-                            .iter()
-                            .map(|f| f.ident.as_ref().unwrap())
-                            .collect();
-                        let field_types: Vec<_> =
-                            variant.fields.fields.iter().map(|f| &f.ty).collect();
-                        let field_count = field_names.len();
-                        let field_indices: Vec<syn::Index> =
-                            (0..field_count).map(syn::Index::from).collect();
-
-                        let pattern = quote! { #struct_name::#variant_ident { #(#field_names),* } };
-
-                        to_packet_arms.push(quote! {
-                            #pattern => {
-                                struct SerAdapter<'a>(#(&'a #field_types),*);
-
-                                impl<'a> serde::Serialize for SerAdapter<'a> {
-                                    fn serialize<S>(&self, serializer: S) -> ::core::result::Result<S::Ok, S::Error>
-                                    where
-                                        S: serde::Serializer,
-                                    {
-                                        use serde::ser::SerializeTuple;
-                                        let mut tuple = serializer.serialize_tuple(1 + #field_count)?;
-                                        tuple.serialize_element(#event_name_str)?;
-                                        #(tuple.serialize_element(&self.#field_indices)?;)*
-                                        tuple.end()
-                                    }
-                                }
-
-                                let adapter = SerAdapter(#(#field_names),*);
-                                let json = serde_json::to_vec(&adapter)
-                                    .map_err(sioc_core::error::Error::Json)?;
-                                bytes::Bytes::from(json)
-                            }
-                        });
-                    }
-                }
-            }
-
-            (
-                quote! { match self { #(#event_name_arms)* } },
-                quote! { match self { #(#to_packet_arms)* } },
-            )
-        }
-        darling::ast::Data::Struct(fields) => {
-            let event_name_str = input.event.ok_or_else(|| {
-                Error::new_spanned(
-                    struct_name,
-                    "Structs must have #[sioc(event = \"...\")] attribute",
-                )
-            })?;
-
-            let json_logic = match fields.style {
-                darling::ast::Style::Unit => {
-                    // Unit struct: ["event_name"]
-                    quote! {
-                        struct SerAdapter;
-
-                        impl serde::Serialize for SerAdapter {
-                            fn serialize<S>(&self, serializer: S) -> ::core::result::Result<S::Ok, S::Error>
-                            where
-                                S: serde::Serializer,
-                            {
-                                use serde::ser::SerializeTuple;
-                                let mut tuple = serializer.serialize_tuple(1)?;
-                                tuple.serialize_element(#event_name_str)?;
-                                tuple.end()
-                            }
-                        }
-
-                        let json = serde_json::to_vec(&SerAdapter)
-                            .map_err(sioc_core::error::Error::Json)?;
-                        bytes::Bytes::from(json)
-                    }
-                }
-                darling::ast::Style::Tuple => {
-                    // Tuple struct: ["event_name", field0, field1, ...]
-                    let count = fields.len();
-                    let field_types: Vec<_> = fields.fields.iter().map(|f| &f.ty).collect();
-                    let indices: Vec<syn::Index> = (0..count).map(syn::Index::from).collect();
-                    let self_indices = indices.clone();
-
-                    quote! {
-                        struct SerAdapter<'a>(#(&'a #field_types),*);
-
-                        impl<'a> serde::Serialize for SerAdapter<'a> {
-                            fn serialize<S>(&self, serializer: S) -> ::core::result::Result<S::Ok, S::Error>
-                            where
-                                S: serde::Serializer,
-                            {
-                                use serde::ser::SerializeTuple;
-                                let mut tuple = serializer.serialize_tuple(1 + #count)?;
-                                tuple.serialize_element(#event_name_str)?;
-                                #(tuple.serialize_element(&self.#indices)?;)*
-                                tuple.end()
-                            }
-                        }
-
-                        let adapter = SerAdapter(#(&self.#self_indices),*);
-                        let json = serde_json::to_vec(&adapter)
-                            .map_err(sioc_core::error::Error::Json)?;
-                        bytes::Bytes::from(json)
-                    }
-                }
-                darling::ast::Style::Struct => {
-                    // Named struct: FLATTENED ["event_name", val1, val2, ...]
-                    let field_names: Vec<_> = fields
-                        .fields
-                        .iter()
-                        .map(|f| f.ident.as_ref().unwrap())
-                        .collect();
-                    let field_types: Vec<_> = fields.fields.iter().map(|f| &f.ty).collect();
-                    let field_count = field_names.len();
-                    let field_indices: Vec<syn::Index> =
-                        (0..field_count).map(syn::Index::from).collect();
-                    let self_field_names = field_names.clone();
-
-                    quote! {
-                        struct SerAdapter<'a>(#(&'a #field_types),*);
-
-                        impl<'a> serde::Serialize for SerAdapter<'a> {
-                            fn serialize<S>(&self, serializer: S) -> ::core::result::Result<S::Ok, S::Error>
-                            where
-                                S: serde::Serializer,
-                            {
-                                use serde::ser::SerializeTuple;
-                                let mut tuple = serializer.serialize_tuple(1 + #field_count)?;
-                                tuple.serialize_element(#event_name_str)?;
-                                #(tuple.serialize_element(&self.#field_indices)?;)*
-                                tuple.end()
-                            }
-                        }
-
-                        let adapter = SerAdapter(#(&self.#self_field_names),*);
-                        let json = serde_json::to_vec(&adapter)
-                            .map_err(sioc_core::error::Error::Json)?;
-                        bytes::Bytes::from(json)
-                    }
-                }
-            };
-
-            (quote! { #event_name_str }, json_logic)
-        }
-    };
-
-    let expanded = quote! {
+    Ok(quote! {
         impl #impl_generics sioc_core::event::Event for #struct_name #ty_generics #where_clause {
             fn name(&self) -> &'static str {
                 #name_body
             }
 
             fn to_payload(&self) -> sioc_core::error::Result<bytes::Bytes> {
-                Ok({ #payload_body })
+                use serde::ser::{Serialize, Serializer, SerializeTuple};
+
+                struct SerAdapter<'a>(&'a #struct_name);
+
+                impl<'a> Serialize for SerAdapter<'a> {
+                    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+                    where S: Serializer {
+                        #serialize_body
+                    }
+                }
+
+                // Error conversion is handled automatically by #[from] in sioc_core::Error
+                let json = serde_json::to_vec(&SerAdapter(self))?;
+                Ok(bytes::Bytes::from(json))
+            }
+        }
+    })
+}
+
+fn generate_name_match(input: &EmitInput, struct_name: &syn::Ident) -> Result<TokenStream> {
+    match &input.data {
+        darling::ast::Data::Enum(variants) => {
+            let mut arms = Vec::new();
+            for variant in variants {
+                let ident = &variant.ident;
+                let event = variant
+                    .event
+                    .as_deref()
+                    .ok_or_else(|| Error::new_spanned(ident, "Missing #[sioc(event = \"...\")]"))?;
+                let pattern = match variant.fields.style {
+                    darling::ast::Style::Unit => quote!(#struct_name::#ident),
+                    darling::ast::Style::Tuple => quote!(#struct_name::#ident(..)),
+                    darling::ast::Style::Struct => quote!(#struct_name::#ident{..}),
+                };
+                arms.push(quote!(#pattern => #event,));
+            }
+            Ok(quote!(match self { #(#arms)* }))
+        }
+        darling::ast::Data::Struct(_) => {
+            let event = input.event.as_deref().ok_or_else(|| {
+                Error::new_spanned(struct_name, "Missing #[sioc(event = \"...\")]")
+            })?;
+            Ok(quote!(#event))
+        }
+    }
+}
+
+fn generate_serialization(input: &EmitInput, struct_name: &syn::Ident) -> Result<TokenStream> {
+    let body = match &input.data {
+        darling::ast::Data::Enum(variants) => {
+            let mut arms = Vec::new();
+            for variant in variants {
+                let ident = &variant.ident;
+                let event = variant.event.as_deref().unwrap();
+                // 1 for event name + N fields
+                let tuple_len = 1 + variant.fields.len();
+
+                match variant.fields.style {
+                    darling::ast::Style::Unit => {
+                        arms.push(quote! {
+                            #struct_name::#ident => {
+                                let mut seq = serializer.serialize_tuple(1)?;
+                                seq.serialize_element(#event)?;
+                                seq.end()
+                            }
+                        });
+                    }
+                    darling::ast::Style::Tuple => {
+                        let ids: Vec<_> = (0..variant.fields.len())
+                            .map(|i| format_ident!("f{}", i))
+                            .collect();
+                        arms.push(quote! {
+                            #struct_name::#ident( #(#ids),* ) => {
+                                let mut seq = serializer.serialize_tuple(#tuple_len)?;
+                                seq.serialize_element(#event)?;
+                                #( seq.serialize_element(#ids)?; )*
+                                seq.end()
+                            }
+                        });
+                    }
+                    darling::ast::Style::Struct => {
+                        let ids: Vec<_> = variant
+                            .fields
+                            .fields
+                            .iter()
+                            .map(|f| f.ident.as_ref().unwrap())
+                            .collect();
+                        // Flatten named fields -> serialize as tuple elements
+                        arms.push(quote! {
+                            #struct_name::#ident { #(#ids),* } => {
+                                let mut seq = serializer.serialize_tuple(#tuple_len)?;
+                                seq.serialize_element(#event)?;
+                                #( seq.serialize_element(#ids)?; )*
+                                seq.end()
+                            }
+                        });
+                    }
+                }
+            }
+            quote!(match &self.0 { #(#arms)* })
+        }
+        darling::ast::Data::Struct(fields) => {
+            let event = input.event.as_deref().unwrap();
+            let tuple_len = 1 + fields.len();
+
+            match fields.style {
+                darling::ast::Style::Unit => quote! {
+                    let mut seq = serializer.serialize_tuple(1)?;
+                    seq.serialize_element(#event)?;
+                    seq.end()
+                },
+                darling::ast::Style::Tuple => {
+                    let indices: Vec<_> = (0..fields.len()).map(syn::Index::from).collect();
+                    quote! {
+                        let mut seq = serializer.serialize_tuple(#tuple_len)?;
+                        seq.serialize_element(#event)?;
+                        #( seq.serialize_element(&self.0.#indices)?; )*
+                        seq.end()
+                    }
+                }
+                darling::ast::Style::Struct => {
+                    let ids: Vec<_> = fields
+                        .fields
+                        .iter()
+                        .map(|f| f.ident.as_ref().unwrap())
+                        .collect();
+                    // Flatten named fields -> serialize as tuple elements
+                    quote! {
+                        let mut seq = serializer.serialize_tuple(#tuple_len)?;
+                        seq.serialize_element(#event)?;
+                        #( seq.serialize_element(&self.0.#ids)?; )*
+                        seq.end()
+                    }
+                }
             }
         }
     };
-    Ok(expanded)
+    Ok(body)
 }
