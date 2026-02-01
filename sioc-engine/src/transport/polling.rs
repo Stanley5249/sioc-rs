@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use url::Url;
 
 use crate::error::{Error, Result};
-use crate::packet::{Message, Packet};
+use crate::packet::{MessagePacket, Packet};
 
 /// Polling sender - the write half
 #[derive(Debug, Clone)]
@@ -19,16 +19,16 @@ pub struct PollingSender {
 
 impl PollingSender {
     /// Sends a message through polling (HTTP POST)
-    pub async fn send(&mut self, msg: Message) -> Result<()> {
+    pub async fn send(&mut self, msg: MessagePacket) -> Result<()> {
         let body = match msg {
-            Message::Binary(data) => {
+            MessagePacket::Binary(data) => {
                 let encoded = BASE64_STANDARD.encode(&data);
                 let mut result = BytesMut::with_capacity(1 + encoded.len());
                 result.put_u8(b'b');
                 result.extend_from_slice(encoded.as_bytes());
                 result.freeze()
             }
-            Message::Text(data) => data,
+            MessagePacket::Text(data) => data,
         };
 
         let mut url = self.base_url.clone();
@@ -59,12 +59,12 @@ impl PollingSender {
 /// Polling receiver - the read half
 #[derive(Debug)]
 pub struct PollingReceiver {
-    rx: mpsc::Receiver<Result<Packet>>,
+    transport_rx: mpsc::Receiver<Result<Packet>>,
 }
 
 impl PollingReceiver {
     pub async fn recv(&mut self) -> Result<Packet> {
-        self.rx.recv().await.ok_or(Error::Closed)?
+        self.transport_rx.recv().await.ok_or(Error::Closed)?
     }
 }
 
@@ -87,7 +87,7 @@ pub async fn connect(
     };
 
     // Create channel for background task communication
-    let (tx, rx) = mpsc::channel(32);
+    let (transport_tx, transport_rx) = mpsc::channel(32);
 
     // Spawn background polling task
     tokio::spawn(async move {
@@ -111,7 +111,7 @@ pub async fn connect(
                 Ok(response) => {
                     let status = response.status().as_u16();
                     if status != 200 {
-                        let _ = tx.send(Err(Error::IncompleteHttp(status))).await;
+                        let _ = transport_tx.send(Err(Error::IncompleteHttp(status))).await;
                         break;
                     }
 
@@ -129,26 +129,26 @@ pub async fn connect(
                                 Ok(packets) => {
                                     // Send each packet through the channel
                                     for packet in packets {
-                                        if tx.send(Ok(packet)).await.is_err() {
+                                        if transport_tx.send(Ok(packet)).await.is_err() {
                                             // Receiver dropped, exit
                                             return;
                                         }
                                     }
                                 }
                                 Err(e) => {
-                                    let _ = tx.send(Err(e)).await;
+                                    let _ = transport_tx.send(Err(e)).await;
                                     break;
                                 }
                             }
                         }
                         Err(e) => {
-                            let _ = tx.send(Err(e.into())).await;
+                            let _ = transport_tx.send(Err(e.into())).await;
                             break;
                         }
                     }
                 }
                 Err(e) => {
-                    let _ = tx.send(Err(e.into())).await;
+                    let _ = transport_tx.send(Err(e.into())).await;
                     // Don't break on network errors, retry
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                     continue;
@@ -159,7 +159,7 @@ pub async fn connect(
         }
     });
 
-    let receiver = PollingReceiver { rx };
+    let receiver = PollingReceiver { transport_rx };
 
     (sender, receiver)
 }

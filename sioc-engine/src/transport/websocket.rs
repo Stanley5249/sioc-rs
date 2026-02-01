@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::packet::{Message as EngineMessage, Packet};
+use crate::packet::{MessagePacket, Packet};
 use bytes::Bytes;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::SinkExt;
@@ -16,21 +16,21 @@ type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 /// WebSocket sender - the write half
 #[derive(Debug)]
 pub struct WebsocketSender {
-    inner: SplitSink<WsStream, Message>,
+    transport_tx: SplitSink<WsStream, Message>,
 }
 
 impl WebsocketSender {
     /// Sends a message through the WebSocket
-    pub async fn send(&mut self, msg: EngineMessage) -> Result<()> {
+    pub async fn send(&mut self, msg: MessagePacket) -> Result<()> {
         let ws_msg = match msg {
-            EngineMessage::Text(data) => {
+            MessagePacket::Text(data) => {
                 let utf8_payload: Utf8Bytes = data.try_into()?;
                 Message::Text(utf8_payload)
             }
-            EngineMessage::Binary(data) => Message::Binary(data),
+            MessagePacket::Binary(data) => Message::Binary(data),
         };
 
-        self.inner.send(ws_msg).await?;
+        self.transport_tx.send(ws_msg).await?;
         Ok(())
     }
 }
@@ -38,20 +38,20 @@ impl WebsocketSender {
 /// WebSocket receiver - the read half
 #[derive(Debug)]
 pub struct WebsocketReceiver {
-    inner: SplitStream<WsStream>,
+    transport_rx: SplitStream<WsStream>,
 }
 
 impl WebsocketReceiver {
     pub async fn recv(&mut self) -> Result<Packet> {
         loop {
-            match self.inner.next().await {
+            match self.transport_rx.next().await {
                 Some(Ok(Message::Text(str))) => {
                     // Text messages: could be '4'+text or other packet types
                     return Packet::try_from(Bytes::from(str));
                 }
                 Some(Ok(Message::Binary(data))) => {
                     // Binary messages: raw binary data (Message type)
-                    return Ok(Packet::Message(EngineMessage::Binary(data)));
+                    return Ok(Packet::Message(MessagePacket::Binary(data)));
                 }
                 Some(Ok(_)) => continue, // Ignore Ping/Pong/Close frames
                 Some(Err(err)) => return Err(err.into()),
@@ -78,11 +78,11 @@ pub async fn connect(
     url.set_scheme(scheme).unwrap();
 
     let (ws_stream, _) = connect_async(url.as_str()).await?;
-    let (sink, stream) = ws_stream.split();
+    let (transport_tx, transport_rx) = ws_stream.split();
 
     Ok((
-        WebsocketSender { inner: sink },
-        WebsocketReceiver { inner: stream },
+        WebsocketSender { transport_tx },
+        WebsocketReceiver { transport_rx },
     ))
 }
 

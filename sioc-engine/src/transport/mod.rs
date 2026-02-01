@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::packet::{Message, Packet};
+use crate::packet::{MessagePacket, Packet};
 
 pub mod polling;
 pub mod websocket;
@@ -13,7 +13,7 @@ pub enum TransportSender {
 
 impl TransportSender {
     /// Sends a message through the transport (No BoxFuture!)
-    pub async fn send(&mut self, msg: Message) -> Result<()> {
+    pub async fn send(&mut self, msg: MessagePacket) -> Result<()> {
         match self {
             Self::Polling(s) => s.send(msg).await,
             Self::Websocket(s) => s.send(msg).await,

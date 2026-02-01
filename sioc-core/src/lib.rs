@@ -24,11 +24,14 @@ pub mod router;
 /// use sioc_core::prelude::*;
 /// ```
 pub mod prelude {
-    pub use crate::client::{SocketReceiver, SocketSender, connect, emit, event};
+    pub use crate::client::{SioClient, connect};
     pub use crate::error::{Error, Result};
-    pub use crate::event::{Event, to_event};
-    pub use crate::packet::{AckPacket, Attachments, BinaryPlaceholder, EventPacket, Packet};
-    pub use crate::router::RouterCommand;
+    pub use crate::event::Event;
+    pub use crate::packet::{
+        AckPacket, Attachments, BasePacket, BinaryAckPacket, BinaryEventPacket, BinaryPacket,
+        EventPacket, Packet,
+    };
+    pub use crate::router::{RouterCommand, SioMessage};
 }
 
 // Version information

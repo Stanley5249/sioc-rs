@@ -7,16 +7,16 @@ use crate::error::{Error, Result};
 
 /// Message content for Engine.IO packets
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Message {
+pub enum MessagePacket {
     Text(Bytes),
     Binary(Bytes),
 }
 
-impl Message {
+impl MessagePacket {
     /// Consumes the message and returns the underlying bytes
     pub fn into_bytes(self) -> Bytes {
         match self {
-            Message::Text(bytes) | Message::Binary(bytes) => bytes,
+            MessagePacket::Text(bytes) | MessagePacket::Binary(bytes) => bytes,
         }
     }
 }
@@ -39,7 +39,7 @@ pub enum Packet {
     Close,
     Ping(Bytes),
     Pong(Bytes),
-    Message(Message),
+    Message(MessagePacket),
     Upgrade,
     Noop,
 }
@@ -64,11 +64,11 @@ impl TryFrom<Bytes> for Packet {
             b'1' => Ok(Packet::Close),
             b'2' => Ok(Packet::Ping(data)),
             b'3' => Ok(Packet::Pong(data)),
-            b'4' => Ok(Packet::Message(Message::Text(data))),
+            b'4' => Ok(Packet::Message(MessagePacket::Text(data))),
             b'b' => {
                 // Base64 decode binary message
                 let decoded = BASE64_STANDARD.decode(data.as_ref())?;
-                Ok(Packet::Message(Message::Binary(Bytes::from(decoded))))
+                Ok(Packet::Message(MessagePacket::Binary(Bytes::from(decoded))))
             }
             b'5' => Ok(Packet::Upgrade),
             b'6' => Ok(Packet::Noop),
@@ -78,37 +78,37 @@ impl TryFrom<Bytes> for Packet {
 }
 
 impl Packet {
-    pub fn into_message(self) -> Message {
+    pub fn into_message(self) -> MessagePacket {
         match self {
-            Packet::Message(Message::Binary(data)) => Message::Binary(data),
-            Packet::Message(Message::Text(data)) => {
+            Packet::Message(MessagePacket::Binary(data)) => MessagePacket::Binary(data),
+            Packet::Message(MessagePacket::Text(data)) => {
                 let mut buf = BytesMut::with_capacity(1 + data.len());
                 buf.put_u8(b'4');
                 buf.extend_from_slice(&data);
-                Message::Text(buf.freeze())
-            }
-            Packet::Ping(data) => {
-                let mut buf = BytesMut::with_capacity(1 + data.len());
-                buf.put_u8(b'2');
-                buf.extend_from_slice(&data);
-                Message::Text(buf.freeze())
-            }
-            Packet::Pong(data) => {
-                let mut buf = BytesMut::with_capacity(1 + data.len());
-                buf.put_u8(b'3');
-                buf.extend_from_slice(&data);
-                Message::Text(buf.freeze())
+                MessagePacket::Text(buf.freeze())
             }
             Packet::Open(handshake) => {
                 let json = serde_json::to_string(&handshake).unwrap();
                 let mut buf = BytesMut::with_capacity(1 + json.len());
                 buf.put_u8(b'0');
                 buf.extend_from_slice(json.as_bytes());
-                Message::Text(buf.freeze())
+                MessagePacket::Text(buf.freeze())
             }
-            Packet::Close => Message::Text(Bytes::from_static(b"1")),
-            Packet::Upgrade => Message::Text(Bytes::from_static(b"5")),
-            Packet::Noop => Message::Text(Bytes::from_static(b"6")),
+            Packet::Close => MessagePacket::Text(Bytes::from_static(b"1")),
+            Packet::Ping(data) => {
+                let mut buf = BytesMut::with_capacity(1 + data.len());
+                buf.put_u8(b'2');
+                buf.extend_from_slice(&data);
+                MessagePacket::Text(buf.freeze())
+            }
+            Packet::Pong(data) => {
+                let mut buf = BytesMut::with_capacity(1 + data.len());
+                buf.put_u8(b'3');
+                buf.extend_from_slice(&data);
+                MessagePacket::Text(buf.freeze())
+            }
+            Packet::Upgrade => MessagePacket::Text(Bytes::from_static(b"5")),
+            Packet::Noop => MessagePacket::Text(Bytes::from_static(b"6")),
         }
     }
 }
@@ -164,7 +164,7 @@ mod tests {
         ));
         assert!(matches!(
             Packet::try_from(Bytes::from("4hello")).unwrap(),
-            Packet::Message(Message::Text(_))
+            Packet::Message(MessagePacket::Text(_))
         ));
         assert!(matches!(
             Packet::try_from(Bytes::from("5")).unwrap(),
@@ -185,7 +185,7 @@ mod tests {
 
         let packet = Packet::try_from(Bytes::from(input)).unwrap();
         match packet {
-            Packet::Message(Message::Binary(data)) => {
+            Packet::Message(MessagePacket::Binary(data)) => {
                 assert_eq!(data.as_ref(), binary_data.as_slice())
             }
             _ => panic!("Expected binary message"),
@@ -200,7 +200,9 @@ mod tests {
 
         let packet = Packet::try_from(Bytes::from(input)).unwrap();
         match packet {
-            Packet::Message(Message::Text(data)) => assert_eq!(data.as_ref(), text_data.as_bytes()),
+            Packet::Message(MessagePacket::Text(data)) => {
+                assert_eq!(data.as_ref(), text_data.as_bytes())
+            }
             _ => panic!("Expected text message"),
         }
     }

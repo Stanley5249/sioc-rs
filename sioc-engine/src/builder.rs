@@ -1,19 +1,29 @@
 use crate::{
-    error::Result,
+    error::{Error, Result},
     packet::Packet,
-    socket::{heartbeat_loop, send_loop},
-    transport,
-    transport::{TransportReceiver, TransportSender},
-    EngineReceiver, EngineSender, ENGINE_IO_VERSION,
+    socket::EioClient,
+    transport::{self, TransportReceiver, TransportSender},
+    ENGINE_IO_VERSION,
 };
 use http::HeaderMap;
-use tokio::sync::mpsc;
 use url::Url;
+
+/// Transport type for the Engine.IO connection.
+#[derive(Clone, Debug)]
+pub enum TransportType {
+    /// Use polling transport only.
+    Polling,
+    /// Use WebSocket transport only.
+    Websocket,
+    /// Start with polling and upgrade to WebSocket if supported (default).
+    Auto,
+}
 
 #[derive(Clone, Debug)]
 pub struct ClientBuilder {
     url: Url,
     headers: Option<HeaderMap>,
+    transport_type: TransportType,
 }
 
 impl ClientBuilder {
@@ -27,7 +37,17 @@ impl ClientBuilder {
             url.set_path("/engine.io/");
         }
 
-        ClientBuilder { url, headers: None }
+        ClientBuilder {
+            url,
+            headers: None,
+            transport_type: TransportType::Auto,
+        }
+    }
+
+    /// Set the transport type for the connection.
+    pub fn transport_type(mut self, transport_type: TransportType) -> Self {
+        self.transport_type = transport_type;
+        self
     }
 
     /// Specify transport's HTTP headers
@@ -37,16 +57,16 @@ impl ClientBuilder {
     }
 
     /// Build with polling transport
-    pub async fn build_polling(self) -> Result<(EngineSender, EngineReceiver)> {
-        let (_sender, mut receiver) =
+    pub async fn build_polling(self) -> Result<EioClient> {
+        let (_tx, mut rx) =
             transport::polling::connect(self.url.clone(), self.headers.clone()).await;
 
         // Perform handshake - receive first packet
-        let handshake_packet = receiver.recv().await?;
+        let handshake_packet = rx.recv().await?;
 
         let handshake = match handshake_packet {
             Packet::Open(h) => h,
-            _ => return Err(crate::error::Error::IncompletePacket),
+            _ => return Err(Error::IncompletePacket),
         };
 
         // Update URL with session ID
@@ -54,33 +74,26 @@ impl ClientBuilder {
         url.query_pairs_mut().append_pair("sid", &handshake.sid);
 
         // Recreate transports with updated URL
-        let (transport_sender, transport_receiver) =
-            transport::polling::connect(url, self.headers).await;
+        let (transport_tx, transport_rx) = transport::polling::connect(url, self.headers).await;
 
-        // Create channel for packet sending
-        let (tx, rx) = mpsc::channel(32);
-
-        // Spawn background tasks
-        tokio::spawn(send_loop(TransportSender::Polling(transport_sender), rx));
-        tokio::spawn(heartbeat_loop(handshake.ping_interval, tx.clone()));
-
-        Ok((
-            EngineSender { tx },
-            TransportReceiver::Polling(transport_receiver),
+        Ok(EioClient::new(
+            TransportSender::Polling(transport_tx),
+            TransportReceiver::Polling(transport_rx),
+            handshake,
         ))
     }
 
     /// Build with websocket transport
-    pub async fn build_websocket(self) -> Result<(EngineSender, EngineReceiver)> {
-        let (_sender, mut receiver) =
+    pub async fn build_websocket(self) -> Result<EioClient> {
+        let (_tx, mut rx) =
             transport::websocket::connect(self.url.clone(), self.headers.clone()).await?;
 
         // Perform handshake - receive first packet
-        let handshake_packet = receiver.recv().await?;
+        let handshake_packet = rx.recv().await?;
 
         let handshake = match handshake_packet {
             Packet::Open(h) => h,
-            _ => return Err(crate::error::Error::IncompletePacket),
+            _ => return Err(Error::IncompletePacket),
         };
 
         // Update URL with session ID
@@ -88,34 +101,27 @@ impl ClientBuilder {
         url.query_pairs_mut().append_pair("sid", &handshake.sid);
 
         // Recreate transports with updated URL
-        let (transport_sender, transport_receiver) =
-            transport::websocket::connect(url, self.headers).await?;
+        let (transport_tx, transport_rx) = transport::websocket::connect(url, self.headers).await?;
 
-        // Create channel for packet sending
-        let (tx, rx) = mpsc::channel(32);
-
-        // Spawn background tasks
-        tokio::spawn(send_loop(TransportSender::Websocket(transport_sender), rx));
-        tokio::spawn(heartbeat_loop(handshake.ping_interval, tx.clone()));
-
-        Ok((
-            EngineSender { tx },
-            TransportReceiver::Websocket(transport_receiver),
+        Ok(EioClient::new(
+            TransportSender::Websocket(transport_tx),
+            TransportReceiver::Websocket(transport_rx),
+            handshake,
         ))
     }
 
     /// Build with polling, then upgrade to websocket if supported
-    pub async fn build_with_upgrade(self) -> Result<(EngineSender, EngineReceiver)> {
+    pub async fn build_with_upgrade(self) -> Result<EioClient> {
         // Start with polling
-        let (_sender, mut receiver) =
+        let (_tx, mut rx) =
             transport::polling::connect(self.url.clone(), self.headers.clone()).await;
 
         // Perform handshake
-        let handshake_packet = receiver.recv().await?;
+        let handshake_packet = rx.recv().await?;
 
         let handshake = match handshake_packet {
             Packet::Open(h) => h,
-            _ => return Err(crate::error::Error::IncompletePacket),
+            _ => return Err(Error::IncompletePacket),
         };
 
         // Check if websocket upgrade is supported
@@ -130,55 +136,37 @@ impl ClientBuilder {
             url.query_pairs_mut().append_pair("sid", &handshake.sid);
 
             // Connect via websocket
-            let (transport_sender, transport_receiver) =
+            let (transport_tx, transport_rx) =
                 transport::websocket::connect(url, self.headers).await?;
 
-            // Perform upgrade handshake (assuming it takes &mut)
-            // Note: upgrade function needs to be updated if necessary, but for now assume it's fine
-
-            // Create channel for packet sending
-            let (tx, rx) = mpsc::channel(32);
-
-            // Spawn background tasks
-            tokio::spawn(send_loop(TransportSender::Websocket(transport_sender), rx));
-            tokio::spawn(heartbeat_loop(handshake.ping_interval, tx.clone()));
-
-            Ok((
-                EngineSender { tx },
-                TransportReceiver::Websocket(transport_receiver),
+            Ok(EioClient::new(
+                TransportSender::Websocket(transport_tx),
+                TransportReceiver::Websocket(transport_rx),
+                handshake,
             ))
         } else {
             // Stay with polling
             let mut url = self.url.clone();
             url.query_pairs_mut().append_pair("sid", &handshake.sid);
 
-            let (transport_sender, transport_receiver) =
-                transport::polling::connect(url, self.headers).await;
+            let (transport_tx, transport_rx) = transport::polling::connect(url, self.headers).await;
 
-            // Create channel for packet sending
-            let (tx, rx) = mpsc::channel(32);
-
-            // Spawn background tasks
-            tokio::spawn(send_loop(TransportSender::Polling(transport_sender), rx));
-            tokio::spawn(heartbeat_loop(handshake.ping_interval, tx.clone()));
-
-            Ok((
-                EngineSender { tx },
-                TransportReceiver::Polling(transport_receiver),
+            Ok(EioClient::new(
+                TransportSender::Polling(transport_tx),
+                TransportReceiver::Polling(transport_rx),
+                handshake,
             ))
         }
     }
 
-    /// Build - tries websocket with upgrade, falls back to polling
-    pub async fn build(self) -> Result<(EngineSender, EngineReceiver)> {
-        self.build_with_upgrade().await
-    }
-
-    /// Build with fallback - tries websocket upgrade, falls back to polling on error
-    pub async fn build_with_fallback(self) -> Result<(EngineSender, EngineReceiver)> {
-        match self.clone().build_with_upgrade().await {
-            Ok(result) => Ok(result),
-            Err(_) => self.build_polling().await,
+    /// Build the Engine.IO client based on the configured transport type.
+    ///
+    /// Handles handshake and potential upgrades internally.
+    pub async fn build(self) -> Result<EioClient> {
+        match self.transport_type {
+            TransportType::Polling => self.build_polling().await,
+            TransportType::Websocket => self.build_websocket().await,
+            TransportType::Auto => self.build_with_upgrade().await,
         }
     }
 }
