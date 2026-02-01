@@ -31,7 +31,7 @@ pub mod prelude {
         AckPacket, Attachments, BasePacket, BinaryAckPacket, BinaryEventPacket, BinaryPacket,
         EventPacket, Packet,
     };
-    pub use crate::router::{RouterCommand, SioMessage};
+    pub use crate::router::RouterCommand;
 }
 
 // Version information

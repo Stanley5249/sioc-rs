@@ -15,11 +15,6 @@ use sioc_engine::prelude::{EioClient, MessagePacket};
 use std::collections::HashMap;
 use tokio::sync::{mpsc, oneshot};
 
-/// The unified message type delivered to the user.
-///
-/// Contains the parsed packet header and any binary attachments.
-pub type SioMessage = (Packet, Attachments);
-
 /// Commands sent to the Router for Safe Path processing.
 ///
 /// These commands provide a strictly typed API that prevents invalid states:
@@ -37,7 +32,7 @@ pub enum RouterCommand {
         /// The event data.
         data: BasePacket,
         /// Channel to receive the acknowledgement response.
-        ack: oneshot::Sender<SioMessage>,
+        ack: oneshot::Sender<Packet>,
     },
 
     /// Send an acknowledgement response (Type 3).
@@ -63,7 +58,7 @@ pub enum RouterCommand {
         /// The binary attachments.
         payload: Attachments,
         /// Channel to receive the acknowledgement response.
-        ack: oneshot::Sender<SioMessage>,
+        ack: oneshot::Sender<Packet>,
     },
 
     /// Send a binary acknowledgement response (Type 6).
@@ -80,20 +75,19 @@ pub enum RouterCommand {
 /// Router state for binary reassembly.
 ///
 /// The router is either idle (waiting for a text header) or buffering
-/// (accumulating binary attachments for a previously received header).
+/// (accumulating binary attachments directly into the packet).
 #[derive(Debug)]
 enum RouterState {
     /// Idle state: waiting for the next text message.
     Idle,
 
     /// Buffering state: accumulating binary attachments.
+    ///
+    /// The packet contains empty attachments initially, which are filled
+    /// as binary chunks arrive. Attachments are mutated in place for efficiency.
     Buffering {
-        /// The packet header that was received.
-        header: Packet,
-        /// Number of binary attachments expected.
-        expected: u64,
-        /// Binary attachments accumulated so far.
-        blobs: Attachments,
+        /// The packet being assembled with attachments.
+        packet: Packet,
     },
 }
 
@@ -112,9 +106,9 @@ enum RouterState {
 pub async fn router_loop(
     mut eio: EioClient,
     mut router_rx: mpsc::Receiver<RouterCommand>,
-    sio_tx: mpsc::Sender<SioMessage>,
+    sio_tx: mpsc::Sender<Packet>,
 ) {
-    let mut acks: HashMap<u64, oneshot::Sender<SioMessage>> = HashMap::new();
+    let mut acks: HashMap<u64, oneshot::Sender<Packet>> = HashMap::new();
     let mut next_id: u64 = 0;
     let mut state = RouterState::Idle;
 
@@ -155,8 +149,8 @@ pub async fn router_loop(
                     }
 
                     RouterCommand::SendBinaryEvent { header, payload } => {
-                        // Send header (text)
-                        let packet = Packet::BinaryEvent(BinaryEventPacket::NoAck(header));
+                        // Send header (text) - we temporarily wrap payload but to_message ignores it
+                        let packet = Packet::BinaryEvent(BinaryEventPacket::NoAck(header), Attachments::new());
                         let msg = packet.to_message();
                         let _ = eio_tx.send(msg).await;
 
@@ -175,7 +169,8 @@ pub async fn router_loop(
                         // Upgrade BinaryPacket -> BinaryAckPacket
                         let ack_packet = AckPacket::new(header.inner, id);
                         let bin_ack = BinaryAckPacket::new(ack_packet, header.attachments);
-                        let packet = Packet::BinaryEvent(BinaryEventPacket::Ack(bin_ack));
+
+                        let packet = Packet::BinaryEvent(BinaryEventPacket::Ack(bin_ack), Attachments::new());
                         let msg = packet.to_message();
                         let _ = eio_tx.send(msg).await;
 
@@ -187,7 +182,7 @@ pub async fn router_loop(
 
                     RouterCommand::SendBinaryAck { header, payload } => {
                         // Send header (text)
-                        let packet = Packet::BinaryAck(header);
+                        let packet = Packet::BinaryAck(header, Attachments::new());
                         let msg = packet.to_message();
                         let _ = eio_tx.send(msg).await;
 
@@ -205,20 +200,35 @@ pub async fn router_loop(
             Some(msg) = eio_rx.recv() => {
                 // Handle binary attachments (stateful reassembly)
                 if let MessagePacket::Binary(chunk) = msg {
-                    if let RouterState::Buffering { header, expected, mut blobs } = state {
-                        blobs.push(chunk);
+                    match &mut state {
+                        RouterState::Buffering { packet } => {
+                            // Mutate attachments in place and check if complete
+                            let complete = match packet {
+                                Packet::BinaryEvent(inner, atts) => {
+                                    atts.push(chunk);
+                                    let expected = match inner {
+                                        BinaryEventPacket::NoAck(p) => p.attachments,
+                                        BinaryEventPacket::Ack(p) => p.attachments,
+                                    };
+                                    atts.len() as u64 == expected
+                                }
+                                Packet::BinaryAck(inner, atts) => {
+                                    atts.push(chunk);
+                                    atts.len() as u64 == inner.attachments
+                                }
+                                _ => unreachable!("Buffering state should only contain binary packets"),
+                            };
 
-                        // Check if reassembly is complete
-                        if blobs.len() as u64 == expected {
-                            dispatch(header, blobs, &mut acks, &sio_tx).await;
-                            state = RouterState::Idle;
-                        } else {
-                            // More attachments expected
-                            state = RouterState::Buffering { header, expected, blobs };
+                            if complete {
+                                // Take ownership of the packet and reset state to Idle
+                                if let RouterState::Buffering { packet } = std::mem::replace(&mut state, RouterState::Idle) {
+                                    dispatch(packet, &mut acks, &sio_tx).await;
+                                }
+                            }
                         }
-                    } else {
-                        // Error: unexpected binary in Idle state
-                        eprintln!("Router error: unexpected binary packet in Idle state");
+                        RouterState::Idle => {
+                            eprintln!("Router error: unexpected binary packet in Idle state");
+                        }
                     }
                     continue;
                 }
@@ -227,22 +237,18 @@ pub async fn router_loop(
                 if let Ok(packet) = Packet::try_from_message(msg) {
                     // Determine expected attachment count by inspecting strict variants
                     let expected = match &packet {
-                        Packet::BinaryEvent(BinaryEventPacket::NoAck(p)) => p.attachments,
-                        Packet::BinaryEvent(BinaryEventPacket::Ack(p)) => p.attachments,
-                        Packet::BinaryAck(p) => p.attachments,
+                        Packet::BinaryEvent(BinaryEventPacket::NoAck(p), _) => p.attachments,
+                        Packet::BinaryEvent(BinaryEventPacket::Ack(p), _) => p.attachments,
+                        Packet::BinaryAck(p, _) => p.attachments,
                         _ => 0,
                     };
 
                     if expected > 0 {
-                        // Enter buffering state
-                        state = RouterState::Buffering {
-                            header: packet,
-                            expected,
-                            blobs: Attachments::with_capacity(expected as usize),
-                        };
+                        // Enter buffering state - packet already has empty attachments allocated
+                        state = RouterState::Buffering { packet };
                     } else {
                         // No attachments: dispatch immediately
-                        dispatch(packet, Attachments::new(), &mut acks, &sio_tx).await;
+                        dispatch(packet, &mut acks, &sio_tx).await;
                     }
                 } else {
                     eprintln!("Router error: failed to parse packet");
@@ -258,27 +264,25 @@ pub async fn router_loop(
 /// Otherwise, it is sent to the user via the sio_tx channel.
 ///
 /// # Arguments
-/// * `packet` - The complete packet header
-/// * `attachments` - The binary attachments (if any)
+/// * `packet` - The complete packet (including attachments if any)
 /// * `acks` - The acknowledgement handler registry
 /// * `sio_tx` - The channel for sending messages to the user
 async fn dispatch(
     packet: Packet,
-    attachments: Attachments,
-    acks: &mut HashMap<u64, oneshot::Sender<SioMessage>>,
-    sio_tx: &mpsc::Sender<SioMessage>,
+    acks: &mut HashMap<u64, oneshot::Sender<Packet>>,
+    sio_tx: &mpsc::Sender<Packet>,
 ) {
     // Check if this is an acknowledgement response
     match &packet {
         Packet::Ack(p) => {
             if let Some(tx) = acks.remove(&p.ack_id) {
-                let _ = tx.send((packet, attachments));
+                let _ = tx.send(packet);
                 return;
             }
         }
-        Packet::BinaryAck(p) => {
+        Packet::BinaryAck(p, _) => {
             if let Some(tx) = acks.remove(&p.inner.ack_id) {
-                let _ = tx.send((packet, attachments));
+                let _ = tx.send(packet);
                 return;
             }
         }
@@ -286,5 +290,5 @@ async fn dispatch(
     }
 
     // Not an ack: send to user
-    let _ = sio_tx.send((packet, attachments)).await;
+    let _ = sio_tx.send(packet).await;
 }

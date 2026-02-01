@@ -5,7 +5,7 @@
 //! acknowledgement-based emission strategies.
 
 use crate::error::{Error, Result};
-use crate::packet::{Attachments, BasePacket, BinaryPacket};
+use crate::packet::{Attachments, BasePacket, BinaryPacket, Packet};
 use crate::router::RouterCommand;
 use bytes::Bytes;
 use tokio::sync::{mpsc, oneshot};
@@ -75,7 +75,7 @@ impl EventBuilder {
     ///
     /// # Returns
     /// A oneshot receiver for the acknowledgement reply.
-    pub async fn ack(self) -> Result<oneshot::Receiver<crate::router::SioMessage>> {
+    pub async fn ack(self) -> Result<oneshot::Receiver<Packet>> {
         let (tx, rx) = oneshot::channel();
 
         let cmd = if self.attachments.is_empty() {

@@ -22,7 +22,7 @@
 //!     let mut client = connect("http://localhost:3000".to_string()).await?;
 //!
 //!     // Receive messages
-//!     while let Some((packet, attachments)) = client.recv().await {
+//!     while let Some(packet) = client.recv().await {
 //!         println!("Received: {:?}", packet);
 //!     }
 //!
@@ -70,7 +70,7 @@
 //!     }).await.unwrap();
 //!
 //!     // Wait for acknowledgement
-//!     let (ack_packet, ack_attachments) = rx.await.unwrap();
+//!     let ack_packet = rx.await.unwrap();
 //!     println!("Received ack: {:?}", ack_packet);
 //!
 //!     Ok(())
@@ -110,7 +110,8 @@
 //! ```
 
 use crate::error::Result;
-use crate::router::{RouterCommand, SioMessage, router_loop};
+use crate::packet::Packet;
+use crate::router::{RouterCommand, router_loop};
 use sioc_engine::builder::ClientBuilder as EioBuilder;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -126,7 +127,7 @@ pub struct SioClient {
     /// Sender for router commands (outgoing).
     pub router_tx: mpsc::Sender<RouterCommand>,
     /// Receiver for complete Socket.IO messages (incoming).
-    pub sio_rx: mpsc::Receiver<SioMessage>,
+    pub sio_rx: mpsc::Receiver<Packet>,
     /// Handle to the background router task.
     #[allow(dead_code)]
     handle: JoinHandle<()>,
@@ -143,7 +144,7 @@ impl SioClient {
     /// Receive the next incoming Socket.IO message.
     ///
     /// Returns `None` if the connection is closed.
-    pub async fn recv(&mut self) -> Option<SioMessage> {
+    pub async fn recv(&mut self) -> Option<Packet> {
         self.sio_rx.recv().await
     }
 }
@@ -174,7 +175,7 @@ impl SioClient {
 ///     client.sender().send(RouterCommand::SendEvent(base)).await.unwrap();
 ///
 ///     // Receive messages
-///     while let Some((packet, _attachments)) = client.recv().await {
+///     while let Some(packet) = client.recv().await {
 ///         println!("Received: {:?}", packet);
 ///     }
 ///

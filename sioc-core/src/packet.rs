@@ -140,10 +140,10 @@ pub enum Packet {
         /// The error message.
         message: String,
     },
-    /// Type 5: Binary event packet.
-    BinaryEvent(BinaryEventPacket),
-    /// Type 6: Binary acknowledgement packet.
-    BinaryAck(BinaryAckPacket),
+    /// Type 5: Binary event packet with attachments.
+    BinaryEvent(BinaryEventPacket, Attachments),
+    /// Type 6: Binary acknowledgement packet with attachments.
+    BinaryAck(BinaryAckPacket, Attachments),
 }
 
 // ============================================================================
@@ -164,14 +164,15 @@ impl Packet {
             Packet::Event(_) => ('2', 0),
             Packet::Ack(_) => ('3', 0),
             Packet::ConnectError { .. } => ('4', 0),
-            Packet::BinaryEvent(ev) => {
+            // Ignore the attachments vector here; we use the count from the header struct
+            Packet::BinaryEvent(ev, _) => {
                 let count = match ev {
                     BinaryEventPacket::NoAck(p) => p.attachments,
                     BinaryEventPacket::Ack(p) => p.attachments,
                 };
                 ('5', count)
             }
-            Packet::BinaryAck(ack) => ('6', ack.attachments),
+            Packet::BinaryAck(ack, _) => ('6', ack.attachments),
         };
 
         // Write type
@@ -192,11 +193,11 @@ impl Packet {
             },
             Packet::Ack(ack) => &ack.inner.ns,
             Packet::ConnectError { ns, .. } => ns,
-            Packet::BinaryEvent(ev) => match ev {
+            Packet::BinaryEvent(ev, _) => match ev {
                 BinaryEventPacket::NoAck(p) => &p.inner.ns,
                 BinaryEventPacket::Ack(ack) => &ack.inner.inner.ns,
             },
-            Packet::BinaryAck(ack) => &ack.inner.inner.ns,
+            Packet::BinaryAck(ack, _) => &ack.inner.inner.ns,
         };
 
         if ns != "/" {
@@ -212,10 +213,10 @@ impl Packet {
             Packet::Ack(ack) => {
                 buf.put(ack.ack_id.to_string().as_bytes());
             }
-            Packet::BinaryEvent(BinaryEventPacket::Ack(ack)) => {
+            Packet::BinaryEvent(BinaryEventPacket::Ack(ack), _) => {
                 buf.put(ack.inner.ack_id.to_string().as_bytes());
             }
-            Packet::BinaryAck(ack) => {
+            Packet::BinaryAck(ack, _) => {
                 buf.put(ack.inner.ack_id.to_string().as_bytes());
             }
             _ => {}
@@ -236,14 +237,14 @@ impl Packet {
             Packet::ConnectError { message, .. } => {
                 buf.put(message.as_bytes());
             }
-            Packet::BinaryEvent(ev) => {
+            Packet::BinaryEvent(ev, _) => {
                 let data = match ev {
                     BinaryEventPacket::NoAck(p) => &p.inner.data,
                     BinaryEventPacket::Ack(ack) => &ack.inner.inner.data,
                 };
                 buf.put(data.clone());
             }
-            Packet::BinaryAck(ack) => {
+            Packet::BinaryAck(ack, _) => {
                 buf.put(ack.inner.inner.data.clone());
             }
             _ => {}
@@ -311,9 +312,17 @@ impl Packet {
                 if let Some(ack_id) = id {
                     let ack = AckPacket::new(bin.inner.clone(), ack_id);
                     let bin_ack = BinaryAckPacket::new(ack, attachments);
-                    Ok(Packet::BinaryEvent(BinaryEventPacket::Ack(bin_ack)))
+                    // Pre-allocate attachments for efficiency
+                    Ok(Packet::BinaryEvent(
+                        BinaryEventPacket::Ack(bin_ack),
+                        Attachments::with_capacity(attachments as usize),
+                    ))
                 } else {
-                    Ok(Packet::BinaryEvent(BinaryEventPacket::NoAck(bin)))
+                    // Pre-allocate attachments for efficiency
+                    Ok(Packet::BinaryEvent(
+                        BinaryEventPacket::NoAck(bin),
+                        Attachments::with_capacity(attachments as usize),
+                    ))
                 }
             }
             '6' => {
@@ -321,7 +330,11 @@ impl Packet {
                 let base = BasePacket::new(ns, data);
                 let ack = AckPacket::new(base, ack_id);
                 let bin_ack = BinaryAckPacket::new(ack, attachments);
-                Ok(Packet::BinaryAck(bin_ack))
+                // Pre-allocate attachments for efficiency
+                Ok(Packet::BinaryAck(
+                    bin_ack,
+                    Attachments::with_capacity(attachments as usize),
+                ))
             }
             _ => Err(Error::InvalidPacket),
         }
@@ -456,7 +469,7 @@ mod tests {
             Bytes::from(r#"["image",{"_placeholder":true,"num":0}]"#),
         );
         let bin = BinaryPacket::new(base, 1);
-        let packet = Packet::BinaryEvent(BinaryEventPacket::NoAck(bin));
+        let packet = Packet::BinaryEvent(BinaryEventPacket::NoAck(bin), Attachments::new());
         let msg = packet.to_message();
         assert_eq!(
             msg,
