@@ -14,18 +14,21 @@ categories = ["network-programming", "asynchronous", "web-programming"]
 [dependencies]
 # Workspace dependencies
 bytes.workspace = true
-sioc-core.workspace = true
-sioc-macros.workspace = true
+futures-util.workspace = true
+miette.workspace = true
+pin-project = "1.1.11"
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sioc-core.workspace = true
+sioc-engine.workspace = true
+sioc-macros.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
+url.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["full", "test-util"] }
+tokio = { workspace = true, features = ["full"] }
 
 [features]
 default = []
-
-[package.metadata.docs.rs]
-all-features = true
-rustdoc-args = ["--cfg", "docsrs"]

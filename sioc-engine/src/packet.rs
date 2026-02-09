@@ -1,114 +1,200 @@
-use base64::prelude::*;
-use bytes::{BufMut, Bytes, BytesMut};
+use crate::error::{Error, PacketError, Result};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
-use std::convert::TryFrom;
 
-use crate::error::{Error, Result};
+pub const PROBE: Bytes = Bytes::from_static(b"probe");
 
-/// Message content for Engine.IO packets
+fn encode_prefixed(prefix: u8, data: &[u8]) -> Bytes {
+    let mut buf = BytesMut::with_capacity(1 + data.len());
+    buf.put_u8(prefix);
+    buf.extend_from_slice(data);
+    buf.freeze()
+}
+
+/// Content exchanged between the Socket.IO and Engine.IO layers.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MessagePacket {
+pub enum Message {
+    /// A UTF-8 text payload.
     Text(Bytes),
+    /// A raw binary payload.
+    Binary(Bytes),
+    /// Signals a clean connection close.
+    Close,
+}
+
+/// A wire-level frame exchanged with the transport layer.
+///
+/// `Text` carries a fully-encoded Engine.IO text packet (e.g. `b"4hello"`).
+/// `Binary` carries a raw binary payload with no packet-type prefix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Frame {
+    /// A UTF-8 text frame (contains a complete Engine.IO packet).
+    Packet(EioPacket),
+    /// A raw binary frame.
     Binary(Bytes),
 }
 
-impl MessagePacket {
-    /// Consumes the message and returns the underlying bytes
-    pub fn into_bytes(self) -> Bytes {
-        match self {
-            MessagePacket::Text(bytes) | MessagePacket::Binary(bytes) => bytes,
+impl Frame {
+    pub fn unexpected(self, description: impl Into<String>) -> Error {
+        Error::UnexpectedFrame {
+            description: description.into(),
+            frame: self,
         }
     }
 }
 
-/// Data which gets exchanged in a handshake as defined by the server.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct Handshake {
-    pub sid: String,
-    pub upgrades: Vec<String>,
-    #[serde(rename = "pingInterval")]
-    pub ping_interval: u64,
-    #[serde(rename = "pingTimeout")]
-    pub ping_timeout: u64,
+impl From<Frame> for Bytes {
+    fn from(frame: Frame) -> Self {
+        match frame {
+            Frame::Packet(packet) => packet.encode(),
+            Frame::Binary(bytes) => bytes,
+        }
+    }
 }
 
-/// A `Packet` sent via the `engine.io` protocol.
+impl From<Message> for Frame {
+    fn from(message: Message) -> Self {
+        match message {
+            Message::Text(bytes) => Frame::from(EioPacket::Message(bytes)),
+            Message::Binary(bytes) => Frame::Binary(bytes),
+            Message::Close => Frame::from(EioPacket::Close),
+        }
+    }
+}
+
+impl From<EioPacket> for Frame {
+    fn from(packet: EioPacket) -> Self {
+        Frame::Packet(packet)
+    }
+}
+
+/// Data exchanged in the Engine.IO v4 handshake (the `open` packet payload).
+///
+/// # Wire format
+///
+/// ```json
+/// {
+///   "sid": "lv_VI97HAXpY6yYWAAAC",
+///   "upgrades": ["websocket"],
+///   "pingInterval": 25000,
+///   "pingTimeout": 20000,
+///   "maxPayload": 1000000
+/// }
+/// ```
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Handshake {
+    /// Session identifier; sent as the `sid` query parameter in all subsequent requests.
+    pub sid: String,
+
+    /// Available transport upgrades (e.g. `["websocket"]`).
+    pub upgrades: Vec<String>,
+
+    /// Server ping interval in milliseconds.
+    #[serde(rename = "pingInterval")]
+    pub ping_interval: u64,
+
+    /// Server ping timeout in milliseconds.
+    #[serde(rename = "pingTimeout")]
+    pub ping_timeout: u64,
+
+    /// Maximum bytes per chunk, used by the client to aggregate packets into payloads.
+    #[serde(rename = "maxPayload")]
+    pub max_payload: u64,
+}
+
+impl Handshake {
+    pub fn can_upgrade_to_websocket(&self) -> bool {
+        self.upgrades.iter().any(|u| u == "websocket")
+    }
+
+    /// Combined `pingInterval + pingTimeout` as a [`Duration`](std::time::Duration).
+    pub fn ping_window(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.ping_interval + self.ping_timeout)
+    }
+}
+
+/// A packet in the Engine.IO v4 protocol.
+///
+/// | Type      | ID  | Direction           |
+/// |-----------|-----|---------------------|
+/// | `Open`    | `0` | server → client     |
+/// | `Close`   | `1` | both                |
+/// | `Ping`    | `2` | server → client     |
+/// | `Pong`    | `3` | client → server     |
+/// | `Message` | `4` | both                |
+/// | `Upgrade` | `5` | client → server     |
+/// | `Noop`    | `6` | server → client     |
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Packet {
+pub enum EioPacket {
+    /// `0` — Handshake data from the server.
     Open(Handshake),
+    /// `1` — The transport can be closed.
     Close,
+    /// `2` — Heartbeat from the server (client must reply with [`EioPacket::Pong`]).
     Ping(Bytes),
+    /// `3` — Heartbeat reply.
     Pong(Bytes),
-    Message(MessagePacket),
+    /// `4` — Application-level text data.
+    Message(Bytes),
+    /// `5` — Sent by the client to finalise a transport upgrade.
     Upgrade,
+    /// `6` — Sent by the server to flush a pending long-poll GET during upgrade.
     Noop,
 }
 
-impl TryFrom<Bytes> for Packet {
-    type Error = Error;
-    /// Decodes a single `Packet` from an `u8` byte stream.
-    fn try_from(bytes: Bytes) -> Result<Self> {
-        if bytes.is_empty() {
-            return Err(Error::IncompletePacket);
-        }
-
-        let first_byte = *bytes.first().ok_or(Error::IncompletePacket)?;
-        let data = bytes.slice(1..);
-
-        match first_byte {
-            b'0' => {
-                // Parse JSON handshake
-                let handshake: Handshake = serde_json::from_slice(data.as_ref())?;
-                Ok(Packet::Open(handshake))
-            }
-            b'1' => Ok(Packet::Close),
-            b'2' => Ok(Packet::Ping(data)),
-            b'3' => Ok(Packet::Pong(data)),
-            b'4' => Ok(Packet::Message(MessagePacket::Text(data))),
-            b'b' => {
-                // Base64 decode binary message
-                let decoded = BASE64_STANDARD.decode(data.as_ref())?;
-                Ok(Packet::Message(MessagePacket::Binary(Bytes::from(decoded))))
-            }
-            b'5' => Ok(Packet::Upgrade),
-            b'6' => Ok(Packet::Noop),
-            _ => Err(Error::InvalidPacketId(first_byte)),
+impl EioPacket {
+    /// Encodes this packet into a [`Frame`] for transport.
+    ///
+    /// | Variant | Result |
+    /// |---------|--------|
+    /// | `Message(data)` | `Text("4" + data)` |
+    /// | `Ping(data)` | `Text("2" + data)` |
+    /// | `Pong(data)` | `Text("3" + data)` |
+    /// | `Open(hs)` | `Text("0" + JSON)` |
+    /// | `Close` | `Text("1")` |
+    /// | `Upgrade` | `Text("5")` |
+    /// | `Noop` | `Text("6")` |
+    pub fn encode(&self) -> Bytes {
+        match self {
+            EioPacket::Message(data) => encode_prefixed(b'4', data),
+            EioPacket::Ping(data) => encode_prefixed(b'2', data),
+            EioPacket::Pong(data) => encode_prefixed(b'3', data),
+            EioPacket::Open(handshake) => encode_prefixed(
+                b'0',
+                &serde_json::to_vec(&handshake).expect("handshake should serialize to JSON"),
+            ),
+            EioPacket::Close => Bytes::from_static(b"1"),
+            EioPacket::Upgrade => Bytes::from_static(b"5"),
+            EioPacket::Noop => Bytes::from_static(b"6"),
         }
     }
-}
 
-impl Packet {
-    pub fn into_message(self) -> MessagePacket {
-        match self {
-            Packet::Message(MessagePacket::Binary(data)) => MessagePacket::Binary(data),
-            Packet::Message(MessagePacket::Text(data)) => {
-                let mut buf = BytesMut::with_capacity(1 + data.len());
-                buf.put_u8(b'4');
-                buf.extend_from_slice(&data);
-                MessagePacket::Text(buf.freeze())
-            }
-            Packet::Open(handshake) => {
-                let json = serde_json::to_string(&handshake).unwrap();
-                let mut buf = BytesMut::with_capacity(1 + json.len());
-                buf.put_u8(b'0');
-                buf.extend_from_slice(json.as_bytes());
-                MessagePacket::Text(buf.freeze())
-            }
-            Packet::Close => MessagePacket::Text(Bytes::from_static(b"1")),
-            Packet::Ping(data) => {
-                let mut buf = BytesMut::with_capacity(1 + data.len());
-                buf.put_u8(b'2');
-                buf.extend_from_slice(&data);
-                MessagePacket::Text(buf.freeze())
-            }
-            Packet::Pong(data) => {
-                let mut buf = BytesMut::with_capacity(1 + data.len());
-                buf.put_u8(b'3');
-                buf.extend_from_slice(&data);
-                MessagePacket::Text(buf.freeze())
-            }
-            Packet::Upgrade => MessagePacket::Text(Bytes::from_static(b"5")),
-            Packet::Noop => MessagePacket::Text(Bytes::from_static(b"6")),
+    /// Decodes a single packet from a text frame.
+    ///
+    /// The first byte is the packet-type digit (`b'0'`..=`b'6'`).
+    pub fn decode(mut data: Bytes) -> Result<Self, PacketError> {
+        if data.is_empty() {
+            Err(PacketError::Empty)?;
+        }
+        let first = data[0];
+        data.advance(1);
+
+        match first {
+            b'0' => Ok(EioPacket::Open(serde_json::from_slice(&data)?)),
+            b'1' => Ok(EioPacket::Close),
+            b'2' => Ok(EioPacket::Ping(data)),
+            b'3' => Ok(EioPacket::Pong(data)),
+            b'4' => Ok(EioPacket::Message(data)),
+            b'5' => Ok(EioPacket::Upgrade),
+            b'6' => Ok(EioPacket::Noop),
+            _ => Err(PacketError::InvalidId { byte: first })?,
+        }
+    }
+
+    pub fn unexpected(self, description: impl Into<String>) -> Error {
+        Error::UnexpectedPacket {
+            description: description.into(),
+            packet: self,
         }
     }
 }
@@ -118,92 +204,133 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn test_handshake() -> Handshake {
+        Handshake {
+            sid: "abc".into(),
+            upgrades: vec!["websocket".into()],
+            ping_interval: 25000,
+            ping_timeout: 5000,
+            max_payload: 1_000_000,
+        }
+    }
+
     #[test]
-    fn test_handshake_packet_parsing() {
-        let handshake_json = json!({
-            "sid": "test-123",
-            "upgrades": ["websocket"],
+    fn handshake_missing_required_field_is_error() {
+        let json = json!({
+            "sid": "test-456",
+            "upgrades": [],
             "pingInterval": 25000,
-            "pingTimeout": 5000
+            "pingTimeout": 20000
         });
-
-        let data = Bytes::from(handshake_json.to_string());
-        let packet_bytes = Bytes::from(format!("0{}", std::str::from_utf8(&data).unwrap()));
-        let packet = Packet::try_from(packet_bytes).unwrap();
-
-        match packet {
-            Packet::Open(handshake) => {
-                assert_eq!(handshake.sid, "test-123");
-                assert_eq!(handshake.upgrades, vec!["websocket"]);
-                assert_eq!(handshake.ping_interval, 25000);
-                assert_eq!(handshake.ping_timeout, 5000);
-            }
-            _ => panic!("Expected open packet"),
-        }
+        let bytes = Bytes::from(format!("0{}", json));
+        assert!(EioPacket::decode(bytes).is_err());
     }
 
     #[test]
-    fn test_packet_type_conversions() {
-        // Test parsing from bytes
-        let handshake_json = r#"{"sid":"test","upgrades":[],"pingInterval":0,"pingTimeout":0}"#;
+    fn handshake_ping_window() {
+        let hs = test_handshake();
+        assert_eq!(
+            hs.ping_window(),
+            std::time::Duration::from_millis(25000 + 5000)
+        );
+    }
+
+    #[test]
+    fn decode_invalid_packet_id() {
         assert!(matches!(
-            Packet::try_from(Bytes::from(format!("0{}", handshake_json))).unwrap(),
-            Packet::Open(_)
-        ));
-        assert!(matches!(
-            Packet::try_from(Bytes::from("1")).unwrap(),
-            Packet::Close
-        ));
-        assert!(matches!(
-            Packet::try_from(Bytes::from("2probe")).unwrap(),
-            Packet::Ping(_)
-        ));
-        assert!(matches!(
-            Packet::try_from(Bytes::from("3probe")).unwrap(),
-            Packet::Pong(_)
-        ));
-        assert!(matches!(
-            Packet::try_from(Bytes::from("4hello")).unwrap(),
-            Packet::Message(MessagePacket::Text(_))
-        ));
-        assert!(matches!(
-            Packet::try_from(Bytes::from("5")).unwrap(),
-            Packet::Upgrade
-        ));
-        assert!(matches!(
-            Packet::try_from(Bytes::from("6")).unwrap(),
-            Packet::Noop
+            EioPacket::decode(Bytes::from_static(b"9")),
+            Err(crate::error::PacketError::InvalidId { byte: b'9' })
         ));
     }
 
     #[test]
-    fn test_binary_message_parsing_from_base64() {
-        // Test parsing binary message from 'b' + Base64 format
-        let binary_data = vec![0, 1, 2, 255, 254];
-        let encoded = BASE64_STANDARD.encode(&binary_data);
-        let input = format!("b{}", encoded);
-
-        let packet = Packet::try_from(Bytes::from(input)).unwrap();
-        match packet {
-            Packet::Message(MessagePacket::Binary(data)) => {
-                assert_eq!(data.as_ref(), binary_data.as_slice())
-            }
-            _ => panic!("Expected binary message"),
-        }
+    fn decode_empty_packet() {
+        assert!(matches!(
+            EioPacket::decode(Bytes::new()),
+            Err(crate::error::PacketError::Empty)
+        ));
     }
 
     #[test]
-    fn test_text_message_parsing_from_prefixed() {
-        // Test parsing text message from '4' + text format
-        let text_data = "hello world";
-        let input = format!("4{}", text_data);
+    fn encode_decode_open_round_trip() {
+        let hs = test_handshake();
+        let Frame::Packet(packet) = EioPacket::Open(hs.clone()).into() else {
+            panic!("expected Packet frame");
+        };
+        let EioPacket::Open(decoded) = packet else {
+            panic!("expected Open");
+        };
+        assert_eq!(decoded, hs);
+    }
 
-        let packet = Packet::try_from(Bytes::from(input)).unwrap();
-        match packet {
-            Packet::Message(MessagePacket::Text(data)) => {
-                assert_eq!(data.as_ref(), text_data.as_bytes())
-            }
-            _ => panic!("Expected text message"),
-        }
+    #[test]
+    fn encode_decode_close_round_trip() {
+        let Frame::Packet(packet) = EioPacket::Close.into() else {
+            panic!("expected Packet frame");
+        };
+        assert!(matches!(packet, EioPacket::Close));
+    }
+
+    #[test]
+    fn encode_decode_ping_round_trip() {
+        let payload = Bytes::from_static(b"probe");
+        let Frame::Packet(packet) = EioPacket::Ping(payload.clone()).into() else {
+            panic!("expected Packet frame");
+        };
+        let EioPacket::Ping(decoded) = packet else {
+            panic!("expected Ping");
+        };
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn encode_decode_pong_round_trip() {
+        let payload = Bytes::from_static(b"probe");
+        let Frame::Packet(packet) = EioPacket::Pong(payload.clone()).into() else {
+            panic!("expected Packet frame");
+        };
+        let EioPacket::Pong(decoded) = packet else {
+            panic!("expected Pong");
+        };
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn encode_decode_text_message_round_trip() {
+        let text = Bytes::from_static(b"hello world");
+        let Frame::Packet(packet) = EioPacket::Message(text.clone()).into() else {
+            panic!("expected Packet frame");
+        };
+        let EioPacket::Message(decoded) = packet else {
+            panic!("expected Message");
+        };
+        assert_eq!(decoded, text);
+    }
+
+    #[test]
+    fn encode_decode_upgrade_round_trip() {
+        let Frame::Packet(packet) = EioPacket::Upgrade.into() else {
+            panic!("expected Packet frame");
+        };
+        assert!(matches!(packet, EioPacket::Upgrade));
+    }
+
+    #[test]
+    fn encode_decode_noop_round_trip() {
+        let Frame::Packet(packet) = EioPacket::Noop.into() else {
+            panic!("expected Packet frame");
+        };
+        assert!(matches!(packet, EioPacket::Noop));
+    }
+
+    #[test]
+    fn encode_ping_empty_payload() {
+        let Frame::Packet(packet) = EioPacket::Ping(Bytes::new()).into() else {
+            panic!("expected Packet frame");
+        };
+        let EioPacket::Ping(decoded) = packet else {
+            panic!("expected Ping");
+        };
+        assert!(decoded.is_empty());
     }
 }

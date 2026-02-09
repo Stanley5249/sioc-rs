@@ -1,2 +1,11 @@
+# IDE
+.vscode/
+.idea/
+.zed/
+
 # Rust Artifacts
 target/
+
+# Python
+.venv/
+__pycache__/

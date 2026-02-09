@@ -10,21 +10,13 @@ keywords = ["socketio", "websocket", "async", "networking"]
 categories = ["network-programming", "asynchronous", "web-programming"]
 
 [dependencies]
-# Workspace dependencies
+sioc-engine.workspace = true
+
 bytes.workspace = true
 miette.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-smallvec.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-
-# Other dependencies
-futures-util = "0.3"
-url = "2"
-
-# Engine.IO dependency
-sioc-engine = { path = "../sioc-engine" }
-
-[dev-dependencies]
-tokio-test = "0.4"
+tracing.workspace = true
+url.workspace = true

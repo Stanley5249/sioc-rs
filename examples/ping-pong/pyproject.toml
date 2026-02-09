@@ -1,0 +1,9 @@
+[project]
+name = "ping-pong"
+version = "0.1.0"
+description = "Ping-pong example with Socket.IO server in Python and client in Rust"
+requires-python = ">=3.14"
+dependencies = [
+    "python-socketio",
+    "uvicorn",
+]

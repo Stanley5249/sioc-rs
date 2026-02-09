@@ -1,0 +1,14 @@
+[package]
+name = "ping-pong"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+sioc.workspace = true
+url.workspace = true
+
+miette.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "process", "signal"] }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+tracing.workspace = true

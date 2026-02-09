@@ -1,49 +1,44 @@
-//! # Sioc Core
+//! Core Socket.IO v4 client protocol implementation.
 //!
-//! Core types and client implementation for the Sioc async Socket.IO client.
+//! This crate sits between the wire-level Engine.IO transport (`sioc-engine`)
+//! and the typed public API (`sioc`).  It implements the
+//! [Socket.IO v4 protocol][spec]: packet encoding/decoding, namespace
+//! multiplexing, acknowledgement tracking, and binary attachment reassembly.
 //!
-//! This crate provides the foundational types for building a high-performance,
-//! zero-copy Socket.IO client.
+//! # Layering
+//!
+//! ```text
+//! ┌─────────┐  typed events / acks
+//! │  sioc    │  (derive macros, marker traits)
+//! ├─────────┤
+//! │sioc-core│  ← you are here (protocol logic)
+//! ├─────────┤
+//! │sioc-eng.│  (Engine.IO v4 transport)
+//! └─────────┘
+//! ```
+//!
+//! Most users should depend on `sioc` instead — it re-exports the types
+//! from this crate that are part of the public surface.  Depend on
+//! `sioc-core` directly only if you need raw [`Command`](packet::Command) /
+//! [`Packet`](packet::Packet) access without the typed layer.
+//!
+//! # Key types
+//!
+//! | Type | Purpose |
+//! |------|---------|
+//! | [`Manager`](manager::Manager) | Internal event loop: routing, ack tracking, binary reassembly |
+//! | [`Packet`](packet::Packet) | Fully assembled inbound packet |
+//! | [`Command`](packet::Command) | Outbound packet ready for wire encoding |
+//!
+//! [spec]: https://socket.io/docs/v4/socket-io-protocol/
 
-#![warn(missing_docs, clippy::all)]
-#![cfg_attr(docsrs, feature(doc_cfg))]
-
-// Public modules
-pub mod builder;
-pub mod client;
 pub mod error;
-pub mod event;
+pub mod manager;
 pub mod packet;
-pub mod router;
+pub mod parse;
 
-/// Prelude module with commonly used types.
-///
-/// Import this module to get access to the most frequently used types:
-///
-/// ```rust
-/// use sioc_core::prelude::*;
-/// ```
 pub mod prelude {
-    pub use crate::client::{SioClient, connect};
-    pub use crate::error::{Error, Result};
-    pub use crate::event::Event;
-    pub use crate::packet::{
-        AckPacket, Attachments, BasePacket, BinaryAckPacket, BinaryEventPacket, BinaryPacket,
-        EventPacket, Packet,
-    };
-    pub use crate::router::RouterCommand;
-}
-
-// Version information
-/// Current version of sioc-core
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_version() {
-        assert!(!VERSION.is_empty());
-    }
+    pub use crate::error::{Error, ParseError, Result};
+    pub use crate::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Packet};
+    pub use crate::parse::{split_attachments, split_id, split_namespace};
 }

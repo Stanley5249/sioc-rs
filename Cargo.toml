@@ -1,10 +1,17 @@
 [workspace]
-members = ["sioc-core", "sioc-macros", "sioc", "sioc-engine"]
+members = ["sioc-core", "sioc-macros", "sioc", "sioc-engine", "examples/*"]
 resolver = "3"
 
 [workspace.dependencies]
+sioc = { path = "./sioc" }
+sioc-core = { path = "./sioc-core" }
+sioc-macros = { path = "./sioc-macros" }
+sioc-engine = { path = "./sioc-engine" }
+
 # Async runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["macros", "sync", "time"] }
+tokio-util = "0.7"
+futures-util = "0.3"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -13,28 +20,20 @@ serde_json = { version = "1", features = ["raw_value"] }
 # Zero-copy buffers
 bytes = "1"
 
-# Stack-allocated vectors
-smallvec = { version = "1", features = ["write"] }
-
 # Error handling
 thiserror = "2"
 miette = { version = "7", features = ["fancy"] }
 
+# URL parsing
+url = "2"
+
 # HTTP and WebSocket clients
-reqwest = { version = "0.13", default-features = false, features = ["stream"] }
-tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
+reqwest = { version = "0.13", default-features = false }
+tokio-tungstenite = { version = "0.28", features = ["url"] }
 
-# Procedural macro dependencies
-syn = { version = "2", features = ["full"] }
-quote = "1"
-proc-macro2 = "1"
-darling = "0.23"
-
-# Local workspace members
-sioc-core = { path = "./sioc-core" }
-sioc-macros = { path = "./sioc-macros" }
-sioc-engine = { path = "./sioc-engine" }
+# Logging
+tracing = "0.1.44"
+tracing-subscriber = "0.3.22"
 
 [workspace.metadata.docs.rs]
 all-features = true
-rustdoc-args = ["--cfg", "docsrs"]

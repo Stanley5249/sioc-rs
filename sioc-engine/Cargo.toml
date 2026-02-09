@@ -1,28 +1,40 @@
 [package]
 name = "sioc-engine"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 authors = ["Sioc Contributors"]
 description = "Async Engine.IO client implementation for Sioc"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = ["rustls-tls"]
+
+native-tls = [
+    "reqwest/native-tls",
+    "tokio-tungstenite/native-tls",
+]
+
+rustls-tls = [
+    "reqwest/rustls",
+    "tokio-tungstenite/rustls-tls-native-roots",
+]
+
 [dependencies]
-# Workspace dependencies
 bytes.workspace = true
+futures-util.workspace = true
 miette.workspace = true
 reqwest.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
 tokio-tungstenite.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
 
-# Other dependencies
-async-stream = "0.3"
 base64 = "0.22"
-futures-util = "0.3"
 http = "1"
-serde_json = "1"
-url = "2"
+tokio-util = "0.7.18"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { workspace = true, features = ["full"] }
