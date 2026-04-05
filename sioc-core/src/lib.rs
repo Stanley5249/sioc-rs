@@ -38,7 +38,8 @@ pub mod packet;
 pub mod parse;
 
 pub mod prelude {
-    pub use crate::error::{Error, ParseError, Result};
+    pub use crate::error::{Error, ParseError, PayloadError, Result};
+    pub use crate::manager::{CommandSender, ManagerAction};
     pub use crate::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Packet};
     pub use crate::parse::{split_attachments, split_id, split_namespace};
 }

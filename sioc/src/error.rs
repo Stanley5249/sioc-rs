@@ -11,7 +11,7 @@
 
 use miette::Diagnostic;
 pub use sioc_core::error::PayloadError;
-use sioc_core::packet::{Command, Ns};
+use sioc_core::prelude::ManagerAction;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinError;
@@ -65,7 +65,7 @@ pub enum Error {
 
     #[error("client send failed")]
     #[diagnostic(code(sioc::client_send))]
-    SendCommand(#[from] mpsc::error::SendError<Ns<Command>>),
+    SendCommand(#[from] mpsc::error::SendError<ManagerAction>),
 
     /// The internal manager task panicked or was cancelled.
     #[error("manager task failed")]

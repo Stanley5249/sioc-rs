@@ -9,27 +9,27 @@
 //! Also implements [`TryFrom<Bytes>`] for [`Ns<SioPacket>`], which is the
 //! primary inbound decoding entry-point.
 
-use crate::error::{ParseError, PayloadError, Result};
-use crate::packet::{Connect, ConnectError, Ns, SioPacket};
+use crate::error::{ParseError, Result};
+use crate::packet::{Ns, RawPacket};
 use bytes::{Buf, BufMut, Bytes};
 
-impl TryFrom<Bytes> for Ns<SioPacket> {
+impl TryFrom<Bytes> for Ns<RawPacket> {
     type Error = ParseError;
 
     fn try_from(mut data: Bytes) -> Result<Self, ParseError> {
-        let first = data.first().cloned().ok_or(ParseError::EmptyPacket)?;
-        data.advance(1);
+        if data.is_empty() {
+            return Err(ParseError::EmptyPacket);
+        }
+        let first = data.get_u8();
 
         let packet = match first {
             b'0' => {
                 let ns = split_namespace(&mut data)?;
-                let inner: Connect = serde_json::from_slice(&data)
-                    .map_err(|e| PayloadError::new::<Connect>(e).with_slice(&data))?;
-                Ns(ns, SioPacket::Connect(inner))
+                Ns(ns, RawPacket::Connect(data))
             }
             b'1' => {
                 let ns = split_namespace(&mut data)?;
-                Ns(ns, SioPacket::Disconnect)
+                Ns(ns, RawPacket::Disconnect)
             }
             b'2' => {
                 if let Some(count) = split_attachments(&mut data).transpose()? {
@@ -37,34 +37,18 @@ impl TryFrom<Bytes> for Ns<SioPacket> {
                 }
                 let ns = split_namespace(&mut data)?;
                 let id = split_id(&mut data).transpose()?;
-                Ns(
-                    ns,
-                    SioPacket::Event {
-                        data,
-                        id,
-                        count: None,
-                    },
-                )
+                Ns(ns, RawPacket::Event { data, id })
             }
             b'3' => {
                 let ns = split_namespace(&mut data)?;
                 let id = split_id(&mut data)
                     .transpose()?
                     .ok_or(ParseError::MissingAckId)?;
-                Ns(
-                    ns,
-                    SioPacket::Ack {
-                        data,
-                        id,
-                        count: None,
-                    },
-                )
+                Ns(ns, RawPacket::Ack { data, id })
             }
             b'4' => {
                 let ns = split_namespace(&mut data)?;
-                let inner: ConnectError = serde_json::from_slice(&data)
-                    .map_err(|e| PayloadError::new::<ConnectError>(e).with_slice(&data))?;
-                Ns(ns, SioPacket::ConnectError(inner))
+                Ns(ns, RawPacket::ConnectError(data))
             }
             b'5' => {
                 let count = split_attachments(&mut data)
@@ -72,14 +56,7 @@ impl TryFrom<Bytes> for Ns<SioPacket> {
                     .ok_or(ParseError::MissingAttachmentCount)?;
                 let ns = split_namespace(&mut data)?;
                 let id = split_id(&mut data).transpose()?;
-                Ns(
-                    ns,
-                    SioPacket::Event {
-                        data,
-                        id,
-                        count: Some(count),
-                    },
-                )
+                Ns(ns, RawPacket::BinaryEvent { data, id, count })
             }
             b'6' => {
                 let count = split_attachments(&mut data)
@@ -89,14 +66,7 @@ impl TryFrom<Bytes> for Ns<SioPacket> {
                 let id = split_id(&mut data)
                     .transpose()?
                     .ok_or(ParseError::MissingAckId)?;
-                Ns(
-                    ns,
-                    SioPacket::Ack {
-                        data,
-                        id,
-                        count: Some(count),
-                    },
-                )
+                Ns(ns, RawPacket::BinaryAck { data, id, count })
             }
             byte => return Err(ParseError::UnknownPacketType { byte }),
         };
@@ -120,6 +90,20 @@ fn namespace_size(ns: &str) -> usize {
     if ns == "/" { 0 } else { ns.len() + 1 }
 }
 
+pub fn hint_packet_size(ns: &str, binary: bool, ack: bool, data: Option<&[u8]>) -> usize {
+    let mut n = 1 + namespace_size(ns);
+    if ack {
+        n += ack_size_hint();
+    }
+    if binary {
+        n += binary_size_hint();
+    }
+    if let Some(data) = data {
+        n += data.len();
+    }
+    n
+}
+
 /// Writes `<count>-` into `buffer`.
 fn write_attachments(buffer: &mut impl BufMut, count: usize) {
     buffer.put_slice(count.to_string().as_bytes());
@@ -141,20 +125,6 @@ fn write_id(buffer: &mut impl BufMut, id: u64) {
 
 fn write_data(buffer: &mut impl BufMut, data: &[u8]) {
     buffer.put_slice(data);
-}
-
-pub fn packet_size_hint(ns: &str, binary: bool, ack: bool, data: Option<&[u8]>) -> usize {
-    let mut n = 1 + namespace_size(ns);
-    if ack {
-        n += ack_size_hint();
-    }
-    if binary {
-        n += binary_size_hint();
-    }
-    if let Some(data) = data {
-        n += data.len();
-    }
-    n
 }
 
 pub fn write_packet(
@@ -335,50 +305,31 @@ mod tests {
 
     #[test]
     fn parse_connect_packet() {
-        let data = Bytes::from_static(b"0{\"sid\":\"abc\"}");
-        let ns_packet: Ns<SioPacket> = data.try_into().unwrap();
-        assert_eq!(ns_packet.0, "/");
-        match ns_packet.1 {
-            SioPacket::Connect(c) => {
-                assert_eq!(c.sid, "abc");
-                assert!(c.extra.is_empty());
-            }
-            _ => panic!("expected Connect"),
-        }
+        todo!()
     }
 
     #[test]
     fn parse_connect_packet_with_extra_fields() {
-        let data = Bytes::from(r#"0{"sid":"abc","pid":"xyz","offset":"val"}"#);
-        let ns_packet: Ns<SioPacket> = data.try_into().unwrap();
-        match ns_packet.1 {
-            SioPacket::Connect(c) => {
-                assert_eq!(c.sid, "abc");
-                assert_eq!(c.extra["pid"], "xyz");
-                assert_eq!(c.extra["offset"], "val");
-            }
-            _ => panic!("expected Connect"),
-        }
+        todo!()
     }
 
     #[test]
     fn parse_disconnect_packet() {
         let data = Bytes::from_static(b"1");
-        let ns_packet: Ns<SioPacket> = data.try_into().unwrap();
+        let ns_packet: Ns<RawPacket> = data.try_into().unwrap();
         assert_eq!(ns_packet.0, "/");
-        assert!(matches!(ns_packet.1, SioPacket::Disconnect));
+        assert!(matches!(ns_packet.1, RawPacket::Disconnect));
     }
 
     #[test]
     fn parse_event_packet() {
         let data = Bytes::from_static(b"2[\"hello\",\"world\"]");
-        let ns_packet: Ns<SioPacket> = data.try_into().unwrap();
+        let ns_packet: Ns<RawPacket> = data.try_into().unwrap();
         assert_eq!(ns_packet.0, "/");
         match ns_packet.1 {
-            SioPacket::Event { data, id, count } => {
+            RawPacket::Event { data, id } => {
                 assert_eq!(&data[..], b"[\"hello\",\"world\"]");
                 assert!(id.is_none());
-                assert!(count.is_none());
             }
             _ => panic!("expected Event"),
         }
@@ -387,11 +338,10 @@ mod tests {
     #[test]
     fn parse_event_with_ack_id() {
         let data = Bytes::from_static(b"242[\"hello\"]");
-        let ns_packet: Ns<SioPacket> = data.try_into().unwrap();
+        let ns_packet: Ns<RawPacket> = data.try_into().unwrap();
         match ns_packet.1 {
-            SioPacket::Event { id, count, .. } => {
+            RawPacket::Event { id, .. } => {
                 assert_eq!(id, Some(42));
-                assert!(count.is_none());
             }
             _ => panic!("expected Event"),
         }
@@ -400,12 +350,11 @@ mod tests {
     #[test]
     fn parse_ack_packet() {
         let data = Bytes::from_static(b"37[\"ok\"]");
-        let ns_packet: Ns<SioPacket> = data.try_into().unwrap();
+        let ns_packet: Ns<RawPacket> = data.try_into().unwrap();
         match ns_packet.1 {
-            SioPacket::Ack { id, data, count } => {
+            RawPacket::Ack { id, data } => {
                 assert_eq!(id, 7);
                 assert_eq!(&data[..], b"[\"ok\"]");
-                assert!(count.is_none());
             }
             _ => panic!("expected Ack"),
         }
@@ -414,11 +363,10 @@ mod tests {
     #[test]
     fn parse_connect_error_packet() {
         let data = Bytes::from_static(b"4{\"message\":\"forbidden\"}");
-        let ns_packet: Ns<SioPacket> = data.try_into().unwrap();
+        let ns_packet: Ns<RawPacket> = data.try_into().unwrap();
         match ns_packet.1 {
-            SioPacket::ConnectError(e) => {
-                assert_eq!(e.message, "forbidden");
-                assert!(e.extra.is_empty());
+            RawPacket::ConnectError(_) => {
+                todo!()
             }
             _ => panic!("expected ConnectError"),
         }
@@ -427,11 +375,10 @@ mod tests {
     #[test]
     fn parse_connect_error_with_data() {
         let data = Bytes::from(r#"4{"message":"bad","data":{"code":401}}"#);
-        let ns_packet: Ns<SioPacket> = data.try_into().unwrap();
+        let ns_packet: Ns<RawPacket> = data.try_into().unwrap();
         match ns_packet.1 {
-            SioPacket::ConnectError(e) => {
-                assert_eq!(e.message, "bad");
-                assert_eq!(e.extra["data"]["code"], 401);
+            RawPacket::ConnectError(_) => {
+                todo!()
             }
             _ => panic!("expected ConnectError"),
         }
@@ -440,10 +387,10 @@ mod tests {
     #[test]
     fn parse_binary_event_packet() {
         let data = Bytes::from_static(b"52-[\"bin\"]");
-        let ns_packet: Ns<SioPacket> = data.try_into().unwrap();
+        let ns_packet: Ns<RawPacket> = data.try_into().unwrap();
         match ns_packet.1 {
-            SioPacket::Event { count, id, .. } => {
-                assert_eq!(count, Some(2));
+            RawPacket::BinaryEvent { count, id, .. } => {
+                assert_eq!(count, 2);
                 assert!(id.is_none());
             }
             _ => panic!("expected Event (binary)"),
@@ -453,10 +400,10 @@ mod tests {
     #[test]
     fn parse_binary_ack_packet() {
         let data = Bytes::from_static(b"61-5[\"ok\"]");
-        let ns_packet: Ns<SioPacket> = data.try_into().unwrap();
+        let ns_packet: Ns<RawPacket> = data.try_into().unwrap();
         match ns_packet.1 {
-            SioPacket::Ack { count, id, .. } => {
-                assert_eq!(count, Some(1));
+            RawPacket::BinaryAck { count, id, .. } => {
+                assert_eq!(count, 1);
                 assert_eq!(id, 5);
             }
             _ => panic!("expected Ack (binary)"),
@@ -466,7 +413,7 @@ mod tests {
     #[test]
     fn parse_unknown_packet_type() {
         let data = Bytes::from_static(b"9");
-        let err: std::result::Result<Ns<SioPacket>, _> = data.try_into();
+        let err: std::result::Result<Ns<RawPacket>, _> = data.try_into();
         assert!(matches!(
             err.unwrap_err(),
             ParseError::UnknownPacketType { byte: b'9' }
@@ -476,29 +423,29 @@ mod tests {
     #[test]
     fn parse_empty_packet() {
         let data = Bytes::new();
-        let err: std::result::Result<Ns<SioPacket>, _> = data.try_into();
+        let err: std::result::Result<Ns<RawPacket>, _> = data.try_into();
         assert!(matches!(err.unwrap_err(), ParseError::EmptyPacket));
     }
 
     #[test]
     fn parse_event_with_custom_namespace() {
         let data = Bytes::from_static(b"2/chat,[\"msg\"]");
-        let ns_packet: Ns<SioPacket> = data.try_into().unwrap();
+        let ns_packet: Ns<RawPacket> = data.try_into().unwrap();
         assert_eq!(ns_packet.0, "/chat");
-        assert!(matches!(ns_packet.1, SioPacket::Event { .. }));
+        assert!(matches!(ns_packet.1, RawPacket::Event { .. }));
     }
 
     #[test]
     fn parse_ack_missing_id() {
         let data = Bytes::from_static(b"3[\"ok\"]");
-        let err: std::result::Result<Ns<SioPacket>, _> = data.try_into();
+        let err: std::result::Result<Ns<RawPacket>, _> = data.try_into();
         assert!(matches!(err.unwrap_err(), ParseError::MissingAckId));
     }
 
     #[test]
     fn parse_text_event_rejects_attachment_prefix() {
         let data = Bytes::from_static(b"21-[\"oops\"]");
-        let err: std::result::Result<Ns<SioPacket>, _> = data.try_into();
+        let err: std::result::Result<Ns<RawPacket>, _> = data.try_into();
         assert!(matches!(
             err.unwrap_err(),
             ParseError::UnexpectedAttachments { count: 1 }
@@ -508,13 +455,12 @@ mod tests {
     #[test]
     fn parse_event_with_hyphenated_namespace() {
         let data = Bytes::from_static(b"2/admin-ns,[\"msg\"]");
-        let ns_packet: Ns<SioPacket> = data.try_into().unwrap();
+        let ns_packet: Ns<RawPacket> = data.try_into().unwrap();
         assert_eq!(ns_packet.0, "/admin-ns");
         match ns_packet.1 {
-            SioPacket::Event { data, id, count } => {
+            RawPacket::Event { data, id } => {
                 assert_eq!(&data[..], b"[\"msg\"]");
                 assert!(id.is_none());
-                assert!(count.is_none());
             }
             _ => panic!("expected Event"),
         }
@@ -523,11 +469,11 @@ mod tests {
     #[test]
     fn parse_binary_event_with_hyphenated_namespace() {
         let data = Bytes::from_static(b"51-/admin-ns,[\"bin\"]");
-        let ns_packet: Ns<SioPacket> = data.try_into().unwrap();
+        let ns_packet: Ns<RawPacket> = data.try_into().unwrap();
         assert_eq!(ns_packet.0, "/admin-ns");
         match ns_packet.1 {
-            SioPacket::Event { count, .. } => {
-                assert_eq!(count, Some(1));
+            RawPacket::BinaryEvent { count, .. } => {
+                assert_eq!(count, 1);
             }
             _ => panic!("expected binary Event"),
         }
@@ -536,7 +482,7 @@ mod tests {
     #[test]
     fn parse_binary_event_missing_attachment_count() {
         let data = Bytes::from_static(b"5[\"oops\"]");
-        let err: std::result::Result<Ns<SioPacket>, _> = data.try_into();
+        let err: std::result::Result<Ns<RawPacket>, _> = data.try_into();
         assert!(matches!(
             err.unwrap_err(),
             ParseError::MissingAttachmentCount
@@ -546,7 +492,7 @@ mod tests {
     #[test]
     fn parse_binary_ack_missing_attachment_count() {
         let data = Bytes::from_static(b"65[\"ok\"]");
-        let err: std::result::Result<Ns<SioPacket>, _> = data.try_into();
+        let err: std::result::Result<Ns<RawPacket>, _> = data.try_into();
         assert!(matches!(
             err.unwrap_err(),
             ParseError::MissingAttachmentCount
@@ -566,36 +512,36 @@ mod tests {
 
     #[test]
     fn write_namespace_default_is_noop() {
-        let mut buf = BytesMut::new();
-        write_namespace(&mut buf, "/");
-        assert!(buf.is_empty());
+        let mut buffer = BytesMut::new();
+        write_namespace(&mut buffer, "/");
+        assert!(buffer.is_empty());
     }
 
     #[test]
     fn write_namespace_custom_appends_comma() {
-        let mut buf = BytesMut::new();
-        write_namespace(&mut buf, "/chat");
-        assert_eq!(&buf[..], b"/chat,");
+        let mut buffer = BytesMut::new();
+        write_namespace(&mut buffer, "/chat");
+        assert_eq!(&buffer[..], b"/chat,");
     }
 
     #[test]
     fn write_id_formats_decimal() {
-        let mut buf = BytesMut::new();
-        write_id(&mut buf, 42);
-        assert_eq!(&buf[..], b"42");
+        let mut buffer = BytesMut::new();
+        write_id(&mut buffer, 42);
+        assert_eq!(&buffer[..], b"42");
     }
 
     #[test]
     fn write_data_appends_bytes() {
-        let mut buf = BytesMut::new();
-        write_data(&mut buf, b"[\"hello\"]");
-        assert_eq!(&buf[..], b"[\"hello\"]");
+        let mut buffer = BytesMut::new();
+        write_data(&mut buffer, b"[\"hello\"]");
+        assert_eq!(&buffer[..], b"[\"hello\"]");
     }
 
     #[test]
     fn write_attachments_formats_count_dash() {
-        let mut buf = BytesMut::new();
-        write_attachments(&mut buf, 3);
-        assert_eq!(&buf[..], b"3-");
+        let mut buffer = BytesMut::new();
+        write_attachments(&mut buffer, 3);
+        assert_eq!(&buffer[..], b"3-");
     }
 }

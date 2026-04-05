@@ -5,14 +5,14 @@ use serde::{Deserialize, Serialize};
 pub const PROBE: Bytes = Bytes::from_static(b"probe");
 
 fn encode_prefixed(prefix: u8, data: &[u8]) -> Bytes {
-    let mut buf = BytesMut::with_capacity(1 + data.len());
-    buf.put_u8(prefix);
-    buf.extend_from_slice(data);
-    buf.freeze()
+    let mut buffer = BytesMut::with_capacity(1 + data.len());
+    buffer.put_u8(prefix);
+    buffer.extend_from_slice(data);
+    buffer.freeze()
 }
 
 /// Content exchanged between the Socket.IO and Engine.IO layers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Message {
     /// A UTF-8 text payload.
     Text(Bytes),
@@ -22,16 +22,47 @@ pub enum Message {
     Close,
 }
 
+impl std::fmt::Debug for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Text(bytes) => f.debug_tuple("Text").field(bytes).finish(),
+            Self::Binary(bytes) => f.debug_struct("Binary").field("len", &bytes.len()).finish(),
+            Self::Close => write!(f, "Close"),
+        }
+    }
+}
+
 /// A wire-level frame exchanged with the transport layer.
 ///
 /// `Text` carries a fully-encoded Engine.IO text packet (e.g. `b"4hello"`).
 /// `Binary` carries a raw binary payload with no packet-type prefix.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Frame {
     /// A UTF-8 text frame (contains a complete Engine.IO packet).
     Packet(EioPacket),
     /// A raw binary frame.
     Binary(Bytes),
+}
+
+impl From<EioPacket> for Frame {
+    fn from(packet: EioPacket) -> Self {
+        Frame::Packet(packet)
+    }
+}
+
+impl From<Bytes> for Frame {
+    fn from(bytes: Bytes) -> Self {
+        Frame::Binary(bytes)
+    }
+}
+
+impl std::fmt::Debug for Frame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Packet(packet) => f.debug_tuple("Packet").field(packet).finish(),
+            Self::Binary(bytes) => f.debug_struct("Binary").field("len", &bytes.len()).finish(),
+        }
+    }
 }
 
 impl Frame {
@@ -49,22 +80,6 @@ impl From<Frame> for Bytes {
             Frame::Packet(packet) => packet.encode(),
             Frame::Binary(bytes) => bytes,
         }
-    }
-}
-
-impl From<Message> for Frame {
-    fn from(message: Message) -> Self {
-        match message {
-            Message::Text(bytes) => Frame::from(EioPacket::Message(bytes)),
-            Message::Binary(bytes) => Frame::Binary(bytes),
-            Message::Close => Frame::from(EioPacket::Close),
-        }
-    }
-}
-
-impl From<EioPacket> for Frame {
-    fn from(packet: EioPacket) -> Self {
-        Frame::Packet(packet)
     }
 }
 
@@ -180,7 +195,9 @@ impl EioPacket {
         data.advance(1);
 
         match first {
-            b'0' => Ok(EioPacket::Open(serde_json::from_slice(&data)?)),
+            b'0' => Ok(EioPacket::Open(serde_json::from_slice(&data).map_err(
+                |e| crate::error::PayloadError::new::<Handshake>(e).with_slice(&data),
+            )?)),
             b'1' => Ok(EioPacket::Close),
             b'2' => Ok(EioPacket::Ping(data)),
             b'3' => Ok(EioPacket::Pong(data)),

@@ -4,16 +4,13 @@ use crate::ack::AckType;
 use crate::error::Result;
 use crate::marker::{AckId, AckMarker, BinaryMarker};
 use bytes::Bytes;
-use futures_util::future::FutureExt;
+
 use sioc_core::error::Result as CoreResult;
-use sioc_core::manager::Manager;
+use sioc_core::manager::{CommandSender, Manager, ManagerAction};
 use sioc_core::packet::{Command, Ns, Packet};
 use sioc_engine::engine::Engine;
-use sioc_engine::error::Result as EngineResult;
-use sioc_engine::transports::Transport;
-use sioc_engine::websocket::{
-    WebSocketConnector, WebSocketError, WebSocketStream, default_connect,
-};
+use sioc_engine::transport::TransportStrategy;
+use sioc_engine::websocket::{DefaultWebSocketConnector, WebSocketConnector};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use url::Url;
@@ -54,40 +51,36 @@ where
 /// use url::Url;
 ///
 /// let url = Url::parse("http://localhost:3000").unwrap();
-/// let client = ClientBuilder::new(url).open().await?;
+/// let client = ClientBuilder::new(url).open()?;
 /// let (tx, mut rx) = client.connect("/").await?;
 /// # Ok(())
 /// # }
 /// ```
-pub struct ClientBuilder {
+pub struct ClientBuilder<C = DefaultWebSocketConnector> {
     url: Url,
     path: String,
     http_client: Option<reqwest::Client>,
-    ws_connector: Option<WebSocketConnector>,
+    websocket_connector: C,
+    transport_strategy: TransportStrategy,
 }
 
-impl std::fmt::Debug for ClientBuilder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ClientBuilder")
-            .field("url", &self.url)
-            .field("path", &self.path)
-            .field("http_client", &self.http_client)
-            .field("ws_connector", &self.ws_connector.as_ref().map(|_| ".."))
-            .finish()
-    }
-}
-
-impl ClientBuilder {
+impl ClientBuilder<DefaultWebSocketConnector> {
     /// Creates a builder targeting `url`.
     pub fn new(url: impl Into<Url>) -> Self {
         Self {
             url: url.into(),
             path: "socket.io/".to_string(),
             http_client: None,
-            ws_connector: None,
+            websocket_connector: DefaultWebSocketConnector,
+            transport_strategy: TransportStrategy::default(),
         }
     }
+}
 
+impl<C> ClientBuilder<C>
+where
+    C: WebSocketConnector,
+{
     /// Override the Engine.IO path segment (default: `"socket.io"`).
     pub fn path(mut self, path: impl Into<String>) -> Self {
         self.path = path.into();
@@ -102,7 +95,7 @@ impl ClientBuilder {
 
     /// Override the WebSocket connector used for transport upgrade.
     ///
-    /// Pass any `async fn(Url) -> Result<WebSocketStream>` — no boxing needed.
+    /// Pass any type implementing [`WebSocketConnector`], including async closures.
     ///
     /// ```rust,no_run
     /// # async fn run() -> sioc::error::Result<()> {
@@ -111,47 +104,61 @@ impl ClientBuilder {
     ///
     /// // Example: wrap the default connector to add logging.
     /// let client = ClientBuilder::new(Url::parse("http://localhost:3000").unwrap())
-    ///     .ws_connector(|url| async move { default_connect(url).await })
-    ///     .open()
-    ///     .await?;
+    ///     .websocket_connector(|url| async move {
+    ///         // add custom logging or TLS config here
+    ///         DefaultWebSocketConnector.connect(url).await
+    ///     })
+    ///     .open()?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn ws_connector<F, Fut>(mut self, f: F) -> Self
+    pub fn websocket_connector<C2>(self, connector: C2) -> ClientBuilder<C2>
     where
-        F: FnOnce(Url) -> Fut + Send + 'static,
-        Fut: Future<Output = Result<WebSocketStream, WebSocketError>> + Send + 'static,
+        C2: WebSocketConnector,
     {
-        self.ws_connector = Some(Box::new(move |url| f(url).boxed()));
+        ClientBuilder {
+            url: self.url,
+            path: self.path,
+            http_client: self.http_client,
+            websocket_connector: connector,
+            transport_strategy: self.transport_strategy,
+        }
+    }
+
+    /// Override the initial transport strategy (default: HTTP long-polling with WebSocket upgrade).
+    pub fn transport(mut self, strategy: TransportStrategy) -> Self {
+        self.transport_strategy = strategy;
         self
     }
 
     /// Connect to the Engine.IO server and return a [`Client`].
     ///
-    /// Opens the HTTP long-polling transport, completes the Engine.IO
-    /// handshake, and spawns a background manager task. Hold the returned
-    /// [`Client`] and call [`Client::join`] to await clean shutdown.
-    pub async fn open(self) -> Result<Client> {
+    /// Spawns the engine and transport tasks in the background. Hold the
+    /// returned [`Client`] and call [`Client::join`] to await clean shutdown.
+    pub fn open(self) -> Result<Client> {
         let http_client = self.http_client.unwrap_or_default();
-
-        let ws_connector = self
-            .ws_connector
-            .unwrap_or_else(|| Box::new(|url| default_connect(url).boxed()));
-
+        let websocket_connector = self.websocket_connector;
         let url = self.url.join(&self.path)?;
 
-        let (transport, handshake, upgrade_handle) =
-            Transport::connect_polling(url, http_client, ws_connector).await?;
+        let (manager_tx, manager_rx) = mpsc::channel::<ManagerAction>(32);
 
-        let engine = Engine::spawn(transport, handshake, upgrade_handle);
-        let (tx, rx) = mpsc::channel(32);
-        let manager_handle = tokio::spawn(Manager::new(rx).run(engine.rx, engine.tx));
-        let engine_handle = engine.handle;
+        let engine = Engine::connect(
+            url,
+            http_client,
+            websocket_connector,
+            self.transport_strategy,
+            manager_tx.clone(),
+        );
+
+        let manager = Manager::new(manager_rx);
+
+        let manager_handle = tokio::spawn(manager.run(engine));
+
+        let manager_tx = CommandSender(manager_tx);
 
         Ok(Client {
-            tx,
+            manager_tx,
             manager_handle,
-            engine_handle,
         })
     }
 }
@@ -159,12 +166,11 @@ impl ClientBuilder {
 /// A connected Socket.IO client.
 ///
 /// Created by [`ClientBuilder::open`]. Use [`connect`](Self::connect) to open
-/// namespace handles, and [`join`](Self::join) to await the manager task.
+/// namespace handles, and [`join`](Self::join) to await the background tasks.
 #[derive(Debug)]
 pub struct Client {
-    tx: mpsc::Sender<Ns<Command>>,
+    manager_tx: CommandSender,
     manager_handle: JoinHandle<CoreResult<()>>,
-    engine_handle: JoinHandle<EngineResult<()>>,
 }
 
 impl Client {
@@ -179,59 +185,42 @@ impl Client {
     /// is not yet confirmed — await a [`Packet::Connect`] from the
     /// [`SocketReceiver`] before emitting events.
     pub async fn connect(&self, ns: impl Into<String>) -> Result<(SocketSender, SocketReceiver)> {
-        let ns = ns.into();
-        let (remote_tx, remote_rx) = mpsc::channel(32);
-
-        let socket_tx = SocketSender {
-            ns: ns.clone(),
-            tx: self.tx.clone(),
-        };
-        let socket_rx = SocketReceiver { rx: remote_rx };
-
-        socket_tx
-            .send(Command::Connect {
-                sender: remote_tx,
-                data: None,
-            })
-            .await?;
-
-        Ok((socket_tx, socket_rx))
+        self.connect_with(ns, Bytes::from_static(b"")).await
     }
 
     /// Opens a namespace with an initial connection payload.
-    pub async fn connect_with<B: Into<Bytes>>(
+    pub async fn connect_with(
         &self,
         ns: impl Into<String>,
-        data: B,
+        data: impl Into<Bytes>,
     ) -> Result<(SocketSender, SocketReceiver)> {
-        let ns = ns.into();
-        let (remote_tx, remote_rx) = mpsc::channel(32);
+        let (tx, rx) = mpsc::channel(32);
 
         let socket_tx = SocketSender {
-            ns: ns.clone(),
-            tx: self.tx.clone(),
+            ns: ns.into(),
+            manager_tx: self.manager_tx.clone(),
         };
-        let socket_rx = SocketReceiver { rx: remote_rx };
+        let socket_rx = SocketReceiver { rx };
 
-        socket_tx
-            .send(Command::Connect {
-                sender: remote_tx,
-                data: Some(data.into()),
-            })
-            .await?;
+        let command = Command::Connect {
+            tx,
+            data: data.into(),
+        };
+        socket_tx.send(command).await?;
 
         Ok((socket_tx, socket_rx))
     }
 
     /// Await the background tasks.
     ///
-    /// Resolves when both the manager and engine tasks exit. Drops all
-    /// namespace senders first to signal the manager to stop.
+    /// Drops all namespace senders to signal the manager to stop, then awaits
+    /// the manager task (which in turn awaits engine and transport).
     pub async fn join(self) -> Result<()> {
-        drop(self.tx);
-        let (manager_result, engine_result) = tokio::join!(self.manager_handle, self.engine_handle);
-        manager_result??;
-        engine_result??;
+        // TODO: drop sender does not make manager stop
+        // since engine also holds manager sender,
+        // we need to disconnect all namespaces
+        drop(self.manager_tx);
+        self.manager_handle.await??;
         Ok(())
     }
 }
@@ -243,12 +232,13 @@ impl Client {
 #[derive(Debug, Clone)]
 pub struct SocketSender {
     ns: String,
-    tx: mpsc::Sender<Ns<Command>>,
+    manager_tx: CommandSender,
 }
 
 impl SocketSender {
     async fn send(&self, packet: Command) -> Result<()> {
-        Ok(self.tx.send(Ns(self.ns.clone(), packet)).await?)
+        let packet = Ns(self.ns.clone(), packet);
+        Ok(self.manager_tx.send(packet).await?)
     }
 
     /// Emits an event and returns the output determined by the event's ack

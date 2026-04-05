@@ -12,16 +12,16 @@
 //! ┌─────────────┐
 //! │   Engine    │
 //! └──────┬──────┘
-//!        │ owns
+//!        │ spawns
 //! ┌──────▼──────┐
-//! │  Transport  │  (Polling / WebSocket)
+//! │  transport  │  (polling → optional WebSocket upgrade)
 //! └─────────────┘
 //! ```
 //!
-//! 1. [`transports::Transport`] connects and handshakes via [`transports::Transport::connect_polling`]
-//!    or [`transports::Transport::connect_websocket`].
-//! 2. [`Engine`](engine::Engine) drives the protocol loop: automatic
-//!    ping/pong, heartbeat timeout, and message framing.
+//! 1. [`Engine::connect`](engine::Engine::connect) spawns the engine and
+//!    transport tasks, returning channel handles for both.
+//! 2. The transport task performs the HTTP long-polling handshake and
+//!    optionally upgrades to WebSocket transparently.
 //!
 //! [spec]: https://socket.io/docs/v4/engine-io-protocol/
 
@@ -29,7 +29,8 @@ pub mod engine;
 pub mod error;
 pub mod packet;
 pub mod polling;
-pub mod transports;
+pub mod transport;
+mod utils;
 pub mod websocket;
 
 /// The Engine.IO protocol version implemented by this crate (`EIO` query parameter).
@@ -37,10 +38,11 @@ pub const ENGINE_IO_VERSION: u64 = 4;
 
 /// Convenience re-exports for common usage.
 pub mod prelude {
-    pub use crate::error::{Error, Result};
+    pub use crate::engine::{EngineAction, FrameSender, MessageSender};
+    pub use crate::error::{Error, PayloadError, Result};
     pub use crate::packet::{EioPacket, Frame, Handshake, Message};
-    pub use crate::transports::Transport;
+    pub use crate::transport::TransportStrategy;
     pub use crate::websocket::{
-        WebSocketConnector, WebSocketError, WebSocketStream, default_connect,
+        DefaultWebSocketConnector, WebSocketConnector, WebSocketError, WebSocketStream,
     };
 }

@@ -4,8 +4,8 @@
 //! envelopes plus the supporting data types.  Wire-level encoding and decoding
 //! helpers live in [`crate::parse`].
 
-use crate::parse::packet_size_hint;
-use bytes::Bytes;
+use crate::parse::{hint_packet_size, write_packet};
+use bytes::{Bytes, BytesMut};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use thiserror::Error;
@@ -38,11 +38,24 @@ pub struct ConnectError {
 /// Type-erased inbound event after binary reassembly.
 ///
 /// Convert to a typed `sioc::Event` via `TryFrom<DynEvent>`.
-#[derive(Debug)]
 pub struct DynEvent {
     pub data: Bytes,
     pub id: Option<u64>,
     pub attachments: Option<Vec<Bytes>>,
+}
+
+impl std::fmt::Debug for DynEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = f.debug_struct("DynEvent");
+        debug.field("data", &self.data);
+        if let Some(id) = self.id {
+            debug.field("id", &id);
+        }
+        if let Some(attachments) = &self.attachments {
+            debug.field("count", &attachments.len());
+        }
+        debug.finish()
+    }
 }
 
 impl DynEvent {
@@ -63,10 +76,20 @@ impl DynEvent {
 /// Type-erased inbound acknowledgement after binary reassembly.
 ///
 /// Convert to a typed `sioc::Ack` via `TryFrom<DynAck>`.
-#[derive(Debug)]
 pub struct DynAck {
     pub data: Bytes,
     pub attachments: Option<Vec<Bytes>>,
+}
+
+impl std::fmt::Debug for DynAck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = f.debug_struct("DynAck");
+        debug.field("data", &self.data);
+        if let Some(attachments) = &self.attachments {
+            debug.field("count", &attachments.len());
+        }
+        debug.finish()
+    }
 }
 
 impl DynAck {
@@ -124,8 +147,8 @@ pub enum Command {
     /// `sender` receives inbound packets for this namespace. `data` carries
     /// an optional authentication payload.
     Connect {
-        sender: mpsc::Sender<Packet>,
-        data: Option<Bytes>,
+        tx: mpsc::Sender<Packet>,
+        data: Bytes,
     },
     /// Closes the namespace.
     Disconnect,
@@ -135,7 +158,7 @@ pub enum Command {
     /// server's response back through the oneshot.
     Event {
         data: Bytes,
-        sender: Option<oneshot::Sender<DynAck>>,
+        tx: Option<oneshot::Sender<DynAck>>,
         attachments: Option<Vec<Bytes>>,
     },
     /// Acknowledges a previously received event.
@@ -146,45 +169,6 @@ pub enum Command {
     },
 }
 
-impl Command {
-    pub fn type_id(&self) -> u8 {
-        match self {
-            Command::Connect { .. } => b'0',
-            Command::Disconnect => b'1',
-            Command::Event {
-                attachments: None, ..
-            } => b'2',
-            Command::Event {
-                attachments: Some(..),
-                ..
-            } => b'5',
-            Command::Ack {
-                attachments: None, ..
-            } => b'3',
-            Command::Ack {
-                attachments: Some(..),
-                ..
-            } => b'6',
-        }
-    }
-
-    /// Returns a conservative upper bound on the serialised text-frame byte length.
-    pub fn size_hint(&self, ns: &str) -> usize {
-        match self {
-            Command::Connect { data, .. } => packet_size_hint(ns, false, false, data.as_deref()),
-            Command::Disconnect => packet_size_hint(ns, false, false, None),
-            Command::Event {
-                data,
-                sender,
-                attachments,
-            } => packet_size_hint(ns, sender.is_some(), attachments.is_some(), Some(data)),
-            Command::Ack {
-                data, attachments, ..
-            } => packet_size_hint(ns, false, attachments.is_some(), Some(data)),
-        }
-    }
-}
-
 /// A wire-level packet decoded directly from a single text frame.
 ///
 /// Binary variants (types 5 and 6) carry an attachment *count* but no actual
@@ -192,25 +176,83 @@ impl Command {
 /// binary frames and promotes the result to [`Packet`] once all
 /// attachments have arrived.
 #[derive(Debug)]
-pub enum SioPacket {
+pub enum RawPacket {
     /// Type `0` — namespace connection confirmed.
-    Connect(Connect),
+    Connect(Bytes),
     /// Type `1` — namespace disconnection.
     Disconnect,
-    /// Types `2` / `5` — event (text or binary).
+    /// Types `2` — event (text or binary).
     Event {
         data: Bytes,
         id: Option<u64>,
-        /// `Some(n)` for binary events (type 5); `None` for text (type 2).
-        count: Option<usize>,
     },
-    /// Type `4` — namespace connection rejected.
-    ConnectError(ConnectError),
-    /// Types `3` / `6` — acknowledgement (text or binary).
+    /// Types `3` — acknowledgement (text or binary).
     Ack {
         data: Bytes,
         id: u64,
-        /// `Some(n)` for binary acks (type 6); `None` for text (type 3).
-        count: Option<usize>,
     },
+    /// Type `4` — namespace connection rejected.
+    ConnectError(Bytes),
+
+    BinaryEvent {
+        data: Bytes,
+        id: Option<u64>,
+        count: usize,
+    },
+
+    BinaryAck {
+        data: Bytes,
+        id: u64,
+        count: usize,
+    },
+}
+
+impl RawPacket {
+    /// Returns a conservative upper bound on the serialised text-frame byte length.
+    pub fn size_hint(&self, ns: &str) -> usize {
+        match self {
+            Self::Connect(data) => hint_packet_size(ns, false, false, Some(data)),
+            Self::Disconnect => hint_packet_size(ns, false, false, None),
+            Self::Event { data, id } => hint_packet_size(ns, false, id.is_some(), Some(data)),
+            Self::Ack { data, .. } => hint_packet_size(ns, false, true, Some(data)),
+            Self::ConnectError(bytes) => hint_packet_size(ns, false, false, Some(bytes)),
+            Self::BinaryEvent { data, id, .. } => {
+                hint_packet_size(ns, true, id.is_some(), Some(data))
+            }
+            Self::BinaryAck { data, .. } => hint_packet_size(ns, true, true, Some(data)),
+        }
+    }
+
+    pub fn encode(&self, ns: &str) -> Bytes {
+        let mut buffer = BytesMut::with_capacity(self.size_hint(ns));
+
+        match self {
+            Self::Connect(bytes) => write_packet(&mut buffer, b'0', None, ns, None, Some(bytes)),
+
+            Self::Disconnect => write_packet(&mut buffer, b'1', None, ns, None, None),
+            Self::Event { data, id } => write_packet(&mut buffer, b'2', None, ns, *id, Some(data)),
+            Self::Ack { data, id } => {
+                write_packet(&mut buffer, b'3', None, ns, Some(*id), Some(data))
+            }
+            Self::ConnectError(data) => write_packet(&mut buffer, b'4', None, ns, None, Some(data)),
+            Self::BinaryEvent { data, id, count } => {
+                write_packet(&mut buffer, b'5', Some(*count), ns, *id, Some(data))
+            }
+            Self::BinaryAck { data, id, count } => {
+                write_packet(&mut buffer, b'6', Some(*count), ns, Some(*id), Some(data))
+            }
+        }
+
+        buffer.freeze()
+    }
+}
+
+impl Ns<RawPacket> {
+    pub fn size_hint(&self) -> usize {
+        self.1.size_hint(&self.0)
+    }
+
+    pub fn encode(&self) -> Bytes {
+        self.1.encode(&self.0)
+    }
 }

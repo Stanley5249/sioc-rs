@@ -49,7 +49,7 @@
 //! # async fn run() -> sioc::error::Result<()> {
 //! // 1. Connect to the server and open the default namespace.
 //! let url: url::Url = "http://localhost:3000".parse().unwrap();
-//! let client = ClientBuilder::new(url).open().await?;
+//! let client = ClientBuilder::new(url).open()?;
 //! let (ns, mut rx) = client.connect("/").await?;
 //!
 //! // 2. Wait for the server to confirm the connection.
@@ -115,7 +115,8 @@ pub mod prelude {
     pub use sioc_core::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Packet};
 
     pub use sioc_engine::prelude::{
-        WebSocketConnector, WebSocketError, WebSocketStream, default_connect,
+        DefaultWebSocketConnector, TransportStrategy, WebSocketConnector, WebSocketError,
+        WebSocketStream,
     };
 
     pub use sioc_macros::{AckType, DeserializePayload, EventRouter, EventType, SerializePayload};

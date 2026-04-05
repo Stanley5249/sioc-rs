@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use tokio::process::Command;
 use tokio::signal;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::format::FmtSpan;
 use url::Url;
 
 #[derive(Debug, Clone, EventType, SerializePayload, DeserializePayload)]
@@ -35,7 +36,7 @@ async fn run_server() -> std::io::Result<tokio::process::Child> {
 async fn run_client() -> miette::Result<()> {
     let url = Url::parse("http://localhost:3000").into_diagnostic()?;
 
-    let client = ClientBuilder::new(url).open().await?;
+    let client = ClientBuilder::new(url).open()?;
 
     let (tx, mut rx) = client.connect("/").await?;
 
@@ -48,6 +49,7 @@ async fn run_client() -> miette::Result<()> {
             }
             _ = signal::ctrl_c() => {
                 println!("Received shutdown signal");
+                tx.disconnect().await?;
                 break;
             }
         }
@@ -89,6 +91,8 @@ async fn handle_packet(sender: &SocketSender, packet: Packet) -> miette::Result<
 #[tokio::main]
 async fn main() -> miette::Result<()> {
     tracing_subscriber::fmt()
+        .pretty()
+        .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 

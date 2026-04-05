@@ -125,7 +125,7 @@ where
         Ok((
             Command::Event {
                 data,
-                sender: None,
+                tx: None,
                 attachments: None,
             },
             (),
@@ -146,7 +146,7 @@ where
         Ok((
             Command::Event {
                 data,
-                sender: Some(tx),
+                tx: Some(tx),
                 attachments: None,
             },
             AckHandle::new(rx),
@@ -167,7 +167,7 @@ where
         Ok((
             Command::Event {
                 data,
-                sender: None,
+                tx: None,
                 attachments: Some(builder.finish()),
             },
             (),
@@ -190,7 +190,7 @@ where
         Ok((
             Command::Event {
                 data,
-                sender: Some(tx),
+                tx: Some(tx),
                 attachments: Some(builder.finish()),
             },
             AckHandle::new(rx),

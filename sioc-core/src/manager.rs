@@ -4,20 +4,54 @@
 //! Spawn it with [`Manager::run`].
 
 use crate::error::{Error, Result};
-use crate::packet::{Command, DynAck, DynEvent, Ns, Packet, SioPacket};
-use crate::parse::write_packet;
-use bytes::{Bytes, BytesMut};
-use sioc_engine::prelude::Message;
+use crate::packet::{Command, DynAck, DynEvent, Ns, Packet, RawPacket};
+use bytes::Bytes;
+use sioc_engine::engine::Engine;
+use sioc_engine::prelude::{Message, MessageSender};
 use std::collections::BTreeMap;
 use std::collections::hash_map::{Entry, HashMap};
 use tokio::sync::{mpsc, oneshot};
 
+pub enum ManagerAction {
+    // outbound from client
+    Command(Ns<Command>),
+    // inbound from engine
+    Message(Message),
+}
+
+impl From<Ns<Command>> for ManagerAction {
+    fn from(command: Ns<Command>) -> Self {
+        ManagerAction::Command(command)
+    }
+}
+
+impl From<Message> for ManagerAction {
+    fn from(message: Message) -> Self {
+        ManagerAction::Message(message)
+    }
+}
+
+/// Restricted sender: can only send outbound [`Command`]s to the manager (used by client).
+#[derive(Clone, Debug)]
+pub struct CommandSender(pub mpsc::Sender<ManagerAction>);
+
+impl CommandSender {
+    pub async fn send(
+        &self,
+        command: Ns<Command>,
+    ) -> Result<(), mpsc::error::SendError<ManagerAction>> {
+        self.0.send(command.into()).await
+    }
+}
+
 impl Socket {
-    fn new(sender: mpsc::Sender<Packet>) -> Self {
+    fn new(tx: mpsc::Sender<Packet>) -> Self {
         Self {
-            tx: sender,
+            tx,
             acks: BTreeMap::new(),
             ids: 0,
+            connected: false,
+            buffer: Vec::new(),
         }
     }
 
@@ -29,24 +63,24 @@ impl Socket {
         id
     }
 
-    fn acknowledge(&mut self, ns: String, id: u64, ack: DynAck) -> Result<String> {
+    fn send_ack(&mut self, ns: String, id: u64, ack: DynAck) -> Result<String> {
         match self.acks.remove(&id) {
             Some(sender) => match sender.send(ack) {
                 Ok(()) => Ok(ns),
-                Err(ack) => Err(Error::AckClosed { ns, ack }),
+                Err(ack) => Err(Error::SendAck { ns, ack }),
             },
             None => Err(Error::UnknownAckId { ns, id }),
         }
     }
 
-    async fn on_packet(&mut self, ns: String, packet: Packet) -> Result<String> {
+    async fn send_packet(&mut self, ns: String, packet: Packet) -> Result<String> {
         match self.tx.send(packet).await {
             Ok(()) => Ok(ns),
             Err(source) => Err(Error::SendPacket { ns, source }),
         }
     }
 
-    async fn on_binary(&mut self, ns: String, packet: BinaryPacket) -> Result<String> {
+    async fn send_binary_packet(&mut self, ns: String, packet: BinaryPacket) -> Result<String> {
         match packet {
             BinaryPacket::Event {
                 data,
@@ -56,7 +90,7 @@ impl Socket {
             } => {
                 let packet = Packet::Event(DynEvent::new(data, id).with_attachments(attachments));
 
-                self.on_packet(ns, packet).await
+                self.send_packet(ns, packet).await
             }
             BinaryPacket::Ack {
                 data,
@@ -66,7 +100,7 @@ impl Socket {
             } => {
                 let ack = DynAck::new(data).with_attachments(attachments);
 
-                self.acknowledge(ns, id, ack)
+                self.send_ack(ns, id, ack)
             }
         }
     }
@@ -114,6 +148,14 @@ impl SocketsMap {
             Err(Error::UnknownNamespace { ns })
         }
     }
+
+    fn close(&mut self) {
+        self.0.clear();
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 enum BinaryPacket {
@@ -130,6 +172,7 @@ enum BinaryPacket {
         count: usize,
     },
 }
+
 impl BinaryPacket {
     fn event(data: Bytes, id: Option<u64>, count: usize) -> Self {
         Self::Event {
@@ -149,17 +192,41 @@ impl BinaryPacket {
         }
     }
 
-    fn attach(&mut self, bytes: Bytes) -> bool {
+    fn attach(&mut self, bytes: Bytes) {
+        match self {
+            Self::Event { attachments, .. } | Self::Ack { attachments, .. } => {
+                attachments.push(bytes);
+            }
+        }
+    }
+
+    fn is_complete(&self) -> bool {
         match self {
             Self::Event {
                 attachments, count, ..
             }
             | Self::Ack {
                 attachments, count, ..
-            } => {
-                attachments.push(bytes);
-                attachments.len() >= *count
-            }
+            } => attachments.len() >= *count,
+        }
+    }
+
+    fn as_raw(&self) -> RawPacket {
+        match self {
+            Self::Event {
+                data, id, count, ..
+            } => RawPacket::BinaryEvent {
+                data: data.clone(),
+                id: *id,
+                count: *count,
+            },
+            Self::Ack {
+                data, id, count, ..
+            } => RawPacket::BinaryAck {
+                data: data.clone(),
+                id: *id,
+                count: *count,
+            },
         }
     }
 }
@@ -177,18 +244,23 @@ impl Reconstructor {
         self.pending.is_some()
     }
 
-    fn insert(&mut self, packet: Ns<BinaryPacket>) {
-        self.pending = Some(packet);
+    fn insert(&mut self, ns: String, packet: BinaryPacket) {
+        self.pending = Some(Ns(ns, packet));
     }
 
     fn attach_and_take(&mut self, bytes: Bytes) -> Result<Option<Ns<BinaryPacket>>> {
         match std::mem::take(&mut self.pending) {
-            Some(Ns(ns, mut packet)) => Ok(if packet.attach(bytes) {
-                Some(Ns(ns, packet))
-            } else {
-                self.pending = Some(Ns(ns, packet));
-                None
-            }),
+            Some(Ns(ns, mut packet)) => {
+                packet.attach(bytes);
+
+                if packet.is_complete() {
+                    Ok(Some(Ns(ns, packet)))
+                } else {
+                    self.pending = Some(Ns(ns, packet));
+
+                    Ok(None)
+                }
+            }
             None => Err(Error::UnexpectedBinary(bytes)),
         }
     }
@@ -201,19 +273,23 @@ struct Socket {
     acks: BTreeMap<u64, oneshot::Sender<DynAck>>,
     /// Monotonically increasing counter used to generate ack IDs.
     ids: u64,
+    /// True once the server has sent a CONNECT response for this namespace.
+    connected: bool,
+    /// Events encoded before CONNECT was confirmed; flushed on CONNECT response.
+    buffer: Vec<Message>,
 }
 
 /// Routes packets between the Socket.IO API and the engine.IO transport.
 pub struct Manager {
-    rx: mpsc::Receiver<Ns<Command>>,
+    rx: mpsc::Receiver<ManagerAction>,
     sockets: SocketsMap,
     reconstructor: Reconstructor,
 }
 
 impl Manager {
-    pub fn new(local_rx: mpsc::Receiver<Ns<Command>>) -> Self {
+    pub fn new(rx: mpsc::Receiver<ManagerAction>) -> Self {
         Self {
-            rx: local_rx,
+            rx,
             sockets: SocketsMap::new(),
             reconstructor: Reconstructor::new(),
         }
@@ -222,70 +298,77 @@ impl Manager {
     /// Drive the Socket.IO protocol loop until the connection closes.
     ///
     /// Interleaves outbound encoding (local → wire) with inbound decoding
-    /// (wire → namespace channels) via `select!`. Exits when the transport
-    /// closes or all namespace senders are dropped.
-    pub async fn run(
-        mut self,
-        mut engine_rx: mpsc::Receiver<Message>,
-        engine_tx: mpsc::Sender<Message>,
-    ) -> Result<()> {
-        loop {
-            tokio::select! {
-                packet = self.rx.recv() => {
-                    match packet {
-                        Some(Ns(ns, packet)) => {
-                            for message in self.handle_outbound(ns, packet)? {
-                                if engine_tx.send(message).await.is_err() {
-                                    return Ok(());
-                                }
-                            }
-                        }
-                        None => return Ok(()),
-                    }
+    /// (wire → namespace channels). Exits when the transport closes or all
+    /// namespace senders are dropped. Joins the engine and transport tasks
+    /// before returning.
+    #[tracing::instrument(skip_all, err)]
+    pub async fn run(mut self, engine: Engine) -> Result<()> {
+        while let Some(command) = self.rx.recv().await {
+            match command {
+                ManagerAction::Command(Ns(ns, packet)) => {
+                    self.dispatch_command(&engine.tx, ns, packet).await?;
                 }
-                message = engine_rx.recv() => {
-                    match message {
-                        Some(message) => self.handle_inbound(message).await?,
-                        None => return Ok(()),
-                    }
+                ManagerAction::Message(message) => {
+                    self.route_message(&engine.tx, message).await?;
                 }
             }
+            if self.sockets.is_empty() {
+                engine.tx.send(Message::Close).await?;
+            }
         }
+
+        engine.join().await?;
+
+        Ok(())
     }
 
-    /// Encodes one outbound packet into wire messages (text frame + binary attachments).
+    /// Encodes and sends (or buffers) one outbound packet.
     ///
-    /// Separated from the `rx.recv()` await so `run` can use `self.rx.recv()`
-    /// as the select future (partial field borrow) without conflicting with the
-    /// full `&mut self` needed in branch bodies.
-    fn handle_outbound(
+    /// Events sent before the server confirms namespace connection are held in
+    /// `socket.buffer` and flushed when the CONNECT response arrives.
+    async fn dispatch_command(
         &mut self,
+        engine_tx: &MessageSender,
         ns: String,
         command: Command,
-    ) -> Result<impl Iterator<Item = Message>> {
-        let type_id = command.type_id();
-        let mut buffer = BytesMut::with_capacity(command.size_hint(&ns));
+    ) -> Result<()> {
+        let mut socket_buffer = None;
 
-        let attachments = match command {
-            Command::Connect { sender, data } => {
-                let Ns(ns, _) = self.sockets.connect(ns, Socket::new(sender))?;
-                write_packet(&mut buffer, type_id, None, &ns, None, data.as_deref());
-                None
+        let (ns, packet, attachments) = match command {
+            Command::Connect { tx, data } => {
+                let socket = Socket::new(tx);
+                let Ns(ns, _) = self.sockets.connect(ns, socket)?;
+
+                (ns, RawPacket::Connect(data), None)
             }
             Command::Disconnect => {
                 let Ns(ns, _) = self.sockets.disconnect(ns)?;
-                write_packet(&mut buffer, type_id, None, &ns, None, None);
-                None
+
+                (ns, RawPacket::Disconnect, None)
             }
             Command::Event {
                 data,
-                sender,
+                tx,
                 attachments,
             } => {
                 let Ns(ns, socket) = self.sockets.get_mut(ns)?;
-                let id = sender.map(|sender| socket.register_ack(sender));
-                write_packet(&mut buffer, type_id, None, &ns, id, Some(&data));
-                attachments
+
+                let id = tx.map(|tx| socket.register_ack(tx));
+
+                if !socket.connected {
+                    socket_buffer = Some(&mut socket.buffer);
+                }
+
+                let packet = match &attachments {
+                    None => RawPacket::Event { data, id },
+                    Some(attachments) => RawPacket::BinaryEvent {
+                        data,
+                        id,
+                        count: attachments.len(),
+                    },
+                };
+
+                (ns, packet, attachments)
             }
             Command::Ack {
                 data,
@@ -293,79 +376,152 @@ impl Manager {
                 attachments,
             } => {
                 let ns = self.sockets.require(ns)?;
-                write_packet(&mut buffer, type_id, None, &ns, Some(id), Some(&data));
-                attachments
+
+                let packet = match &attachments {
+                    None => RawPacket::Ack { data, id },
+                    Some(attachments) => RawPacket::BinaryAck {
+                        data,
+                        id,
+                        count: attachments.len(),
+                    },
+                };
+
+                (ns, packet, attachments)
             }
         };
 
-        let text = Message::Text(buffer.freeze());
+        tracing::trace!(ns, ?packet, "sending packet");
+
+        let text = Message::Text(packet.encode(&ns));
         let binaries = attachments.into_iter().flatten().map(Message::Binary);
+        let messages = std::iter::once(text).chain(binaries);
 
-        Ok(std::iter::once(text).chain(binaries))
-    }
-
-    async fn handle_inbound(&mut self, message: Message) -> Result<()> {
-        match message {
-            Message::Text(bytes) => self.handle_text(bytes).await,
-            Message::Binary(attachment) => self.handle_binary(attachment).await,
-            // Engine closed; the run loop will exit when engine.recv() returns None.
-            Message::Close => Ok(()),
+        match socket_buffer {
+            Some(buffer) => {
+                tracing::trace!(ns, "buffering packets");
+                buffer.extend(messages);
+            }
+            None => {
+                for message in messages {
+                    engine_tx.send(message).await?;
+                }
+            }
         }
-    }
 
-    async fn handle_text(&mut self, bytes: Bytes) -> Result<()> {
-        if self.reconstructor.is_pending() {
-            return Err(Error::UnexpectedText(bytes));
-        }
-        let Ns(ns, packet) = bytes.try_into()?;
-        match packet {
-            SioPacket::Connect(connection) => {
-                let Ns(ns, socket) = self.sockets.get_mut(ns)?;
-                let packet = Packet::Connect(connection);
-                socket.on_packet(ns, packet).await?;
-            }
-            SioPacket::Disconnect => {
-                let Ns(ns, socket) = self.sockets.get_mut(ns)?;
-                let packet = Packet::Disconnect;
-                socket.on_packet(ns, packet).await?;
-            }
-            SioPacket::ConnectError(error) => {
-                let Ns(ns, socket) = self.sockets.get_mut(ns)?;
-                let packet = Packet::ConnectError(error);
-                socket.on_packet(ns, packet).await?;
-            }
-            SioPacket::Event { data, id, count } => match count {
-                Some(count) => {
-                    let ns = self.sockets.require(ns)?;
-                    let packet = BinaryPacket::event(data, id, count);
-                    self.reconstructor.insert(Ns(ns, packet));
-                }
-                None => {
-                    let Ns(ns, socket) = self.sockets.get_mut(ns)?;
-                    let packet = Packet::Event(DynEvent::new(data, id));
-                    socket.on_packet(ns, packet).await?;
-                }
-            },
-            SioPacket::Ack { data, id, count } => match count {
-                Some(count) => {
-                    let ns = self.sockets.require(ns)?;
-                    let ack = BinaryPacket::ack(data, id, count);
-                    self.reconstructor.insert(Ns(ns, ack));
-                }
-                None => {
-                    let Ns(ns, socket) = self.sockets.get_mut(ns)?;
-                    let ack = DynAck::new(data);
-                    socket.acknowledge(ns, id, ack)?;
-                }
-            },
-        };
         Ok(())
     }
 
-    async fn handle_binary(&mut self, bytes: Bytes) -> Result<()> {
-        if let Some(Ns(ns, packet)) = self.reconstructor.attach_and_take(bytes)? {
-            let Ns(ns, socket) = self.sockets.get_mut(ns)?;
-            socket.on_binary(ns, packet).await?;
+    async fn route_message(&mut self, engine_tx: &MessageSender, message: Message) -> Result<()> {
+        match message {
+            Message::Text(bytes) => {
+                self.route_text_message(bytes, engine_tx).await?;
+            }
+
+            Message::Binary(attachment) => {
+                self.route_binary_message(attachment).await?;
+            }
+
+            Message::Close => {
+                tracing::trace!("closing all namespaces");
+                self.sockets.close();
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn route_text_message(&mut self, bytes: Bytes, engine_tx: &MessageSender) -> Result<()> {
+        if self.reconstructor.is_pending() {
+            return Err(Error::UnexpectedText(bytes));
+        }
+
+        let Ns(ns, packet) = bytes.try_into()?;
+
+        tracing::trace!(ns, ?packet, "received packet");
+
+        match packet {
+            RawPacket::Connect(data) => {
+                let Ns(ns, socket) = self.sockets.get_mut(ns)?;
+
+                socket.connected = true;
+
+                let len = socket.buffer.len();
+
+                if len > 0 {
+                    tracing::trace!(ns, len, "sending buffered packets");
+
+                    for message in socket.buffer.drain(..) {
+                        engine_tx.send(message).await?;
+                    }
+                }
+
+                let connect = serde_json::from_slice(&data)
+                    .expect("CONNECT packet data should be valid JSON");
+
+                socket.send_packet(ns, Packet::Connect(connect)).await?;
+            }
+            RawPacket::Disconnect => {
+                let Ns(ns, socket) = self.sockets.get_mut(ns)?;
+
+                socket.send_packet(ns, Packet::Disconnect).await?;
+            }
+            RawPacket::Event { data, id } => {
+                let Ns(ns, socket) = self.sockets.get_mut(ns)?;
+
+                socket
+                    .send_packet(ns, Packet::Event(DynEvent::new(data, id)))
+                    .await?;
+            }
+            RawPacket::Ack { data, id } => {
+                let Ns(ns, socket) = self.sockets.get_mut(ns)?;
+
+                socket.send_ack(ns, id, DynAck::new(data))?;
+            }
+            RawPacket::ConnectError(data) => {
+                let Ns(ns, socket) = self.sockets.get_mut(ns)?;
+
+                let error = serde_json::from_slice(&data)
+                    .expect("CONNECT_ERROR packet data should be valid JSON");
+
+                socket.send_packet(ns, Packet::ConnectError(error)).await?;
+            }
+            RawPacket::BinaryEvent { data, id, count } => {
+                let ns = self.sockets.require(ns)?;
+
+                self.reconstructor
+                    .insert(ns, BinaryPacket::event(data, id, count));
+            }
+            RawPacket::BinaryAck { data, id, count } => {
+                let ns = self.sockets.require(ns)?;
+
+                self.reconstructor
+                    .insert(ns, BinaryPacket::ack(data, id, count));
+            }
+        };
+
+        Ok(())
+    }
+
+    async fn route_binary_message(&mut self, bytes: Bytes) -> Result<()> {
+        let len = bytes.len();
+
+        match self.reconstructor.attach_and_take(bytes)? {
+            Some(Ns(ns, packet)) => {
+                let Ns(ns, socket) = self.sockets.get_mut(ns)?;
+
+                tracing::trace!(
+                    len,
+                    status = "complete",
+                    ns,
+                    packet = ?packet.as_raw(),
+                    "received binary attachment"
+                );
+
+                socket.send_binary_packet(ns, packet).await?;
+            }
+            None => {
+                tracing::trace!(len, status = "pending", "received binary attachment");
+            }
         }
         Ok(())
     }
