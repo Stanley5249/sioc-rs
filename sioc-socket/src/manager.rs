@@ -1,58 +1,58 @@
 //! Socket.IO namespace router.
 
 use crate::error::{Error, ParseError, PayloadError, Result};
-use crate::packet::{Command, Connect, ConnectError, DynAck, DynEvent, Ns, Packet, RawPacket};
+use crate::packet::{Connect, ConnectError, Directive, DynAck, DynEvent, Ns, Packet, Signal};
 use bytes::Bytes;
 use futures_util::{Sink, SinkExt, future};
 use sioc_engine::engine::Engine;
 use sioc_engine::error::BoxedError;
-use sioc_engine::prelude::{Message, MessageSender};
+use sioc_engine::prelude::{Transit, TransitSender};
 use std::collections::BTreeMap;
 use std::collections::hash_map::{Entry, HashMap};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::PollSender;
 
-/// Creates a [`Sink<Message>`] that maps each [`Message`] to a [`ManagerAction`] and sends it.
-pub fn message_sender(tx: mpsc::Sender<ManagerAction>) -> impl Sink<Message, Error = BoxedError> {
-    PollSender::new(tx).with(|message: Message| future::ok(message.into()))
+/// Creates a [`Sink<Transit>`] that maps each [`Transit`] to a [`ManagerAction`] and sends it.
+pub fn transit_sender(tx: mpsc::Sender<ManagerAction>) -> impl Sink<Transit, Error = BoxedError> {
+    PollSender::new(tx).with(|transit: Transit| future::ok(transit.into()))
 }
 
 #[derive(Debug)]
 pub enum ManagerAction {
-    /// Outbound command from the client.
-    Command(Ns<Command>),
+    /// Outbound directive from the client.
+    Directive(Ns<Directive>),
     /// Inbound message from the engine.
-    Message(Message),
+    Transit(Transit),
 }
 
-impl From<Ns<Command>> for ManagerAction {
-    fn from(command: Ns<Command>) -> Self {
-        ManagerAction::Command(command)
+impl From<Ns<Directive>> for ManagerAction {
+    fn from(directive: Ns<Directive>) -> Self {
+        ManagerAction::Directive(directive)
     }
 }
 
-impl From<Message> for ManagerAction {
-    fn from(message: Message) -> Self {
-        ManagerAction::Message(message)
+impl From<Transit> for ManagerAction {
+    fn from(message: Transit) -> Self {
+        ManagerAction::Transit(message)
     }
 }
 
-/// Sends outbound [`Command`]s to the socket router.
+/// Sends outbound [`Directive`]s to the socket router.
 #[derive(Clone, Debug)]
-pub struct CommandSender(mpsc::Sender<ManagerAction>);
+pub struct DirectiveSender(mpsc::Sender<ManagerAction>);
 
-impl CommandSender {
+impl DirectiveSender {
     pub fn new(tx: mpsc::Sender<ManagerAction>) -> Self {
         Self(tx)
     }
 
-    pub async fn send(&self, command: Ns<Command>) -> Result<()> {
-        Ok(self.0.send(command.into()).await?)
+    pub async fn send(&self, directive: Ns<Directive>) -> Result<()> {
+        Ok(self.0.send(directive.into()).await?)
     }
 }
 
 impl Socket {
-    fn new(tx: mpsc::Sender<Packet>) -> Self {
+    fn new(tx: mpsc::Sender<Signal>) -> Self {
         Self {
             tx,
             acks: BTreeMap::new(),
@@ -80,7 +80,7 @@ impl Socket {
         }
     }
 
-    async fn send_packet(&mut self, ns: String, packet: Packet) -> Result<String> {
+    async fn send_packet(&mut self, ns: String, packet: Signal) -> Result<String> {
         match self.tx.send(packet).await {
             Ok(()) => Ok(ns),
             Err(source) => Err(Error::SendPacket { ns, source }),
@@ -95,7 +95,7 @@ impl Socket {
                 attachments,
                 ..
             } => {
-                let packet = Packet::Event(DynEvent::new(data, id).with_attachments(attachments));
+                let packet = Signal::Event(DynEvent::new(data, id).with_attachments(attachments));
 
                 self.send_packet(ns, packet).await
             }
@@ -253,13 +253,13 @@ impl Reconstructor {
 }
 
 struct Socket {
-    tx: mpsc::Sender<Packet>,
+    tx: mpsc::Sender<Signal>,
     acks: BTreeMap<u64, oneshot::Sender<DynAck>>,
     ids: u64,
     /// Set when the server sends a CONNECT response; gates event delivery.
     connected: bool,
     /// Events encoded before `connected` is set; flushed on CONNECT response.
-    buffer: Vec<Message>,
+    buffer: Vec<Transit>,
 }
 
 /// Routes packets between the Socket.IO API and the engine.IO transport.
@@ -281,17 +281,17 @@ impl Manager {
     /// Runs the socket routing loop until all namespaces disconnect.
     #[tracing::instrument(skip_all, err)]
     pub async fn run(mut self, engine: Engine) -> Result<()> {
-        while let Some(command) = self.rx.recv().await {
-            match command {
-                ManagerAction::Command(Ns(ns, packet)) => {
-                    self.dispatch_command(&engine.tx, ns, packet).await?;
+        while let Some(directive) = self.rx.recv().await {
+            match directive {
+                ManagerAction::Directive(Ns(ns, packet)) => {
+                    self.dispatch_directive(&engine.tx, ns, packet).await?;
                 }
-                ManagerAction::Message(message) => {
+                ManagerAction::Transit(message) => {
                     self.route_message(&engine.tx, message).await?;
                 }
             }
             if self.sockets.is_empty() {
-                engine.tx.send(Message::Close).await?;
+                engine.tx.send(Transit::Close).await?;
                 break;
             }
         }
@@ -301,28 +301,28 @@ impl Manager {
         Ok(())
     }
 
-    /// Encodes and sends (or buffers) one outbound command.
-    async fn dispatch_command(
+    /// Encodes and sends (or buffers) one outbound directive.
+    async fn dispatch_directive(
         &mut self,
-        engine_tx: &MessageSender,
+        engine_tx: &TransitSender,
         ns: String,
-        command: Command,
+        directive: Directive,
     ) -> Result<()> {
         let mut socket_buffer = None;
 
-        let (ns, packet, attachments) = match command {
-            Command::Connect { tx, data } => {
+        let (ns, packet, attachments) = match directive {
+            Directive::Connect { tx, data } => {
                 let socket = Socket::new(tx);
                 let Ns(ns, _) = self.sockets.connect(ns, socket)?;
 
-                (ns, RawPacket::Connect(data), None)
+                (ns, Packet::Connect(data), None)
             }
-            Command::Disconnect => {
+            Directive::Disconnect => {
                 let Ns(ns, _) = self.sockets.disconnect(ns)?;
 
-                (ns, RawPacket::Disconnect, None)
+                (ns, Packet::Disconnect, None)
             }
-            Command::Event {
+            Directive::Event {
                 data,
                 tx,
                 attachments,
@@ -336,8 +336,8 @@ impl Manager {
                 }
 
                 let packet = match &attachments {
-                    None => RawPacket::Event { data, id },
-                    Some(attachments) => RawPacket::BinaryEvent {
+                    None => Packet::Event { data, id },
+                    Some(attachments) => Packet::BinaryEvent {
                         data,
                         id,
                         count: attachments.len(),
@@ -346,7 +346,7 @@ impl Manager {
 
                 (ns, packet, attachments)
             }
-            Command::Ack {
+            Directive::Ack {
                 data,
                 id,
                 attachments,
@@ -354,8 +354,8 @@ impl Manager {
                 let ns = self.sockets.require(ns)?;
 
                 let packet = match &attachments {
-                    None => RawPacket::Ack { data, id },
-                    Some(attachments) => RawPacket::BinaryAck {
+                    None => Packet::Ack { data, id },
+                    Some(attachments) => Packet::BinaryAck {
                         data,
                         id,
                         count: attachments.len(),
@@ -368,8 +368,8 @@ impl Manager {
 
         tracing::trace!(ns, ?packet, "sending packet");
 
-        let text = Message::Text(packet.encode(&ns));
-        let binaries = attachments.into_iter().flatten().map(Message::Binary);
+        let text = Transit::Text(packet.encode(&ns));
+        let binaries = attachments.into_iter().flatten().map(Transit::Binary);
         let messages = std::iter::once(text).chain(binaries);
 
         match socket_buffer {
@@ -387,19 +387,17 @@ impl Manager {
         Ok(())
     }
 
-    async fn route_message(&mut self, engine_tx: &MessageSender, message: Message) -> Result<()> {
-        tracing::trace!(?message, "received message");
-
+    async fn route_message(&mut self, engine_tx: &TransitSender, message: Transit) -> Result<()> {
         match message {
-            Message::Text(bytes) => {
+            Transit::Text(bytes) => {
                 self.route_text_message(bytes, engine_tx).await?;
             }
 
-            Message::Binary(attachment) => {
+            Transit::Binary(attachment) => {
                 self.route_binary_message(attachment).await?;
             }
 
-            Message::Close => {
+            Transit::Close => {
                 tracing::debug!("closing all namespaces");
                 self.sockets.close();
             }
@@ -408,15 +406,17 @@ impl Manager {
         Ok(())
     }
 
-    async fn route_text_message(&mut self, bytes: Bytes, engine_tx: &MessageSender) -> Result<()> {
+    async fn route_text_message(&mut self, bytes: Bytes, engine_tx: &TransitSender) -> Result<()> {
         if self.reconstructor.is_pending() {
             return Err(Error::UnexpectedText(bytes));
         }
 
         let Ns(ns, packet) = bytes.try_into()?;
 
+        tracing::trace!(ns, ?packet, "received packet");
+
         match packet {
-            RawPacket::Connect(data) => {
+            Packet::Connect(data) => {
                 let Ns(ns, socket) = self.sockets.get_mut(ns)?;
 
                 socket.connected = true;
@@ -434,40 +434,40 @@ impl Manager {
                 let connect: Connect = serde_json::from_slice(&data)
                     .map_err(|e| ParseError::Payload(PayloadError::new::<Connect>(e)))?;
 
-                socket.send_packet(ns, Packet::Connect(connect)).await?;
+                socket.send_packet(ns, Signal::Connect(connect)).await?;
             }
-            RawPacket::Disconnect => {
+            Packet::Disconnect => {
                 let Ns(ns, socket) = self.sockets.get_mut(ns)?;
 
-                socket.send_packet(ns, Packet::Disconnect).await?;
+                socket.send_packet(ns, Signal::Disconnect).await?;
             }
-            RawPacket::Event { data, id } => {
+            Packet::Event { data, id } => {
                 let Ns(ns, socket) = self.sockets.get_mut(ns)?;
 
                 socket
-                    .send_packet(ns, Packet::Event(DynEvent::new(data, id)))
+                    .send_packet(ns, Signal::Event(DynEvent::new(data, id)))
                     .await?;
             }
-            RawPacket::Ack { data, id } => {
+            Packet::Ack { data, id } => {
                 let Ns(ns, socket) = self.sockets.get_mut(ns)?;
 
                 socket.send_ack(ns, id, DynAck::new(data))?;
             }
-            RawPacket::ConnectError(data) => {
+            Packet::ConnectError(data) => {
                 let Ns(ns, socket) = self.sockets.get_mut(ns)?;
 
                 let error: ConnectError = serde_json::from_slice(&data)
                     .map_err(|e| ParseError::Payload(PayloadError::new::<ConnectError>(e)))?;
 
-                socket.send_packet(ns, Packet::ConnectError(error)).await?;
+                socket.send_packet(ns, Signal::ConnectError(error)).await?;
             }
-            RawPacket::BinaryEvent { data, id, count } => {
+            Packet::BinaryEvent { data, id, count } => {
                 let ns = self.sockets.require(ns)?;
 
                 self.reconstructor
                     .insert(ns, BinaryPacket::event(data, id, count));
             }
-            RawPacket::BinaryAck { data, id, count } => {
+            Packet::BinaryAck { data, id, count } => {
                 let ns = self.sockets.require(ns)?;
 
                 self.reconstructor
@@ -479,18 +479,18 @@ impl Manager {
     }
 
     async fn route_binary_message(&mut self, bytes: Bytes) -> Result<()> {
-        let len = bytes.len();
+        let count = bytes.len();
 
         match self.reconstructor.attach_and_take(bytes)? {
             Some(Ns(ns, packet)) => {
                 let Ns(ns, socket) = self.sockets.get_mut(ns)?;
 
-                tracing::trace!(len, status = "complete", ns, "received binary attachment");
+                tracing::trace!(ns, count, status = "complete", "received binary attachment");
 
                 socket.send_binary_packet(ns, packet).await?;
             }
             None => {
-                tracing::trace!(len, status = "pending", "received binary attachment");
+                tracing::trace!(count, status = "pending", "received binary attachment");
             }
         }
         Ok(())
@@ -500,13 +500,13 @@ impl Manager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sioc_engine::engine::{Engine, EngineAction, MessageSender as EngineMessageSender};
+    use sioc_engine::engine::EngineAction;
 
     const CONNECT_RESPONSE: &[u8] = b"0{\"sid\":\"test\"}";
 
     fn mock_engine(tx: mpsc::Sender<EngineAction>) -> Engine {
         Engine {
-            tx: EngineMessageSender::new(tx),
+            tx: TransitSender::new(tx),
             engine_handle: tokio::spawn(async { Ok(()) }),
             transport_handle: tokio::spawn(async { Ok(()) }),
         }
@@ -527,12 +527,12 @@ mod tests {
     async fn open_namespace(
         manager_tx: &mpsc::Sender<ManagerAction>,
         ns: &str,
-    ) -> mpsc::Receiver<Packet> {
+    ) -> mpsc::Receiver<Signal> {
         let (tx, rx) = mpsc::channel(32);
         manager_tx
-            .send(ManagerAction::Command(Ns(
+            .send(ManagerAction::Directive(Ns(
                 ns.into(),
-                Command::Connect {
+                Directive::Connect {
                     tx,
                     data: Bytes::new(),
                 },
@@ -544,7 +544,7 @@ mod tests {
 
     async fn server_connect(manager_tx: &mpsc::Sender<ManagerAction>) {
         manager_tx
-            .send(ManagerAction::Message(Message::Text(Bytes::from_static(
+            .send(ManagerAction::Transit(Transit::Text(Bytes::from_static(
                 CONNECT_RESPONSE,
             ))))
             .await
@@ -560,9 +560,9 @@ mod tests {
         engine_rx.recv().await.unwrap(); // drain outbound connect frame
 
         manager_tx
-            .send(ManagerAction::Command(Ns(
+            .send(ManagerAction::Directive(Ns(
                 "/".into(),
-                Command::Event {
+                Directive::Event {
                     data: Bytes::from_static(b"[\"ping\"]"),
                     tx: None,
                     attachments: None,
@@ -587,9 +587,9 @@ mod tests {
 
         for i in 0u8..3 {
             manager_tx
-                .send(ManagerAction::Command(Ns(
+                .send(ManagerAction::Directive(Ns(
                     "/".into(),
-                    Command::Event {
+                    Directive::Event {
                         data: Bytes::copy_from_slice(&[b'[', b'"', b'a' + i, b'"', b']']),
                         tx: None,
                         attachments: None,
@@ -607,12 +607,12 @@ mod tests {
         for _ in 0..3 {
             assert!(matches!(
                 engine_rx.recv().await.unwrap(),
-                EngineAction::Message(Message::Text(_))
+                EngineAction::Transit(Transit::Text(_))
             ));
         }
         assert!(matches!(
             socket_rx.recv().await.unwrap(),
-            Packet::Connect(_)
+            Signal::Connect(_)
         ));
     }
 
@@ -625,32 +625,35 @@ mod tests {
 
         server_connect(&manager_tx).await;
         manager_tx
-            .send(ManagerAction::Command(Ns("/".into(), Command::Disconnect)))
+            .send(ManagerAction::Directive(Ns(
+                "/".into(),
+                Directive::Disconnect,
+            )))
             .await
             .unwrap();
 
         assert!(matches!(
             engine_rx.recv().await.unwrap(),
-            EngineAction::Message(Message::Text(_))
+            EngineAction::Transit(Transit::Text(_))
         ));
         assert!(matches!(
             engine_rx.recv().await.unwrap(),
-            EngineAction::Message(Message::Close)
+            EngineAction::Transit(Transit::Close)
         ));
 
         drop(manager_tx);
         handle.await.unwrap().unwrap();
     }
 
-    /// Routing a command to an unknown namespace returns an error.
+    /// Routing a directive to an unknown namespace returns an error.
     #[tokio::test]
     async fn unknown_namespace_returns_error() {
         let (manager_tx, _engine_rx, handle) = setup_manager();
 
         manager_tx
-            .send(ManagerAction::Command(Ns(
+            .send(ManagerAction::Directive(Ns(
                 "/no-such-ns".into(),
-                Command::Event {
+                Directive::Event {
                     data: Bytes::from_static(b"[\"x\"]"),
                     tx: None,
                     attachments: None,
@@ -691,7 +694,10 @@ mod tests {
 
         server_connect(&manager_tx).await;
         manager_tx
-            .send(ManagerAction::Command(Ns("/".into(), Command::Disconnect)))
+            .send(ManagerAction::Directive(Ns(
+                "/".into(),
+                Directive::Disconnect,
+            )))
             .await
             .unwrap();
 
@@ -717,9 +723,9 @@ mod tests {
 
         let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel();
         manager_tx
-            .send(ManagerAction::Command(Ns(
+            .send(ManagerAction::Directive(Ns(
                 "/".into(),
-                Command::Event {
+                Directive::Event {
                     data: Bytes::from_static(b"[\"greet\",\"hello\"]"),
                     tx: Some(ack_tx),
                     attachments: None,
@@ -731,7 +737,7 @@ mod tests {
         engine_rx.recv().await.unwrap(); // drain outbound event frame
 
         manager_tx
-            .send(ManagerAction::Message(Message::Text(Bytes::from_static(
+            .send(ManagerAction::Transit(Transit::Text(Bytes::from_static(
                 b"30[\"world\"]",
             ))))
             .await
@@ -752,14 +758,14 @@ mod tests {
         socket_rx.recv().await.unwrap(); // consume Packet::Connect
 
         manager_tx
-            .send(ManagerAction::Message(Message::Text(Bytes::from_static(
+            .send(ManagerAction::Transit(Transit::Text(Bytes::from_static(
                 b"52-[\"img\"]",
             ))))
             .await
             .unwrap();
 
         manager_tx
-            .send(ManagerAction::Message(Message::Binary(Bytes::from_static(
+            .send(ManagerAction::Transit(Transit::Binary(Bytes::from_static(
                 b"\x01\x02",
             ))))
             .await
@@ -772,7 +778,7 @@ mod tests {
         );
 
         manager_tx
-            .send(ManagerAction::Message(Message::Binary(Bytes::from_static(
+            .send(ManagerAction::Transit(Transit::Binary(Bytes::from_static(
                 b"\x03\x04",
             ))))
             .await
@@ -780,7 +786,7 @@ mod tests {
 
         let pkt = socket_rx.recv().await.unwrap();
         match pkt {
-            Packet::Event(ev) => assert_eq!(ev.attachments.as_ref().unwrap().len(), 2),
+            Signal::Event(ev) => assert_eq!(ev.attachments.as_ref().unwrap().len(), 2),
             other => panic!("expected Event, got {other:?}"),
         }
     }

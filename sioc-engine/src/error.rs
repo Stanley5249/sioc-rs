@@ -87,9 +87,9 @@ pub enum Error {
     #[diagnostic(code(sioc_engine::frame_channel_closed))]
     SendFrame(#[from] mpsc::error::SendError<Frame>),
 
-    #[error("inbound message channel closed")]
+    #[error("inbound transit channel closed")]
     #[diagnostic(code(sioc_engine::inbound_closed))]
-    SendMessage(#[source] BoxedError),
+    SendTransit(#[source] BoxedError),
 
     #[error("engine data channel closed")]
     #[diagnostic(code(sioc_engine::engine_data_closed))]

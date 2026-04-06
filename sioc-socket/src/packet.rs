@@ -105,7 +105,7 @@ impl DynAck {
 /// The default `E = DynEvent` carries raw events; use [`cast`](Packet::cast) to
 /// convert to a typed event.
 #[derive(Debug)]
-pub enum Packet<E = DynEvent> {
+pub enum Signal<E = DynEvent> {
     /// The server confirmed the namespace connection.
     Connect(Connect),
     /// The server (or client) closed the namespace.
@@ -116,27 +116,27 @@ pub enum Packet<E = DynEvent> {
     Event(E),
 }
 
-impl Packet {
+impl Signal {
     /// Converts the [`Event`](Packet::Event) variant via `TryFrom<DynEvent>`, passing other variants through.
-    pub fn cast<E>(self) -> Result<Packet<E>, E::Error>
+    pub fn cast<E>(self) -> Result<Signal<E>, E::Error>
     where
         E: TryFrom<DynEvent>,
     {
         match self {
-            Self::Connect(c) => Ok(Packet::Connect(c)),
-            Self::Disconnect => Ok(Packet::Disconnect),
-            Self::ConnectError(e) => Ok(Packet::ConnectError(e)),
-            Self::Event(event) => Ok(Packet::Event(E::try_from(event)?)),
+            Self::Connect(c) => Ok(Signal::Connect(c)),
+            Self::Disconnect => Ok(Signal::Disconnect),
+            Self::ConnectError(e) => Ok(Signal::ConnectError(e)),
+            Self::Event(event) => Ok(Signal::Event(E::try_from(event)?)),
         }
     }
 }
 
 /// An outbound packet to be encoded and sent to the server.
 #[derive(Debug)]
-pub enum Command {
+pub enum Directive {
     /// Opens a namespace; `data` is an optional authentication payload.
     Connect {
-        tx: mpsc::Sender<Packet>,
+        tx: mpsc::Sender<Signal>,
         data: Bytes,
     },
     /// Closes the namespace.
@@ -160,7 +160,7 @@ pub enum Command {
 /// Binary variants carry an attachment count; the socket router collects
 /// the follow-up binary frames and reassembles them into a [`Packet`].
 #[derive(Debug)]
-pub enum RawPacket {
+pub enum Packet {
     /// Type `0` — namespace connection confirmed.
     Connect(Bytes),
     /// Type `1` — namespace disconnection.
@@ -191,7 +191,7 @@ pub enum RawPacket {
     },
 }
 
-impl RawPacket {
+impl Packet {
     /// Returns a conservative upper bound on the serialised text-frame byte length.
     pub fn size_hint(&self, ns: &str) -> usize {
         match self {
@@ -231,7 +231,7 @@ impl RawPacket {
     }
 }
 
-impl Ns<RawPacket> {
+impl Ns<Packet> {
     pub fn size_hint(&self) -> usize {
         self.1.size_hint(&self.0)
     }

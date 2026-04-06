@@ -14,7 +14,7 @@
 //! ```
 //!
 //! Most users should depend on `sioc` instead. Depend on `sioc-socket` directly only for
-//! raw [`Command`](packet::Command) / [`Packet`](packet::Packet) access.
+//! raw [`Directive`](packet::Directive) / [`Packet`](packet::Packet) access.
 //!
 //! [spec]: https://socket.io/docs/v4/socket-io-protocol/
 
@@ -25,7 +25,7 @@ pub mod parse;
 
 pub mod prelude {
     pub use crate::error::{Error, ParseError, PayloadError, Result};
-    pub use crate::manager::{CommandSender, ManagerAction};
-    pub use crate::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Packet};
+    pub use crate::manager::{DirectiveSender, ManagerAction};
+    pub use crate::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Signal};
     pub use crate::parse::{split_attachments, split_id, split_namespace};
 }

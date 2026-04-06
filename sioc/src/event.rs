@@ -28,7 +28,7 @@ use crate::error::Result;
 use crate::marker::{AckMarker, BinaryMarker, HasAck, HasBinary, NoAck, NoBinary};
 use crate::payload::{DeserializePayload, SerializePayload, deserialize_event, serialize_event};
 use bytes::Bytes;
-use sioc_socket::packet::{Command, DynEvent};
+use sioc_socket::packet::{Directive, DynEvent};
 use tokio::sync::oneshot;
 
 /// Maps a Rust struct to a Socket.IO event name and compile-time policies.
@@ -120,10 +120,10 @@ where
 {
     type Output = ();
 
-    fn prepare(self) -> Result<(Command, ())> {
+    fn prepare(self) -> Result<(Directive, ())> {
         let data = serialize_event(&self)?.into();
         Ok((
-            Command::Event {
+            Directive::Event {
                 data,
                 tx: None,
                 attachments: None,
@@ -140,11 +140,11 @@ where
 {
     type Output = AckHandle<A>;
 
-    fn prepare(self) -> Result<(Command, AckHandle<A>)> {
+    fn prepare(self) -> Result<(Directive, AckHandle<A>)> {
         let (tx, rx) = oneshot::channel();
         let data = serialize_event(&self)?.into();
         Ok((
-            Command::Event {
+            Directive::Event {
                 data,
                 tx: Some(tx),
                 attachments: None,
@@ -161,11 +161,11 @@ where
 {
     type Output = ();
 
-    fn prepare(self) -> Result<(Command, ())> {
+    fn prepare(self) -> Result<(Directive, ())> {
         let mut builder = AttachmentBuilder::new();
         let data = serialize_event(&self(&mut builder))?.into();
         Ok((
-            Command::Event {
+            Directive::Event {
                 data,
                 tx: None,
                 attachments: Some(builder.finish()),
@@ -183,12 +183,12 @@ where
 {
     type Output = AckHandle<A>;
 
-    fn prepare(self) -> Result<(Command, AckHandle<A>)> {
+    fn prepare(self) -> Result<(Directive, AckHandle<A>)> {
         let (tx, rx) = oneshot::channel();
         let mut builder = AttachmentBuilder::new();
         let data = serialize_event(&self(&mut builder))?.into();
         Ok((
-            Command::Event {
+            Directive::Event {
                 data,
                 tx: Some(tx),
                 attachments: Some(builder.finish()),

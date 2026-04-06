@@ -19,7 +19,7 @@ use crate::error::{Error, Result};
 use crate::marker::{BinaryMarker, HasBinary, NoBinary};
 use crate::payload::{DeserializePayload, SerializePayload, deserialize_ack, serialize_ack};
 use pin_project::pin_project;
-use sioc_socket::packet::Command;
+use sioc_socket::packet::Directive;
 use sioc_socket::packet::DynAck;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -93,9 +93,9 @@ impl<A> Acknowledge<A, NoBinary> for A
 where
     A: AckType<Binary = NoBinary> + SerializePayload,
 {
-    fn into_command(self, id: u64) -> Result<Command> {
+    fn into_directive(self, id: u64) -> Result<Directive> {
         let data = serialize_ack(&self)?.into();
-        Ok(Command::Ack {
+        Ok(Directive::Ack {
             data,
             id,
             attachments: None,
@@ -108,10 +108,10 @@ where
     F: FnOnce(&mut AttachmentBuilder) -> A,
     A: AckType<Binary = HasBinary> + SerializePayload,
 {
-    fn into_command(self, id: u64) -> Result<Command> {
+    fn into_directive(self, id: u64) -> Result<Directive> {
         let mut builder = AttachmentBuilder::new();
         let data = serialize_ack(&self(&mut builder))?.into();
-        Ok(Command::Ack {
+        Ok(Directive::Ack {
             data,
             id,
             attachments: Some(builder.finish()),
@@ -256,9 +256,9 @@ mod tests {
         assert!(result.is_err());
     }
     #[test]
-    fn send_ack_into_command_binary() {
+    fn send_ack_into_directive_binary() {
         let id = <HasAck<BinaryBoolAck>>::parse(Some(3)).unwrap();
-        let command = Acknowledge::<BinaryBoolAck, HasBinary>::into_command(
+        let directive = Acknowledge::<BinaryBoolAck, HasBinary>::into_directive(
             |builder: &mut AttachmentBuilder| {
                 let _p = builder.attach(Bytes::from_static(b"\xCA\xFE"));
                 BinaryBoolAck(true)
@@ -266,8 +266,8 @@ mod tests {
             id.get(),
         )
         .unwrap();
-        match command {
-            Command::Ack {
+        match directive {
+            Directive::Ack {
                 data,
                 id,
                 attachments,

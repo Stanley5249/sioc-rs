@@ -100,7 +100,7 @@ async fn polling_post(
         let request = encode_frames(&buffer);
         buffer.clear();
 
-        tracing::trace!(?request, "POST");
+        tracing::trace!(?request, "sending POST");
 
         let response = http_client
             .post(url.clone())
@@ -141,7 +141,7 @@ async fn polling_get(
             .bytes()
             .await?;
 
-        tracing::trace!(?response, "GET");
+        tracing::trace!(?response, "received GET");
 
         for frame in decode_frames(response)? {
             engine_tx.send(frame).await?;

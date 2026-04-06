@@ -9,13 +9,13 @@ use sioc_engine::engine::Engine;
 use sioc_engine::transport::TransportStrategy;
 use sioc_engine::websocket::{DefaultWebSocketConnector, WebSocketConnector};
 use sioc_socket::error::Result as CoreResult;
-use sioc_socket::manager::{CommandSender, Manager, ManagerAction, message_sender};
-use sioc_socket::packet::{Command, Ns, Packet};
+use sioc_socket::manager::{DirectiveSender, Manager, ManagerAction, transit_sender};
+use sioc_socket::packet::{Directive, Ns, Signal};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use url::Url;
 
-/// Converts a typed event into a [`Command`] for emission.
+/// Converts a typed event into a [`Directive`] for emission.
 ///
 /// `Output` is `()` for fire-and-forget events and [`AckHandle`](crate::ack::AckHandle)
 /// for events that expect an acknowledgement.
@@ -24,21 +24,21 @@ where
     A: AckMarker,
     B: BinaryMarker,
 {
-    /// Return value after the command is sent.
+    /// Return value after the directive is sent.
     type Output;
 
-    /// Serializes into a [`Command`] and the output handle.
-    fn prepare(self) -> Result<(Command, Self::Output)>;
+    /// Serializes into a [`Directive`] and the output handle.
+    fn prepare(self) -> Result<(Directive, Self::Output)>;
 }
 
-/// Converts a typed acknowledgement into an ack [`Command`].
+/// Converts a typed acknowledgement into an ack [`Directive`].
 pub trait Acknowledge<A, B>
 where
     A: AckType,
     B: BinaryMarker,
 {
-    /// Serializes into an ack [`Command`].
-    fn into_command(self, id: u64) -> Result<Command>;
+    /// Serializes into an ack [`Directive`].
+    fn into_directive(self, id: u64) -> Result<Directive>;
 }
 
 /// Builder for a [`Client`] connection.
@@ -147,14 +147,14 @@ where
             http_client,
             websocket_connector,
             self.transport_strategy,
-            message_sender(manager_tx.clone()),
+            transit_sender(manager_tx.clone()),
         );
 
         let manager = Manager::new(manager_rx);
 
         let manager_handle = tokio::spawn(manager.run(engine));
 
-        let manager_tx = CommandSender::new(manager_tx);
+        let manager_tx = DirectiveSender::new(manager_tx);
 
         Ok(Client {
             manager_tx,
@@ -166,7 +166,7 @@ where
 /// A connected Socket.IO client.
 #[derive(Debug)]
 pub struct Client {
-    manager_tx: CommandSender,
+    manager_tx: DirectiveSender,
     manager_handle: JoinHandle<CoreResult<()>>,
 }
 
@@ -197,11 +197,11 @@ impl Client {
         };
         let socket_rx = SocketReceiver { rx };
 
-        let command = Command::Connect {
+        let directive = Directive::Connect {
             tx,
             data: data.into(),
         };
-        socket_tx.send(command).await?;
+        socket_tx.send(directive).await?;
 
         Ok((socket_tx, socket_rx))
     }
@@ -221,11 +221,11 @@ impl Client {
 #[derive(Debug, Clone)]
 pub struct SocketSender {
     ns: String,
-    manager_tx: CommandSender,
+    manager_tx: DirectiveSender,
 }
 
 impl SocketSender {
-    async fn send(&self, packet: Command) -> Result<()> {
+    async fn send(&self, packet: Directive) -> Result<()> {
         let packet = Ns(self.ns.clone(), packet);
         Ok(self.manager_tx.send(packet).await?)
     }
@@ -237,8 +237,8 @@ impl SocketSender {
         A: AckMarker,
         B: BinaryMarker,
     {
-        let (command, output) = event.prepare()?;
-        self.send(command).await?;
+        let (directive, output) = event.prepare()?;
+        self.send(directive).await?;
         Ok(output)
     }
 
@@ -249,24 +249,24 @@ impl SocketSender {
         A: AckType,
         B: BinaryMarker,
     {
-        self.send(data.into_command(id.get())?).await
+        self.send(data.into_directive(id.get())?).await
     }
 
     /// Sends a disconnect packet, closing this namespace on the server.
     pub async fn disconnect(&self) -> Result<()> {
-        self.send(Command::Disconnect).await
+        self.send(Directive::Disconnect).await
     }
 }
 
 /// Receiver for a Socket.IO namespace.
 #[derive(Debug)]
 pub struct SocketReceiver {
-    rx: mpsc::Receiver<Packet>,
+    rx: mpsc::Receiver<Signal>,
 }
 
 impl SocketReceiver {
     /// Returns the next inbound packet, or `None` when the router shuts down.
-    pub async fn recv(&mut self) -> Option<Packet> {
+    pub async fn recv(&mut self) -> Option<Signal> {
         self.rx.recv().await
     }
 }

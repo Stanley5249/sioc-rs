@@ -180,7 +180,7 @@ pub async fn websocket_loop(
                     break;
                 };
 
-                tracing::trace!(%message, "received message");
+                tracing::trace!(frame = %message, "received message");
 
                 let frame = match message {
                     WebSocketMessage::Text(text) => Packet::decode(text.into())?.into(),
@@ -198,7 +198,7 @@ pub async fn websocket_loop(
                 };
                 let message = encode_frame(frame)?;
 
-                tracing::trace!(%message, "sending message");
+                tracing::trace!(frame = %message, "sending message");
 
                 stream.send(message).await?;
             }

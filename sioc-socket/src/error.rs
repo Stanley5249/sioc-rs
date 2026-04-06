@@ -1,6 +1,6 @@
 //! Error types for `sioc-socket`.
 
-use crate::packet::{DynAck, Packet};
+use crate::packet::{DynAck, Signal};
 use bytes::Bytes;
 use miette::Diagnostic;
 pub use sioc_engine::error::Error as EngineError;
@@ -73,7 +73,7 @@ pub enum Error {
     SendPacket {
         ns: String,
         #[source]
-        source: mpsc::error::SendError<Packet>,
+        source: mpsc::error::SendError<Signal>,
     },
 
     /// Ack response channel was closed before the server replied.
@@ -81,8 +81,8 @@ pub enum Error {
     #[diagnostic(code(sioc::ack_closed))]
     SendAck { ns: String, ack: DynAck },
 
-    /// Outbound command send to the manager failed.
-    #[error("fail to send command to manager")]
+    /// Outbound directive send to the manager failed.
+    #[error("fail to send directive to manager")]
     #[diagnostic(code(sioc::manager_action_send))]
     SendAction(#[from] mpsc::error::SendError<crate::manager::ManagerAction>),
 

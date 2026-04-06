@@ -1,7 +1,7 @@
 //! Engine.IO protocol task.
 
 use crate::error::{BoxedError, Error, Result};
-use crate::packet::{Frame, Handshake, Message, Packet};
+use crate::packet::{Frame, Handshake, Packet, Transit};
 use crate::transport::TransportStrategy;
 use crate::utils::join_tasks;
 use crate::websocket::WebSocketConnector;
@@ -19,7 +19,7 @@ pub enum EngineAction {
     /// A decoded frame received from the transport.
     Frame(Frame),
     /// An outbound message from the Socket.IO layer.
-    Message(Message),
+    Transit(Transit),
 }
 
 /// Restricted sender: can only deliver [`Frame`]s to the engine (used by transport tasks).
@@ -38,22 +38,22 @@ impl FrameSender {
 
 /// Sends outbound [`Message`]s to the engine (used by the socket router).
 #[derive(Clone, Debug)]
-pub struct MessageSender(mpsc::Sender<EngineAction>);
+pub struct TransitSender(mpsc::Sender<EngineAction>);
 
-impl MessageSender {
+impl TransitSender {
     pub fn new(sender: mpsc::Sender<EngineAction>) -> Self {
         Self(sender)
     }
 
-    pub async fn send(&self, message: Message) -> Result<()> {
-        Ok(self.0.send(EngineAction::Message(message)).await?)
+    pub async fn send(&self, message: Transit) -> Result<()> {
+        Ok(self.0.send(EngineAction::Transit(message)).await?)
     }
 }
 
 /// Channel-based handles to the Engine.IO protocol and transport tasks.
 pub struct Engine {
     /// Sender for delivering outbound messages from the Socket.IO layer to the engine.
-    pub tx: MessageSender,
+    pub tx: TransitSender,
     /// Handle for the engine protocol task.
     pub engine_handle: JoinHandle<Result<()>>,
     /// Handle for the transport coordination task.
@@ -73,7 +73,7 @@ impl Engine {
     ) -> Self
     where
         C: WebSocketConnector,
-        S: Sink<Message, Error = BoxedError> + Unpin + Send + 'static,
+        S: Sink<Transit, Error = BoxedError> + Unpin + Send + 'static,
     {
         let (engine_tx, engine_rx) = mpsc::channel(32);
         let (transport_tx, transport_rx) = mpsc::channel(32);
@@ -100,13 +100,12 @@ impl Engine {
         ));
 
         Self {
-            tx: MessageSender::new(engine_tx),
+            tx: TransitSender::new(engine_tx),
             engine_handle,
             transport_handle,
         }
     }
 
-    #[tracing::instrument(skip_all, err)]
     pub async fn join(self) -> Result<()> {
         let _ = join_tasks(self.engine_handle, self.transport_handle).await?;
         Ok(())
@@ -140,7 +139,7 @@ async fn engine_loop<S>(
     token: CancellationToken,
 ) -> Result<()>
 where
-    S: Sink<Message, Error = BoxedError> + Unpin,
+    S: Sink<Transit, Error = BoxedError> + Unpin,
 {
     // Cancels the transport when this task exits for any reason (error, close, or drop).
     let _guard = token.drop_guard();
@@ -162,11 +161,11 @@ where
         };
 
         match action {
-            EngineAction::Frame(frame) => {
-                tracing::trace!(?frame, "received frame");
+            EngineAction::Frame(frame) => match frame {
+                Frame::Packet(packet) => {
+                    tracing::trace!(?packet, "received packet");
 
-                match frame {
-                    Frame::Packet(packet) => match packet {
+                    match packet {
                         Packet::Close => {
                             tracing::debug!("server closed");
                             break;
@@ -176,41 +175,40 @@ where
                             heartbeat.reset();
                         }
                         Packet::Message(data) => {
-                            sink.send(Message::Text(data))
+                            sink.send(Transit::Text(data))
                                 .await
-                                .map_err(Error::SendMessage)?;
+                                .map_err(Error::SendTransit)?;
                         }
                         Packet::Noop => {}
 
                         other => {
                             return Err(other.unexpected("client did not expect this packet"));
                         }
-                    },
-
-                    Frame::Binary(data) => {
-                        sink.send(Message::Binary(data))
-                            .await
-                            .map_err(Error::SendMessage)?;
                     }
                 }
-            }
-            EngineAction::Message(message) => {
-                tracing::trace!(?message, "sending message");
+                Frame::Binary(data) => {
+                    tracing::trace!(len = data.len(), "received binary");
 
-                match message {
-                    Message::Text(bytes) => {
-                        let packet = Packet::Message(bytes);
-                        transport_tx.send(packet.into()).await?;
-                    }
-                    Message::Binary(bytes) => {
-                        transport_tx.send(bytes.into()).await?;
-                    }
-                    Message::Close => {
-                        tracing::debug!("client closed");
-                        break;
-                    }
+                    sink.send(Transit::Binary(data))
+                        .await
+                        .map_err(Error::SendTransit)?;
                 }
-            }
+            },
+            EngineAction::Transit(message) => match message {
+                Transit::Text(bytes) => {
+                    let packet = Packet::Message(bytes);
+                    tracing::trace!(?packet, "sending packet");
+                    transport_tx.send(packet.into()).await?;
+                }
+                Transit::Binary(bytes) => {
+                    tracing::trace!(len = bytes.len(), "sending binary");
+                    transport_tx.send(bytes.into()).await?;
+                }
+                Transit::Close => {
+                    tracing::debug!("client closed");
+                    break;
+                }
+            },
         };
     }
 

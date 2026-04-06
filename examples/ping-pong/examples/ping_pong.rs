@@ -60,21 +60,21 @@ async fn run_client() -> miette::Result<()> {
     Ok(())
 }
 
-async fn handle_packet(sender: &SocketSender, packet: Packet) -> miette::Result<bool> {
+async fn handle_packet(sender: &SocketSender, packet: Signal) -> miette::Result<bool> {
     match packet.cast::<Event<Ping>>()? {
-        Packet::Connect(connection) => {
+        Signal::Connect(connection) => {
             println!("{connection:?}");
             Ok(true)
         }
-        Packet::Disconnect => {
+        Signal::Disconnect => {
             println!("Disconnected");
             Ok(false)
         }
-        Packet::ConnectError(error) => {
+        Signal::ConnectError(error) => {
             eprintln!("Connection error: {error}");
             Err(error).into_diagnostic()
         }
-        Packet::Event(ping) => {
+        Signal::Event(ping) => {
             println!("{:?}", ping.payload);
 
             let pong = Pong {

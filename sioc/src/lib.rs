@@ -25,7 +25,7 @@
 //! │  sioc-socket — protocol logic                  │
 //! │  • Manager: routing, ack tracking, binary    │
 //! │    reassembly                                │
-//! │  • Packet / Command / SioPacket              │
+//! │  • Signal / Directive / Packet               │
 //! ├──────────────────────────────────────────────┤
 //! │  sioc-engine — Engine.IO v4 transport        │
 //! │  • HTTP long-polling & WebSocket             │
@@ -53,14 +53,14 @@
 //! let (ns, mut rx) = client.connect("/").await?;
 //!
 //! // 2. Wait for the server to confirm the connection.
-//! let Some(Packet::Connect(info)) = rx.recv().await else {
+//! let Some(Signal::Connect(info)) = rx.recv().await else {
 //!     panic!("connection rejected");
 //! };
 //! println!("connected with sid={}", info.sid);
 //!
 //! // 3. Receive events and respond.
 //! while let Some(packet) = rx.recv().await {
-//!     if let Packet::Event(event) = packet.cast::<Event<Greeting>>()? {
+//!     if let Signal::Event(event) = packet.cast::<Event<Greeting>>()? {
 //!         println!("got: {}", event.payload.text);
 //!
 //!         let reply = Reply { text: "hello back".into() };
@@ -112,7 +112,7 @@ pub mod prelude {
         serialize_event,
     };
 
-    pub use sioc_socket::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Packet};
+    pub use sioc_socket::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Signal};
 
     pub use sioc_engine::prelude::{
         DefaultWebSocketConnector, TransportStrategy, WebSocketConnector, WebSocketError,
