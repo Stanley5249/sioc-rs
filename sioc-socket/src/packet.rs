@@ -1,8 +1,4 @@
-//! Socket.IO v5 packet types.
-//!
-//! Defines the inbound ([`Packet`]) and outbound ([`Command`]) packet
-//! envelopes plus the supporting data types.  Wire-level encoding and decoding
-//! helpers live in [`crate::parse`].
+//! Socket.IO v4 packet types.
 
 use crate::parse::{hint_packet_size, write_packet};
 use bytes::{Bytes, BytesMut};
@@ -18,26 +14,23 @@ pub struct Ns<T>(pub String, pub T);
 /// Server payload confirming a successful namespace connection.
 #[derive(Debug, Deserialize)]
 pub struct Connect {
-    /// Server-assigned session identifier for this namespace socket.
+    /// Server-assigned session ID.
     pub sid: String,
-    /// Additional fields sent by the server beyond the mandatory `sid`.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
 
-/// Server payload when a namespace connection is rejected.
+/// Server payload for a rejected namespace connection.
 #[derive(Debug, Error, Deserialize)]
 #[error("{message}")]
 pub struct ConnectError {
-    /// Human-readable rejection reason from the server.
     pub message: String,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
 
 /// Type-erased inbound event after binary reassembly.
-///
-/// Convert to a typed `sioc::Event` via `TryFrom<DynEvent>`.
+#[derive(Clone)]
 pub struct DynEvent {
     pub data: Bytes,
     pub id: Option<u64>,
@@ -76,6 +69,7 @@ impl DynEvent {
 /// Type-erased inbound acknowledgement after binary reassembly.
 ///
 /// Convert to a typed `sioc::Ack` via `TryFrom<DynAck>`.
+#[derive(Clone)]
 pub struct DynAck {
     pub data: Bytes,
     pub attachments: Option<Vec<Bytes>>,
@@ -106,11 +100,10 @@ impl DynAck {
     }
 }
 
-/// A fully decoded inbound packet, ready for consumption by callers.
+/// A fully decoded inbound packet.
 ///
-/// Produced by [`Manager`](crate::manager::Manager) after binary reassembly.
 /// The default `E = DynEvent` carries raw events; use [`cast`](Packet::cast) to
-/// convert into a typed event via `TryFrom<DynEvent>`.
+/// convert to a typed event.
 #[derive(Debug)]
 pub enum Packet<E = DynEvent> {
     /// The server confirmed the namespace connection.
@@ -124,8 +117,7 @@ pub enum Packet<E = DynEvent> {
 }
 
 impl Packet {
-    /// Converts the [`Event`](Packet::Event) variant from [`DynEvent`] into `E`
-    /// via `TryFrom<DynEvent>`, passing other variants through unchanged.
+    /// Converts the [`Event`](Packet::Event) variant via `TryFrom<DynEvent>`, passing other variants through.
     pub fn cast<E>(self) -> Result<Packet<E>, E::Error>
     where
         E: TryFrom<DynEvent>,
@@ -139,23 +131,17 @@ impl Packet {
     }
 }
 
-/// An outbound packet to be serialised and sent to the server.
+/// An outbound packet to be encoded and sent to the server.
 #[derive(Debug)]
 pub enum Command {
-    /// Opens a namespace.
-    ///
-    /// `sender` receives inbound packets for this namespace. `data` carries
-    /// an optional authentication payload.
+    /// Opens a namespace; `data` is an optional authentication payload.
     Connect {
         tx: mpsc::Sender<Packet>,
         data: Bytes,
     },
     /// Closes the namespace.
     Disconnect,
-    /// Emits an event.
-    ///
-    /// If `sender` is set the manager assigns an ack ID and routes the
-    /// server's response back through the oneshot.
+    /// Emits an event; if `tx` is set, an ack ID is assigned and the response routed to it.
     Event {
         data: Bytes,
         tx: Option<oneshot::Sender<DynAck>>,
@@ -169,12 +155,10 @@ pub enum Command {
     },
 }
 
-/// A wire-level packet decoded directly from a single text frame.
+/// A wire-level packet decoded from a single text frame.
 ///
-/// Binary variants (types 5 and 6) carry an attachment *count* but no actual
-/// binary data yet — [`Manager`](crate::manager::Manager) collects follow-up
-/// binary frames and promotes the result to [`Packet`] once all
-/// attachments have arrived.
+/// Binary variants carry an attachment count; the socket router collects
+/// the follow-up binary frames and reassembles them into a [`Packet`].
 #[derive(Debug)]
 pub enum RawPacket {
     /// Type `0` — namespace connection confirmed.

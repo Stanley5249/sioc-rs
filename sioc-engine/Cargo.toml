@@ -2,7 +2,7 @@
 name = "sioc-engine"
 version = "0.1.0"
 edition = "2024"
-authors = ["Sioc Contributors"]
+authors = ["Stanley5249 <seer852741@gmail.com>"]
 description = "Async Engine.IO client implementation for Sioc"
 license = "MIT OR Apache-2.0"
 
@@ -28,13 +28,13 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio-tungstenite.workspace = true
+tokio-util.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 url.workspace = true
 
 base64 = "0.22"
 http = "1"
-tokio-util = "0.7.18"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

@@ -1,12 +1,12 @@
 [workspace]
-members = ["sioc-core", "sioc-macros", "sioc", "sioc-engine", "examples/*"]
+members = ["sioc", "sioc-socket", "sioc-engine", "sioc-macros", "examples/*"]
 resolver = "3"
 
 [workspace.dependencies]
 sioc = { path = "./sioc" }
-sioc-core = { path = "./sioc-core" }
-sioc-macros = { path = "./sioc-macros" }
+sioc-socket = { path = "./sioc-socket" }
 sioc-engine = { path = "./sioc-engine" }
+sioc-macros = { path = "./sioc-macros" }
 
 # Async runtime
 tokio = { version = "1", features = ["macros", "sync", "time"] }

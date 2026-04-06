@@ -3,7 +3,7 @@
 use crate::ENGINE_IO_VERSION;
 use crate::engine::FrameSender;
 use crate::error::{Error, PacketError, Result};
-use crate::packet::{EioPacket, Frame, Handshake};
+use crate::packet::{Frame, Handshake, Packet};
 use crate::utils::join_tasks;
 use crate::websocket::{WebSocketConnector, websocket_connect, websocket_loop};
 use base64::prelude::*;
@@ -47,7 +47,7 @@ fn decode_frame(bytes: Bytes) -> Result<Frame> {
     Ok(if bytes.first().is_some_and(|&b| b == b'b') {
         decode_binary(bytes)?.into()
     } else {
-        EioPacket::decode(bytes)?.into()
+        Packet::decode(bytes)?.into()
     })
 }
 
@@ -179,7 +179,7 @@ where
         .await?;
 
     let handshake = match decode_frame(bytes)? {
-        Frame::Packet(EioPacket::Open(handshake)) => handshake,
+        Frame::Packet(Packet::Open(handshake)) => handshake,
         other => return Err(other.unexpected("expected Open packet as first frame")),
     };
 

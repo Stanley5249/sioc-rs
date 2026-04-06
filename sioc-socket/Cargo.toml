@@ -1,22 +1,23 @@
 [package]
-name = "sioc-core"
+name = "sioc-socket"
 version = "0.1.0"
 edition = "2024"
-authors = ["Sioc Contributors"]
-description = "Core types and client implementation for Sioc - async Socket.IO client"
+authors = ["Stanley5249 <seer852741@gmail.com>"]
+description = "Async Socket.IO client implementation for Sioc"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/yourusername/sioc"
+repository = "https://github.com/Stanley5249/sioc-rs"
 keywords = ["socketio", "websocket", "async", "networking"]
 categories = ["network-programming", "asynchronous", "web-programming"]
 
 [dependencies]
-sioc-engine.workspace = true
-
 bytes.workspace = true
+futures-util.workspace = true
 miette.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sioc-engine.workspace = true
 thiserror.workspace = true
+tokio-util.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 url.workspace = true

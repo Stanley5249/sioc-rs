@@ -1539,26 +1539,11 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "sioc-core",
  "sioc-engine",
  "sioc-macros",
+ "sioc-socket",
  "thiserror 2.0.18",
  "tokio",
- "url",
-]
-
-[[package]]
-name = "sioc-core"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "miette",
- "serde",
- "serde_json",
- "sioc-engine",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
  "url",
 ]
 
@@ -1594,6 +1579,23 @@ dependencies = [
  "serde_json",
  "sioc",
  "syn",
+]
+
+[[package]]
+name = "sioc-socket"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "miette",
+ "serde",
+ "serde_json",
+ "sioc-engine",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
 ]
 
 [[package]]

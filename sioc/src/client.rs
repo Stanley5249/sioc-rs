@@ -5,39 +5,39 @@ use crate::error::Result;
 use crate::marker::{AckId, AckMarker, BinaryMarker};
 use bytes::Bytes;
 
-use sioc_core::error::Result as CoreResult;
-use sioc_core::manager::{CommandSender, Manager, ManagerAction};
-use sioc_core::packet::{Command, Ns, Packet};
 use sioc_engine::engine::Engine;
 use sioc_engine::transport::TransportStrategy;
 use sioc_engine::websocket::{DefaultWebSocketConnector, WebSocketConnector};
+use sioc_socket::error::Result as CoreResult;
+use sioc_socket::manager::{CommandSender, Manager, ManagerAction, message_sender};
+use sioc_socket::packet::{Command, Ns, Packet};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use url::Url;
 
 /// Converts a typed event into a [`Command`] for emission.
 ///
-/// The associated `Output` type is `()` for fire-and-forget events and
-/// [`AckHandle<A>`](crate::ack::AckHandle) for events that expect an acknowledgement.
+/// `Output` is `()` for fire-and-forget events and [`AckHandle`](crate::ack::AckHandle)
+/// for events that expect an acknowledgement.
 pub trait Emit<A, B>
 where
     A: AckMarker,
     B: BinaryMarker,
 {
-    /// The value returned to the caller after the command is sent.
+    /// Return value after the command is sent.
     type Output;
 
-    /// Serializes into a [`Command`] and the caller's output handle.
+    /// Serializes into a [`Command`] and the output handle.
     fn prepare(self) -> Result<(Command, Self::Output)>;
 }
 
-/// Converts a typed acknowledgement into a [`Command`] for transmission.
+/// Converts a typed acknowledgement into an ack [`Command`].
 pub trait Acknowledge<A, B>
 where
     A: AckType,
     B: BinaryMarker,
 {
-    /// Serializes into an ack [`Command`] ready to send.
+    /// Serializes into an ack [`Command`].
     fn into_command(self, id: u64) -> Result<Command>;
 }
 
@@ -131,10 +131,10 @@ where
         self
     }
 
-    /// Connect to the Engine.IO server and return a [`Client`].
+    /// Connects to the Engine.IO server and returns a [`Client`].
     ///
-    /// Spawns the engine and transport tasks in the background. Hold the
-    /// returned [`Client`] and call [`Client::join`] to await clean shutdown.
+    /// Spawns the engine and transport tasks in the background.
+    #[must_use = "dropping the Client stops the background tasks"]
     pub fn open(self) -> Result<Client> {
         let http_client = self.http_client.unwrap_or_default();
         let websocket_connector = self.websocket_connector;
@@ -147,14 +147,14 @@ where
             http_client,
             websocket_connector,
             self.transport_strategy,
-            manager_tx.clone(),
+            message_sender(manager_tx.clone()),
         );
 
         let manager = Manager::new(manager_rx);
 
         let manager_handle = tokio::spawn(manager.run(engine));
 
-        let manager_tx = CommandSender(manager_tx);
+        let manager_tx = CommandSender::new(manager_tx);
 
         Ok(Client {
             manager_tx,
@@ -164,9 +164,6 @@ where
 }
 
 /// A connected Socket.IO client.
-///
-/// Created by [`ClientBuilder::open`]. Use [`connect`](Self::connect) to open
-/// namespace handles, and [`join`](Self::join) to await the background tasks.
 #[derive(Debug)]
 pub struct Client {
     manager_tx: CommandSender,
@@ -179,16 +176,14 @@ impl Client {
         ClientBuilder::new(url)
     }
 
-    /// Opens a Socket.IO namespace and returns a sender/receiver pair.
+    /// Opens a namespace and returns a sender/receiver pair.
     ///
-    /// Sends a Socket.IO `Connect` packet to the server. The namespace
-    /// is not yet confirmed — await a [`Packet::Connect`] from the
-    /// [`SocketReceiver`] before emitting events.
+    /// The namespace is not confirmed until a [`Packet::Connect`] arrives on the [`SocketReceiver`].
     pub async fn connect(&self, ns: impl Into<String>) -> Result<(SocketSender, SocketReceiver)> {
         self.connect_with(ns, Bytes::from_static(b"")).await
     }
 
-    /// Opens a namespace with an initial connection payload.
+    /// Opens a namespace with a connection payload.
     pub async fn connect_with(
         &self,
         ns: impl Into<String>,
@@ -211,24 +206,18 @@ impl Client {
         Ok((socket_tx, socket_rx))
     }
 
-    /// Await the background tasks.
+    /// Awaits the background manager task.
     ///
-    /// Drops all namespace senders to signal the manager to stop, then awaits
-    /// the manager task (which in turn awaits engine and transport).
+    /// All [`SocketSender`] clones must be dropped (via [`SocketSender::disconnect`])
+    /// before calling this. The manager exits only when the last sender is dropped.
     pub async fn join(self) -> Result<()> {
-        // TODO: drop sender does not make manager stop
-        // since engine also holds manager sender,
-        // we need to disconnect all namespaces
         drop(self.manager_tx);
         self.manager_handle.await??;
         Ok(())
     }
 }
 
-/// Clonable sender half of a Socket.IO namespace handle.
-///
-/// Provides typed [`emit`](Self::emit) and [`ack`](Self::ack) methods.
-/// Obtained from [`Client::connect`] alongside a [`SocketReceiver`].
+/// Cloneable sender for a Socket.IO namespace.
 #[derive(Debug, Clone)]
 pub struct SocketSender {
     ns: String,
@@ -241,9 +230,7 @@ impl SocketSender {
         Ok(self.manager_tx.send(packet).await?)
     }
 
-    /// Emits an event and returns the output determined by the event's ack
-    /// policy: `()` for fire-and-forget, [`AckHandle`](crate::ack::AckHandle)
-    /// for events that expect an acknowledgement.
+    /// Emits an event; returns `()` or an [`AckHandle`](crate::ack::AckHandle) depending on the ack policy.
     pub async fn emit<E, A, B>(&self, event: E) -> Result<E::Output>
     where
         E: Emit<A, B>,
@@ -255,7 +242,7 @@ impl SocketSender {
         Ok(output)
     }
 
-    /// Sends an acknowledgement for a previously received event.
+    /// Sends an acknowledgement for a received event.
     pub async fn ack<T, A, B>(&self, id: AckId<A>, data: T) -> Result<()>
     where
         T: Acknowledge<A, B>,
@@ -271,19 +258,14 @@ impl SocketSender {
     }
 }
 
-/// Receiver half of a Socket.IO namespace handle.
-///
-/// Yields inbound [`Packet`]s. Obtained from [`Client::connect`]
-/// alongside a [`SocketSender`].
+/// Receiver for a Socket.IO namespace.
 #[derive(Debug)]
 pub struct SocketReceiver {
     rx: mpsc::Receiver<Packet>,
 }
 
 impl SocketReceiver {
-    /// Receives the next packet from the server for this namespace.
-    ///
-    /// Returns `None` when the manager shuts down.
+    /// Returns the next inbound packet, or `None` when the router shuts down.
     pub async fn recv(&mut self) -> Option<Packet> {
         self.rx.recv().await
     }

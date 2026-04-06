@@ -1,4 +1,4 @@
-//! Error types for `sioc-core`.
+//! Error types for `sioc-socket`.
 
 use crate::packet::{DynAck, Packet};
 use bytes::Bytes;
@@ -60,7 +60,7 @@ pub enum ParseError {
     Payload(#[from] PayloadError),
 }
 
-/// The top-level error type for all `sioc-core` public APIs.
+/// The top-level error type for all `sioc-socket` public APIs.
 #[derive(Debug, Error, Diagnostic)]
 pub enum Error {
     #[error(transparent)]
@@ -80,6 +80,11 @@ pub enum Error {
     #[error("ack channel closed for namespace `{ns}`")]
     #[diagnostic(code(sioc::ack_closed))]
     SendAck { ns: String, ack: DynAck },
+
+    /// Outbound command send to the manager failed.
+    #[error("fail to send command to manager")]
+    #[diagnostic(code(sioc::manager_action_send))]
+    SendAction(#[from] mpsc::error::SendError<crate::manager::ManagerAction>),
 
     /// Wraps a [`ParseError`] from packet decoding.
     #[error(transparent)]
@@ -112,5 +117,5 @@ pub enum Error {
     NamespaceConflict { ns: String },
 }
 
-/// Result alias for all `sioc-core` operations.
+/// Result alias for all `sioc-socket` operations.
 pub type Result<T, E = Error> = std::result::Result<T, E>;

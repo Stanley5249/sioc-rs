@@ -11,7 +11,7 @@
 //! # Crate overview
 //!
 //! This crate is the main entry point for users.  It re-exports the wire-level
-//! types from `sioc-core` and layers typed, compile-time–checked events and
+//! types from `sioc-socket` and layers typed, compile-time–checked events and
 //! acknowledgements on top.
 //!
 //! ```text
@@ -22,7 +22,7 @@
 //! │  • typed Event / Ack / AckHandle             │
 //! │  • marker traits: BinaryMarker, AckMarker    │
 //! ├──────────────────────────────────────────────┤
-//! │  sioc-core — protocol logic                  │
+//! │  sioc-socket — protocol logic                  │
 //! │  • Manager: routing, ack tracking, binary    │
 //! │    reassembly                                │
 //! │  • Packet / Command / SioPacket              │
@@ -112,7 +112,7 @@ pub mod prelude {
         serialize_event,
     };
 
-    pub use sioc_core::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Packet};
+    pub use sioc_socket::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Packet};
 
     pub use sioc_engine::prelude::{
         DefaultWebSocketConnector, TransportStrategy, WebSocketConnector, WebSocketError,

@@ -3,7 +3,7 @@
 //! Error types for Engine.IO operations.
 
 use crate::engine::EngineAction;
-use crate::packet::{EioPacket, Frame, Handshake};
+use crate::packet::{Frame, Handshake, Packet};
 use miette::{Diagnostic, SourceOffset};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
@@ -56,9 +56,9 @@ pub enum PacketError {
     #[diagnostic(code(sioc_engine::packet::empty))]
     Empty,
 
-    #[error("invalid packet type: {byte:#04x}")]
-    #[diagnostic(code(sioc_engine::packet::invalid_type))]
-    InvalidId { byte: u8 },
+    #[error("invalid type id {id:#04x}")]
+    #[diagnostic(code(sioc_engine::packet::invalid_id))]
+    InvalidId { id: u8 },
 
     #[error(transparent)]
     #[diagnostic(transparent)]
@@ -69,7 +69,7 @@ pub enum PacketError {
     Base64(#[from] base64::DecodeError),
 }
 
-type BoxedError = Box<dyn std::error::Error + Send + Sync + 'static>;
+pub type BoxedError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 /// The top-level error type for all `sioc-engine` public APIs.
 #[derive(Debug, Error, Diagnostic)]
@@ -106,10 +106,7 @@ pub enum Error {
     /// Received a packet not valid in the current protocol state.
     #[error("unexpected packet {packet:?}: {description}")]
     #[diagnostic(code(sioc_engine::unexpected_packet))]
-    UnexpectedPacket {
-        description: String,
-        packet: EioPacket,
-    },
+    UnexpectedPacket { description: String, packet: Packet },
 
     #[error("unexpected frame {frame:?}: {description}")]
     #[diagnostic(code(sioc_engine::unexpected_frame))]

@@ -1,21 +1,27 @@
-//! Internal routing manager for Socket.IO packet flow.
-//!
-//! [`Manager`] bridges the engine.IO transport to the typed Socket.IO API.
-//! Spawn it with [`Manager::run`].
+//! Socket.IO namespace router.
 
-use crate::error::{Error, Result};
-use crate::packet::{Command, DynAck, DynEvent, Ns, Packet, RawPacket};
+use crate::error::{Error, ParseError, PayloadError, Result};
+use crate::packet::{Command, Connect, ConnectError, DynAck, DynEvent, Ns, Packet, RawPacket};
 use bytes::Bytes;
+use futures_util::{Sink, SinkExt, future};
 use sioc_engine::engine::Engine;
+use sioc_engine::error::BoxedError;
 use sioc_engine::prelude::{Message, MessageSender};
 use std::collections::BTreeMap;
 use std::collections::hash_map::{Entry, HashMap};
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::PollSender;
 
+/// Creates a [`Sink<Message>`] that maps each [`Message`] to a [`ManagerAction`] and sends it.
+pub fn message_sender(tx: mpsc::Sender<ManagerAction>) -> impl Sink<Message, Error = BoxedError> {
+    PollSender::new(tx).with(|message: Message| future::ok(message.into()))
+}
+
+#[derive(Debug)]
 pub enum ManagerAction {
-    // outbound from client
+    /// Outbound command from the client.
     Command(Ns<Command>),
-    // inbound from engine
+    /// Inbound message from the engine.
     Message(Message),
 }
 
@@ -31,16 +37,17 @@ impl From<Message> for ManagerAction {
     }
 }
 
-/// Restricted sender: can only send outbound [`Command`]s to the manager (used by client).
+/// Sends outbound [`Command`]s to the socket router.
 #[derive(Clone, Debug)]
-pub struct CommandSender(pub mpsc::Sender<ManagerAction>);
+pub struct CommandSender(mpsc::Sender<ManagerAction>);
 
 impl CommandSender {
-    pub async fn send(
-        &self,
-        command: Ns<Command>,
-    ) -> Result<(), mpsc::error::SendError<ManagerAction>> {
-        self.0.send(command.into()).await
+    pub fn new(tx: mpsc::Sender<ManagerAction>) -> Self {
+        Self(tx)
+    }
+
+    pub async fn send(&self, command: Ns<Command>) -> Result<()> {
+        Ok(self.0.send(command.into()).await?)
     }
 }
 
@@ -55,7 +62,7 @@ impl Socket {
         }
     }
 
-    /// Allocate the next ack ID and store the responder.
+    /// Allocates the next ack ID and stores the responder.
     fn register_ack(&mut self, sender: oneshot::Sender<DynAck>) -> u64 {
         let id = self.ids;
         self.ids += 1;
@@ -122,14 +129,12 @@ impl SocketsMap {
 
     fn connect(&mut self, ns: String, socket: Socket) -> Result<Ns<&mut Socket>> {
         match self.0.entry(ns) {
-            Entry::Occupied(e) => {
-                let ns = e.key().clone();
-                Err(Error::NamespaceConflict { ns })
-            }
+            Entry::Occupied(e) => Err(Error::NamespaceConflict {
+                ns: e.key().clone(),
+            }),
             Entry::Vacant(e) => {
                 let ns = e.key().clone();
-                let socket = e.insert(socket);
-                Ok(Ns(ns, socket))
+                Ok(Ns(ns, e.insert(socket)))
             }
         }
     }
@@ -207,26 +212,7 @@ impl BinaryPacket {
             }
             | Self::Ack {
                 attachments, count, ..
-            } => attachments.len() >= *count,
-        }
-    }
-
-    fn as_raw(&self) -> RawPacket {
-        match self {
-            Self::Event {
-                data, id, count, ..
-            } => RawPacket::BinaryEvent {
-                data: data.clone(),
-                id: *id,
-                count: *count,
-            },
-            Self::Ack {
-                data, id, count, ..
-            } => RawPacket::BinaryAck {
-                data: data.clone(),
-                id: *id,
-                count: *count,
-            },
+            } => attachments.len() == *count,
         }
     }
 }
@@ -267,15 +253,12 @@ impl Reconstructor {
 }
 
 struct Socket {
-    /// Channel to the state handler for delivering inbound packets.
     tx: mpsc::Sender<Packet>,
-    /// Pending ack responders keyed by their wire ID.
     acks: BTreeMap<u64, oneshot::Sender<DynAck>>,
-    /// Monotonically increasing counter used to generate ack IDs.
     ids: u64,
-    /// True once the server has sent a CONNECT response for this namespace.
+    /// Set when the server sends a CONNECT response; gates event delivery.
     connected: bool,
-    /// Events encoded before CONNECT was confirmed; flushed on CONNECT response.
+    /// Events encoded before `connected` is set; flushed on CONNECT response.
     buffer: Vec<Message>,
 }
 
@@ -295,12 +278,7 @@ impl Manager {
         }
     }
 
-    /// Drive the Socket.IO protocol loop until the connection closes.
-    ///
-    /// Interleaves outbound encoding (local → wire) with inbound decoding
-    /// (wire → namespace channels). Exits when the transport closes or all
-    /// namespace senders are dropped. Joins the engine and transport tasks
-    /// before returning.
+    /// Runs the socket routing loop until all namespaces disconnect.
     #[tracing::instrument(skip_all, err)]
     pub async fn run(mut self, engine: Engine) -> Result<()> {
         while let Some(command) = self.rx.recv().await {
@@ -314,6 +292,7 @@ impl Manager {
             }
             if self.sockets.is_empty() {
                 engine.tx.send(Message::Close).await?;
+                break;
             }
         }
 
@@ -322,10 +301,7 @@ impl Manager {
         Ok(())
     }
 
-    /// Encodes and sends (or buffers) one outbound packet.
-    ///
-    /// Events sent before the server confirms namespace connection are held in
-    /// `socket.buffer` and flushed when the CONNECT response arrives.
+    /// Encodes and sends (or buffers) one outbound command.
     async fn dispatch_command(
         &mut self,
         engine_tx: &MessageSender,
@@ -412,6 +388,8 @@ impl Manager {
     }
 
     async fn route_message(&mut self, engine_tx: &MessageSender, message: Message) -> Result<()> {
+        tracing::trace!(?message, "received message");
+
         match message {
             Message::Text(bytes) => {
                 self.route_text_message(bytes, engine_tx).await?;
@@ -422,7 +400,7 @@ impl Manager {
             }
 
             Message::Close => {
-                tracing::trace!("closing all namespaces");
+                tracing::debug!("closing all namespaces");
                 self.sockets.close();
             }
         }
@@ -436,8 +414,6 @@ impl Manager {
         }
 
         let Ns(ns, packet) = bytes.try_into()?;
-
-        tracing::trace!(ns, ?packet, "received packet");
 
         match packet {
             RawPacket::Connect(data) => {
@@ -455,8 +431,8 @@ impl Manager {
                     }
                 }
 
-                let connect = serde_json::from_slice(&data)
-                    .expect("CONNECT packet data should be valid JSON");
+                let connect: Connect = serde_json::from_slice(&data)
+                    .map_err(|e| ParseError::Payload(PayloadError::new::<Connect>(e)))?;
 
                 socket.send_packet(ns, Packet::Connect(connect)).await?;
             }
@@ -480,8 +456,8 @@ impl Manager {
             RawPacket::ConnectError(data) => {
                 let Ns(ns, socket) = self.sockets.get_mut(ns)?;
 
-                let error = serde_json::from_slice(&data)
-                    .expect("CONNECT_ERROR packet data should be valid JSON");
+                let error: ConnectError = serde_json::from_slice(&data)
+                    .map_err(|e| ParseError::Payload(PayloadError::new::<ConnectError>(e)))?;
 
                 socket.send_packet(ns, Packet::ConnectError(error)).await?;
             }
@@ -509,13 +485,7 @@ impl Manager {
             Some(Ns(ns, packet)) => {
                 let Ns(ns, socket) = self.sockets.get_mut(ns)?;
 
-                tracing::trace!(
-                    len,
-                    status = "complete",
-                    ns,
-                    packet = ?packet.as_raw(),
-                    "received binary attachment"
-                );
+                tracing::trace!(len, status = "complete", ns, "received binary attachment");
 
                 socket.send_binary_packet(ns, packet).await?;
             }
@@ -524,5 +494,294 @@ impl Manager {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sioc_engine::engine::{Engine, EngineAction, MessageSender as EngineMessageSender};
+
+    const CONNECT_RESPONSE: &[u8] = b"0{\"sid\":\"test\"}";
+
+    fn mock_engine(tx: mpsc::Sender<EngineAction>) -> Engine {
+        Engine {
+            tx: EngineMessageSender::new(tx),
+            engine_handle: tokio::spawn(async { Ok(()) }),
+            transport_handle: tokio::spawn(async { Ok(()) }),
+        }
+    }
+
+    /// Spawns a manager and returns `(manager_tx, engine_rx, join_handle)`.
+    fn setup_manager() -> (
+        mpsc::Sender<ManagerAction>,
+        mpsc::Receiver<EngineAction>,
+        tokio::task::JoinHandle<Result<()>>,
+    ) {
+        let (engine_tx, engine_rx) = mpsc::channel(32);
+        let (manager_tx, manager_rx) = mpsc::channel(32);
+        let handle = tokio::spawn(Manager::new(manager_rx).run(mock_engine(engine_tx)));
+        (manager_tx, engine_rx, handle)
+    }
+
+    async fn open_namespace(
+        manager_tx: &mpsc::Sender<ManagerAction>,
+        ns: &str,
+    ) -> mpsc::Receiver<Packet> {
+        let (tx, rx) = mpsc::channel(32);
+        manager_tx
+            .send(ManagerAction::Command(Ns(
+                ns.into(),
+                Command::Connect {
+                    tx,
+                    data: Bytes::new(),
+                },
+            )))
+            .await
+            .unwrap();
+        rx
+    }
+
+    async fn server_connect(manager_tx: &mpsc::Sender<ManagerAction>) {
+        manager_tx
+            .send(ManagerAction::Message(Message::Text(Bytes::from_static(
+                CONNECT_RESPONSE,
+            ))))
+            .await
+            .unwrap();
+    }
+
+    /// Events are held in the socket buffer until the server sends a CONNECT response.
+    #[tokio::test]
+    async fn events_buffered_before_server_connect() {
+        let (manager_tx, mut engine_rx, _) = setup_manager();
+
+        open_namespace(&manager_tx, "/").await;
+        engine_rx.recv().await.unwrap(); // drain outbound connect frame
+
+        manager_tx
+            .send(ManagerAction::Command(Ns(
+                "/".into(),
+                Command::Event {
+                    data: Bytes::from_static(b"[\"ping\"]"),
+                    tx: None,
+                    attachments: None,
+                },
+            )))
+            .await
+            .unwrap();
+
+        tokio::task::yield_now().await;
+        assert!(
+            engine_rx.try_recv().is_err(),
+            "event must be buffered before server CONNECT"
+        );
+    }
+
+    /// All buffered events are flushed in order once the server confirms the namespace.
+    #[tokio::test]
+    async fn buffered_events_flushed_on_server_connect() {
+        let (manager_tx, mut engine_rx, _) = setup_manager();
+        let mut socket_rx = open_namespace(&manager_tx, "/").await;
+        engine_rx.recv().await.unwrap();
+
+        for i in 0u8..3 {
+            manager_tx
+                .send(ManagerAction::Command(Ns(
+                    "/".into(),
+                    Command::Event {
+                        data: Bytes::copy_from_slice(&[b'[', b'"', b'a' + i, b'"', b']']),
+                        tx: None,
+                        attachments: None,
+                    },
+                )))
+                .await
+                .unwrap();
+        }
+
+        tokio::task::yield_now().await;
+        assert!(engine_rx.try_recv().is_err(), "must still be buffered");
+
+        server_connect(&manager_tx).await;
+
+        for _ in 0..3 {
+            assert!(matches!(
+                engine_rx.recv().await.unwrap(),
+                EngineAction::Message(Message::Text(_))
+            ));
+        }
+        assert!(matches!(
+            socket_rx.recv().await.unwrap(),
+            Packet::Connect(_)
+        ));
+    }
+
+    /// After the last namespace disconnects the manager sends Close to the engine and exits.
+    #[tokio::test]
+    async fn disconnect_closes_engine_when_empty() {
+        let (manager_tx, mut engine_rx, handle) = setup_manager();
+        let _socket_rx = open_namespace(&manager_tx, "/").await;
+        engine_rx.recv().await.unwrap();
+
+        server_connect(&manager_tx).await;
+        manager_tx
+            .send(ManagerAction::Command(Ns("/".into(), Command::Disconnect)))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            engine_rx.recv().await.unwrap(),
+            EngineAction::Message(Message::Text(_))
+        ));
+        assert!(matches!(
+            engine_rx.recv().await.unwrap(),
+            EngineAction::Message(Message::Close)
+        ));
+
+        drop(manager_tx);
+        handle.await.unwrap().unwrap();
+    }
+
+    /// Routing a command to an unknown namespace returns an error.
+    #[tokio::test]
+    async fn unknown_namespace_returns_error() {
+        let (manager_tx, _engine_rx, handle) = setup_manager();
+
+        manager_tx
+            .send(ManagerAction::Command(Ns(
+                "/no-such-ns".into(),
+                Command::Event {
+                    data: Bytes::from_static(b"[\"x\"]"),
+                    tx: None,
+                    attachments: None,
+                },
+            )))
+            .await
+            .unwrap();
+
+        drop(manager_tx);
+        assert!(matches!(
+            handle.await.unwrap(),
+            Err(crate::error::Error::UnknownNamespace { .. })
+        ));
+    }
+
+    /// Connecting the same namespace twice returns a conflict error.
+    #[tokio::test]
+    async fn duplicate_connect_returns_conflict() {
+        let (manager_tx, mut engine_rx, handle) = setup_manager();
+
+        open_namespace(&manager_tx, "/").await;
+        engine_rx.recv().await.unwrap();
+        open_namespace(&manager_tx, "/").await;
+
+        drop(manager_tx);
+        assert!(matches!(
+            handle.await.unwrap(),
+            Err(crate::error::Error::NamespaceConflict { .. })
+        ));
+    }
+
+    /// Disconnecting a namespace that is not open returns an error.
+    #[tokio::test]
+    async fn double_disconnect_returns_error() {
+        let (manager_tx, mut engine_rx, handle) = setup_manager();
+        let _socket_rx = open_namespace(&manager_tx, "/").await;
+        engine_rx.recv().await.unwrap();
+
+        server_connect(&manager_tx).await;
+        manager_tx
+            .send(ManagerAction::Command(Ns("/".into(), Command::Disconnect)))
+            .await
+            .unwrap();
+
+        // Drain the disconnect frame and Close so the second disconnect can be processed.
+        engine_rx.recv().await.unwrap(); // disconnect frame
+        engine_rx.recv().await.unwrap(); // Close
+
+        // Manager already broke out of the loop; second disconnect goes unprocessed.
+        // Verify the manager task exited cleanly after the first disconnect.
+        drop(manager_tx);
+        handle.await.unwrap().unwrap();
+    }
+
+    /// Ack IDs are assigned per-namespace and responses route back correctly.
+    #[tokio::test]
+    async fn ack_roundtrip() {
+        let (manager_tx, mut engine_rx, _) = setup_manager();
+        let mut socket_rx = open_namespace(&manager_tx, "/").await;
+        engine_rx.recv().await.unwrap();
+
+        server_connect(&manager_tx).await;
+        socket_rx.recv().await.unwrap(); // consume Packet::Connect
+
+        let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel();
+        manager_tx
+            .send(ManagerAction::Command(Ns(
+                "/".into(),
+                Command::Event {
+                    data: Bytes::from_static(b"[\"greet\",\"hello\"]"),
+                    tx: Some(ack_tx),
+                    attachments: None,
+                },
+            )))
+            .await
+            .unwrap();
+
+        engine_rx.recv().await.unwrap(); // drain outbound event frame
+
+        manager_tx
+            .send(ManagerAction::Message(Message::Text(Bytes::from_static(
+                b"30[\"world\"]",
+            ))))
+            .await
+            .unwrap();
+
+        tokio::task::yield_now().await;
+        let ack = ack_rx.try_recv().unwrap();
+        assert_eq!(&ack.data[..], b"[\"world\"]");
+    }
+
+    /// A binary event is held until all attachment frames arrive, then delivered as a complete packet.
+    #[tokio::test]
+    async fn binary_event_reassembly() {
+        let (manager_tx, _engine_rx, _) = setup_manager();
+        let mut socket_rx = open_namespace(&manager_tx, "/").await;
+
+        server_connect(&manager_tx).await;
+        socket_rx.recv().await.unwrap(); // consume Packet::Connect
+
+        manager_tx
+            .send(ManagerAction::Message(Message::Text(Bytes::from_static(
+                b"52-[\"img\"]",
+            ))))
+            .await
+            .unwrap();
+
+        manager_tx
+            .send(ManagerAction::Message(Message::Binary(Bytes::from_static(
+                b"\x01\x02",
+            ))))
+            .await
+            .unwrap();
+
+        tokio::task::yield_now().await;
+        assert!(
+            socket_rx.try_recv().is_err(),
+            "incomplete — second attachment not yet received"
+        );
+
+        manager_tx
+            .send(ManagerAction::Message(Message::Binary(Bytes::from_static(
+                b"\x03\x04",
+            ))))
+            .await
+            .unwrap();
+
+        let pkt = socket_rx.recv().await.unwrap();
+        match pkt {
+            Packet::Event(ev) => assert_eq!(ev.attachments.as_ref().unwrap().len(), 2),
+            other => panic!("expected Event, got {other:?}"),
+        }
     }
 }

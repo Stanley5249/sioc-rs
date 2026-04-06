@@ -5,15 +5,14 @@
 //! Error types for the `sioc` public API.
 //!
 //! [`enum@Error`] is the top-level enum returned by all fallible operations in this
-//! crate.  It wraps protocol errors from `sioc-core`, JSON serialization
+//! crate.  It wraps protocol errors from `sioc-socket`, JSON serialization
 //! failures, and application-level validation errors from the marker-policy
 //! system.
 
 use miette::Diagnostic;
-pub use sioc_core::error::PayloadError;
-use sioc_core::prelude::ManagerAction;
+pub use sioc_socket::error::PayloadError;
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use tokio::task::JoinError;
 
 /// A marker-policy validation failed.
@@ -63,19 +62,15 @@ pub enum Error {
     #[diagnostic(code(sioc::ack_channel_closed))]
     ReceiveAck(#[from] oneshot::error::RecvError),
 
-    #[error("client send failed")]
-    #[diagnostic(code(sioc::client_send))]
-    SendCommand(#[from] mpsc::error::SendError<ManagerAction>),
-
-    /// The internal manager task panicked or was cancelled.
-    #[error("manager task failed")]
+    /// The socket router task panicked or was cancelled.
+    #[error("socket router task failed")]
     #[diagnostic(code(sioc::task))]
     Task(#[from] JoinError),
 
     /// A protocol or transport error propagated from the core layer.
     #[error(transparent)]
     #[diagnostic(transparent)]
-    Core(#[from] sioc_core::error::Error),
+    Core(#[from] sioc_socket::error::Error),
 
     /// A transport or Engine.IO error.
     #[error(transparent)]

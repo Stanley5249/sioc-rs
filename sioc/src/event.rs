@@ -28,7 +28,7 @@ use crate::error::Result;
 use crate::marker::{AckMarker, BinaryMarker, HasAck, HasBinary, NoAck, NoBinary};
 use crate::payload::{DeserializePayload, SerializePayload, deserialize_event, serialize_event};
 use bytes::Bytes;
-use sioc_core::packet::{Command, DynEvent};
+use sioc_socket::packet::{Command, DynEvent};
 use tokio::sync::oneshot;
 
 /// Maps a Rust struct to a Socket.IO event name and compile-time policies.

@@ -1,15 +1,10 @@
-use crate::error::{Error, PacketError, Result};
+use std::time::Duration;
+
+use crate::error::{Error, PacketError, PayloadError, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 pub const PROBE: Bytes = Bytes::from_static(b"probe");
-
-fn encode_prefixed(prefix: u8, data: &[u8]) -> Bytes {
-    let mut buffer = BytesMut::with_capacity(1 + data.len());
-    buffer.put_u8(prefix);
-    buffer.extend_from_slice(data);
-    buffer.freeze()
-}
 
 /// Content exchanged between the Socket.IO and Engine.IO layers.
 #[derive(Clone, PartialEq, Eq)]
@@ -39,13 +34,13 @@ impl std::fmt::Debug for Message {
 #[derive(Clone, PartialEq, Eq)]
 pub enum Frame {
     /// A UTF-8 text frame (contains a complete Engine.IO packet).
-    Packet(EioPacket),
+    Packet(Packet),
     /// A raw binary frame.
     Binary(Bytes),
 }
 
-impl From<EioPacket> for Frame {
-    fn from(packet: EioPacket) -> Self {
+impl From<Packet> for Frame {
+    fn from(packet: Packet) -> Self {
         Frame::Packet(packet)
     }
 }
@@ -74,15 +69,6 @@ impl Frame {
     }
 }
 
-impl From<Frame> for Bytes {
-    fn from(frame: Frame) -> Self {
-        match frame {
-            Frame::Packet(packet) => packet.encode(),
-            Frame::Binary(bytes) => bytes,
-        }
-    }
-}
-
 /// Data exchanged in the Engine.IO v4 handshake (the `open` packet payload).
 ///
 /// # Wire format
@@ -96,7 +82,7 @@ impl From<Frame> for Bytes {
 ///   "maxPayload": 1000000
 /// }
 /// ```
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Handshake {
     /// Session identifier; sent as the `sid` query parameter in all subsequent requests.
     pub sid: String,
@@ -123,24 +109,21 @@ impl Handshake {
     }
 
     /// Combined `pingInterval + pingTimeout` as a [`Duration`](std::time::Duration).
-    pub fn ping_window(&self) -> std::time::Duration {
-        std::time::Duration::from_millis(self.ping_interval + self.ping_timeout)
+    pub fn ping_window(&self) -> Duration {
+        Duration::from_millis(self.ping_interval + self.ping_timeout)
     }
 }
 
+fn encode_packet(prefix: u8, data: &[u8]) -> Bytes {
+    let mut buffer = BytesMut::with_capacity(1 + data.len());
+    buffer.put_u8(prefix);
+    buffer.put_slice(data);
+    buffer.freeze()
+}
+
 /// A packet in the Engine.IO v4 protocol.
-///
-/// | Type      | ID  | Direction           |
-/// |-----------|-----|---------------------|
-/// | `Open`    | `0` | server → client     |
-/// | `Close`   | `1` | both                |
-/// | `Ping`    | `2` | server → client     |
-/// | `Pong`    | `3` | client → server     |
-/// | `Message` | `4` | both                |
-/// | `Upgrade` | `5` | client → server     |
-/// | `Noop`    | `6` | server → client     |
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EioPacket {
+pub enum Packet {
     /// `0` — Handshake data from the server.
     Open(Handshake),
     /// `1` — The transport can be closed.
@@ -157,30 +140,17 @@ pub enum EioPacket {
     Noop,
 }
 
-impl EioPacket {
+impl Packet {
     /// Encodes this packet into a [`Frame`] for transport.
-    ///
-    /// | Variant | Result |
-    /// |---------|--------|
-    /// | `Message(data)` | `Text("4" + data)` |
-    /// | `Ping(data)` | `Text("2" + data)` |
-    /// | `Pong(data)` | `Text("3" + data)` |
-    /// | `Open(hs)` | `Text("0" + JSON)` |
-    /// | `Close` | `Text("1")` |
-    /// | `Upgrade` | `Text("5")` |
-    /// | `Noop` | `Text("6")` |
     pub fn encode(&self) -> Bytes {
         match self {
-            EioPacket::Message(data) => encode_prefixed(b'4', data),
-            EioPacket::Ping(data) => encode_prefixed(b'2', data),
-            EioPacket::Pong(data) => encode_prefixed(b'3', data),
-            EioPacket::Open(handshake) => encode_prefixed(
-                b'0',
-                &serde_json::to_vec(&handshake).expect("handshake should serialize to JSON"),
-            ),
-            EioPacket::Close => Bytes::from_static(b"1"),
-            EioPacket::Upgrade => Bytes::from_static(b"5"),
-            EioPacket::Noop => Bytes::from_static(b"6"),
+            Self::Open(..) => panic!("client should never encode an Open packet"),
+            Self::Close => Bytes::from_static(b"1"),
+            Self::Ping(data) => encode_packet(b'2', data),
+            Self::Pong(data) => encode_packet(b'3', data),
+            Self::Message(data) => encode_packet(b'4', data),
+            Self::Upgrade => Bytes::from_static(b"5"),
+            Self::Noop => panic!("client should never encode a Noop packet"),
         }
     }
 
@@ -191,20 +161,21 @@ impl EioPacket {
         if data.is_empty() {
             Err(PacketError::Empty)?;
         }
-        let first = data[0];
-        data.advance(1);
 
-        match first {
-            b'0' => Ok(EioPacket::Open(serde_json::from_slice(&data).map_err(
-                |e| crate::error::PayloadError::new::<Handshake>(e).with_slice(&data),
-            )?)),
-            b'1' => Ok(EioPacket::Close),
-            b'2' => Ok(EioPacket::Ping(data)),
-            b'3' => Ok(EioPacket::Pong(data)),
-            b'4' => Ok(EioPacket::Message(data)),
-            b'5' => Ok(EioPacket::Upgrade),
-            b'6' => Ok(EioPacket::Noop),
-            _ => Err(PacketError::InvalidId { byte: first })?,
+        match data.get_u8() {
+            b'0' => {
+                let handshake = serde_json::from_slice(&data)
+                    .map_err(|e| PayloadError::new::<Handshake>(e).with_slice(&data))?;
+
+                Ok(Packet::Open(handshake))
+            }
+            b'1' => Ok(Packet::Close),
+            b'2' => Ok(Packet::Ping(data)),
+            b'3' => Ok(Packet::Pong(data)),
+            b'4' => Ok(Packet::Message(data)),
+            b'5' => Ok(Packet::Upgrade),
+            b'6' => Ok(Packet::Noop),
+            id => Err(PacketError::InvalidId { id })?,
         }
     }
 
@@ -219,7 +190,6 @@ impl EioPacket {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     fn test_handshake() -> Handshake {
         Handshake {
@@ -233,14 +203,14 @@ mod tests {
 
     #[test]
     fn handshake_missing_required_field_is_error() {
-        let json = json!({
+        let json = serde_json::json!({
             "sid": "test-456",
             "upgrades": [],
             "pingInterval": 25000,
             "pingTimeout": 20000
         });
         let bytes = Bytes::from(format!("0{}", json));
-        assert!(EioPacket::decode(bytes).is_err());
+        assert!(Packet::decode(bytes).is_err());
     }
 
     #[test]
@@ -255,15 +225,15 @@ mod tests {
     #[test]
     fn decode_invalid_packet_id() {
         assert!(matches!(
-            EioPacket::decode(Bytes::from_static(b"9")),
-            Err(crate::error::PacketError::InvalidId { byte: b'9' })
+            Packet::decode(Bytes::from_static(b"9")),
+            Err(crate::error::PacketError::InvalidId { id: b'9' })
         ));
     }
 
     #[test]
     fn decode_empty_packet() {
         assert!(matches!(
-            EioPacket::decode(Bytes::new()),
+            Packet::decode(Bytes::new()),
             Err(crate::error::PacketError::Empty)
         ));
     }
@@ -271,10 +241,10 @@ mod tests {
     #[test]
     fn encode_decode_open_round_trip() {
         let hs = test_handshake();
-        let Frame::Packet(packet) = EioPacket::Open(hs.clone()).into() else {
+        let Frame::Packet(packet) = Packet::Open(hs.clone()).into() else {
             panic!("expected Packet frame");
         };
-        let EioPacket::Open(decoded) = packet else {
+        let Packet::Open(decoded) = packet else {
             panic!("expected Open");
         };
         assert_eq!(decoded, hs);
@@ -282,19 +252,19 @@ mod tests {
 
     #[test]
     fn encode_decode_close_round_trip() {
-        let Frame::Packet(packet) = EioPacket::Close.into() else {
+        let Frame::Packet(packet) = Packet::Close.into() else {
             panic!("expected Packet frame");
         };
-        assert!(matches!(packet, EioPacket::Close));
+        assert!(matches!(packet, Packet::Close));
     }
 
     #[test]
     fn encode_decode_ping_round_trip() {
         let payload = Bytes::from_static(b"probe");
-        let Frame::Packet(packet) = EioPacket::Ping(payload.clone()).into() else {
+        let Frame::Packet(packet) = Packet::Ping(payload.clone()).into() else {
             panic!("expected Packet frame");
         };
-        let EioPacket::Ping(decoded) = packet else {
+        let Packet::Ping(decoded) = packet else {
             panic!("expected Ping");
         };
         assert_eq!(decoded, payload);
@@ -303,10 +273,10 @@ mod tests {
     #[test]
     fn encode_decode_pong_round_trip() {
         let payload = Bytes::from_static(b"probe");
-        let Frame::Packet(packet) = EioPacket::Pong(payload.clone()).into() else {
+        let Frame::Packet(packet) = Packet::Pong(payload.clone()).into() else {
             panic!("expected Packet frame");
         };
-        let EioPacket::Pong(decoded) = packet else {
+        let Packet::Pong(decoded) = packet else {
             panic!("expected Pong");
         };
         assert_eq!(decoded, payload);
@@ -315,10 +285,10 @@ mod tests {
     #[test]
     fn encode_decode_text_message_round_trip() {
         let text = Bytes::from_static(b"hello world");
-        let Frame::Packet(packet) = EioPacket::Message(text.clone()).into() else {
+        let Frame::Packet(packet) = Packet::Message(text.clone()).into() else {
             panic!("expected Packet frame");
         };
-        let EioPacket::Message(decoded) = packet else {
+        let Packet::Message(decoded) = packet else {
             panic!("expected Message");
         };
         assert_eq!(decoded, text);
@@ -326,26 +296,26 @@ mod tests {
 
     #[test]
     fn encode_decode_upgrade_round_trip() {
-        let Frame::Packet(packet) = EioPacket::Upgrade.into() else {
+        let Frame::Packet(packet) = Packet::Upgrade.into() else {
             panic!("expected Packet frame");
         };
-        assert!(matches!(packet, EioPacket::Upgrade));
+        assert!(matches!(packet, Packet::Upgrade));
     }
 
     #[test]
     fn encode_decode_noop_round_trip() {
-        let Frame::Packet(packet) = EioPacket::Noop.into() else {
+        let Frame::Packet(packet) = Packet::Noop.into() else {
             panic!("expected Packet frame");
         };
-        assert!(matches!(packet, EioPacket::Noop));
+        assert!(matches!(packet, Packet::Noop));
     }
 
     #[test]
     fn encode_ping_empty_payload() {
-        let Frame::Packet(packet) = EioPacket::Ping(Bytes::new()).into() else {
+        let Frame::Packet(packet) = Packet::Ping(Bytes::new()).into() else {
             panic!("expected Packet frame");
         };
-        let EioPacket::Ping(decoded) = packet else {
+        let Packet::Ping(decoded) = packet else {
             panic!("expected Ping");
         };
         assert!(decoded.is_empty());

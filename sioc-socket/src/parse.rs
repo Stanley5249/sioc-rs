@@ -305,12 +305,34 @@ mod tests {
 
     #[test]
     fn parse_connect_packet() {
-        todo!()
+        let data = Bytes::from_static(b"0");
+        let ns_packet: Ns<RawPacket> = data.try_into().unwrap();
+        assert_eq!(ns_packet.0, "/");
+        match ns_packet.1 {
+            RawPacket::Connect(payload) => assert!(payload.is_empty()),
+            _ => panic!("expected Connect"),
+        }
     }
 
     #[test]
-    fn parse_connect_packet_with_extra_fields() {
-        todo!()
+    fn parse_connect_packet_with_payload() {
+        let data = Bytes::from_static(b"0{\"sid\":\"abc\",\"token\":\"xyz\"}");
+        let ns_packet: Ns<RawPacket> = data.try_into().unwrap();
+        assert_eq!(ns_packet.0, "/");
+        match ns_packet.1 {
+            RawPacket::Connect(payload) => {
+                assert_eq!(&payload[..], b"{\"sid\":\"abc\",\"token\":\"xyz\"}");
+            }
+            _ => panic!("expected Connect"),
+        }
+    }
+
+    #[test]
+    fn parse_connect_packet_custom_namespace() {
+        let data = Bytes::from_static(b"0/admin,");
+        let ns_packet: Ns<RawPacket> = data.try_into().unwrap();
+        assert_eq!(ns_packet.0, "/admin");
+        assert!(matches!(ns_packet.1, RawPacket::Connect(_)));
     }
 
     #[test]
@@ -364,21 +386,23 @@ mod tests {
     fn parse_connect_error_packet() {
         let data = Bytes::from_static(b"4{\"message\":\"forbidden\"}");
         let ns_packet: Ns<RawPacket> = data.try_into().unwrap();
+        assert_eq!(ns_packet.0, "/");
         match ns_packet.1 {
-            RawPacket::ConnectError(_) => {
-                todo!()
+            RawPacket::ConnectError(payload) => {
+                assert_eq!(&payload[..], b"{\"message\":\"forbidden\"}");
             }
             _ => panic!("expected ConnectError"),
         }
     }
 
     #[test]
-    fn parse_connect_error_with_data() {
+    fn parse_connect_error_with_extra_fields() {
         let data = Bytes::from(r#"4{"message":"bad","data":{"code":401}}"#);
         let ns_packet: Ns<RawPacket> = data.try_into().unwrap();
+        assert_eq!(ns_packet.0, "/");
         match ns_packet.1 {
-            RawPacket::ConnectError(_) => {
-                todo!()
+            RawPacket::ConnectError(payload) => {
+                assert!(payload.starts_with(b"{\"message\":"));
             }
             _ => panic!("expected ConnectError"),
         }

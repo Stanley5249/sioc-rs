@@ -2,10 +2,10 @@
 name = "sioc-macros"
 version = "0.1.0"
 edition = "2024"
-authors = ["Sioc Contributors"]
-description = "Procedural macros for Sioc - derive Event"
+authors = ["Stanley5249 <seer852741@gmail.com>"]
+description = "Procedural macros for Sioc"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/yourusername/sioc"
+repository = "https://github.com/Stanley5249/sioc-rs"
 keywords = ["socketio", "macros", "procedural-macro", "codegen"]
 categories = ["network-programming", "development-tools::procedural-macro-helpers"]
 

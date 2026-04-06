@@ -3,7 +3,7 @@
 use crate::ENGINE_IO_VERSION;
 use crate::engine::FrameSender;
 use crate::error::{Error, Result};
-use crate::packet::{EioPacket, Frame, Handshake, PROBE};
+use crate::packet::{Frame, Handshake, PROBE, Packet};
 use futures_util::{SinkExt, StreamExt};
 use std::future::Future;
 use tokio::net::TcpStream;
@@ -60,7 +60,7 @@ fn encode_frame(frame: Frame) -> Result<WebSocketMessage> {
 async fn next_frame(stream: &mut WebSocketStream) -> Result<Frame> {
     while let Some(message) = stream.next().await.transpose()? {
         let frame = match message {
-            WebSocketMessage::Text(text) => EioPacket::decode(text.into())?.into(),
+            WebSocketMessage::Text(text) => Packet::decode(text.into())?.into(),
             WebSocketMessage::Binary(bytes) => bytes.into(),
             _ => continue,
         };
@@ -99,14 +99,14 @@ fn websocket_url(mut url: Url, sid: Option<&str>) -> Url {
 async fn websocket_probe(stream: &mut WebSocketStream) -> Result<()> {
     tracing::debug!("sending probe Ping");
 
-    let packet = EioPacket::Ping(PROBE);
+    let packet = Packet::Ping(PROBE);
 
     stream
         .send(WebSocketMessage::Text(packet.encode().try_into()?))
         .await?;
 
     match next_frame(stream).await? {
-        Frame::Packet(EioPacket::Pong(bytes)) if bytes == PROBE => {
+        Frame::Packet(Packet::Pong(bytes)) if bytes == PROBE => {
             tracing::debug!("received probe Pong");
         }
         other => {
@@ -149,7 +149,7 @@ pub async fn websocket_loop(
     match handshake_tx {
         Some(handshake_tx) => {
             let handshake = match next_frame(&mut stream).await? {
-                Frame::Packet(EioPacket::Open(handshake)) => handshake,
+                Frame::Packet(Packet::Open(handshake)) => handshake,
                 other => return Err(other.unexpected("expected Open packet as first frame")),
             };
 
@@ -160,7 +160,7 @@ pub async fn websocket_loop(
         None => {
             tracing::debug!("sending UPGRADE");
 
-            let message = WebSocketMessage::Text(EioPacket::Upgrade.encode().try_into()?);
+            let message = WebSocketMessage::Text(Packet::Upgrade.encode().try_into()?);
 
             stream.send(message).await?;
         }
@@ -183,7 +183,7 @@ pub async fn websocket_loop(
                 tracing::trace!(%message, "received message");
 
                 let frame = match message {
-                    WebSocketMessage::Text(text) => EioPacket::decode(text.into())?.into(),
+                    WebSocketMessage::Text(text) => Packet::decode(text.into())?.into(),
                     WebSocketMessage::Binary(bytes) => bytes.into(),
                     _ => continue,
                 };

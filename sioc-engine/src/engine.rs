@@ -1,10 +1,11 @@
 //! Engine.IO protocol task.
 
-use crate::error::{Error, Result};
-use crate::packet::{EioPacket, Frame, Handshake, Message};
+use crate::error::{BoxedError, Error, Result};
+use crate::packet::{Frame, Handshake, Message, Packet};
 use crate::transport::TransportStrategy;
 use crate::utils::join_tasks;
 use crate::websocket::WebSocketConnector;
+use futures_util::{Sink, SinkExt};
 use std::pin::Pin;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -23,19 +24,27 @@ pub enum EngineAction {
 
 /// Restricted sender: can only deliver [`Frame`]s to the engine (used by transport tasks).
 #[derive(Clone, Debug)]
-pub struct FrameSender(pub mpsc::Sender<EngineAction>);
+pub struct FrameSender(mpsc::Sender<EngineAction>);
 
 impl FrameSender {
-    pub async fn send(&self, frame: Frame) -> Result<(), mpsc::error::SendError<EngineAction>> {
-        self.0.send(EngineAction::Frame(frame)).await
+    pub fn new(sender: mpsc::Sender<EngineAction>) -> Self {
+        Self(sender)
+    }
+
+    pub async fn send(&self, frame: Frame) -> Result<()> {
+        Ok(self.0.send(EngineAction::Frame(frame)).await?)
     }
 }
 
-/// Restricted sender: can only deliver outbound [`Message`]s to the engine (used by the Socket.IO manager).
+/// Sends outbound [`Message`]s to the engine (used by the socket router).
 #[derive(Clone, Debug)]
-pub struct MessageSender(pub mpsc::Sender<EngineAction>);
+pub struct MessageSender(mpsc::Sender<EngineAction>);
 
 impl MessageSender {
+    pub fn new(sender: mpsc::Sender<EngineAction>) -> Self {
+        Self(sender)
+    }
+
     pub async fn send(&self, message: Message) -> Result<()> {
         Ok(self.0.send(EngineAction::Message(message)).await?)
     }
@@ -54,18 +63,17 @@ pub struct Engine {
 impl Engine {
     /// Spawns the engine and transport tasks and returns handles to both.
     ///
-    /// `inbound_tx` receives decoded inbound [`Message`]s. The channel type `T`
-    /// must be constructible from a `Message` (e.g. `ManagerAction::from`).
-    pub fn connect<C, T>(
+    /// `sink` receives decoded inbound [`Message`]s from the transport.
+    pub fn connect<C, S>(
         url: Url,
         http_client: reqwest::Client,
         websocket_connector: C,
         strategy: TransportStrategy,
-        inbound_tx: mpsc::Sender<T>,
+        sink: S,
     ) -> Self
     where
         C: WebSocketConnector,
-        T: From<Message> + Send + Sync + 'static,
+        S: Sink<Message, Error = BoxedError> + Unpin + Send + 'static,
     {
         let (engine_tx, engine_rx) = mpsc::channel(32);
         let (transport_tx, transport_rx) = mpsc::channel(32);
@@ -78,21 +86,21 @@ impl Engine {
             http_client,
             websocket_connector,
             handshake_tx,
-            FrameSender(engine_tx.clone()),
+            FrameSender::new(engine_tx.clone()),
             transport_rx,
             token.clone(),
         );
 
         let engine_handle = tokio::spawn(engine_loop(
+            sink,
             engine_rx,
-            inbound_tx,
             transport_tx,
             handshake_rx,
             token,
         ));
 
         Self {
-            tx: MessageSender(engine_tx),
+            tx: MessageSender::new(engine_tx),
             engine_handle,
             transport_handle,
         }
@@ -124,67 +132,86 @@ impl Heartbeat {
 }
 
 #[tracing::instrument(skip_all, err)]
-async fn engine_loop<T>(
+async fn engine_loop<S>(
+    mut sink: S,
     mut engine_rx: mpsc::Receiver<EngineAction>,
-    inbound_tx: mpsc::Sender<T>,
     transport_tx: mpsc::Sender<Frame>,
     handshake_rx: oneshot::Receiver<Handshake>,
     token: CancellationToken,
 ) -> Result<()>
 where
-    T: From<Message> + Send + Sync + 'static,
+    S: Sink<Message, Error = BoxedError> + Unpin,
 {
     // Cancels the transport when this task exits for any reason (error, close, or drop).
     let _guard = token.drop_guard();
 
     let handshake = handshake_rx.await?;
+    tracing::debug!(?handshake, "received handshake");
+
     let mut heartbeat = Heartbeat::new(handshake.ping_window());
 
     loop {
-        tokio::select! {
+        let item = tokio::select! {
             _ = &mut heartbeat.timer => return Err(Error::HeartbeatTimeout),
+            item = engine_rx.recv() => item,
+        };
 
-            item = engine_rx.recv() => {
-                let Some(action) = item else {
-                    break;
-                };
+        let Some(action) = item else {
+            tracing::debug!("engine channel closed");
+            break;
+        };
 
-                match action {
-                    EngineAction::Frame(frame) => match frame {
-                        Frame::Packet(EioPacket::Ping(data)) => {
-                            transport_tx.send(EioPacket::Pong(data).into()).await?;
+        match action {
+            EngineAction::Frame(frame) => {
+                tracing::trace!(?frame, "received frame");
+
+                match frame {
+                    Frame::Packet(packet) => match packet {
+                        Packet::Close => {
+                            tracing::debug!("server closed");
+                            break;
+                        }
+                        Packet::Ping(data) => {
+                            transport_tx.send(Packet::Pong(data).into()).await?;
                             heartbeat.reset();
                         }
-                        Frame::Packet(EioPacket::Message(data)) => {
-                            inbound_tx
-                                .send(Message::Text(data).into())
-                                .await.map_err(|e| Error::SendMessage(Box::new(e)))?;
+                        Packet::Message(data) => {
+                            sink.send(Message::Text(data))
+                                .await
+                                .map_err(Error::SendMessage)?;
                         }
-                        Frame::Binary(data) => {
-                            inbound_tx
-                                .send(Message::Binary(data).into())
-                                .await.map_err(|e| Error::SendMessage(Box::new(e)))?;
-                        }
-                        Frame::Packet(EioPacket::Close) => {break;},
+                        Packet::Noop => {}
 
-                        Frame::Packet(EioPacket::Noop) => {}
-                        Frame::Packet(packet) => {
-                            return Err(packet.unexpected("client did not expect this packet"));
+                        other => {
+                            return Err(other.unexpected("client did not expect this packet"));
                         }
-                    }
-                    EngineAction::Message(message) => match message {
-                        Message::Text(bytes) => {
-                            transport_tx.send(EioPacket::Message(bytes).into()).await?;
-                        }
-                        Message::Binary(bytes) => {
-                            transport_tx.send(bytes.into()).await?;
+                    },
 
-                        }
-                        Message::Close => break,
+                    Frame::Binary(data) => {
+                        sink.send(Message::Binary(data))
+                            .await
+                            .map_err(Error::SendMessage)?;
                     }
-                };
+                }
             }
-        }
+            EngineAction::Message(message) => {
+                tracing::trace!(?message, "sending message");
+
+                match message {
+                    Message::Text(bytes) => {
+                        let packet = Packet::Message(bytes);
+                        transport_tx.send(packet.into()).await?;
+                    }
+                    Message::Binary(bytes) => {
+                        transport_tx.send(bytes.into()).await?;
+                    }
+                    Message::Close => {
+                        tracing::debug!("client closed");
+                        break;
+                    }
+                }
+            }
+        };
     }
 
     Ok(())
