@@ -1,18 +1,17 @@
 use miette::IntoDiagnostic;
 use sioc::prelude::*;
 use std::path::PathBuf;
-use tokio::process::Command;
-use tokio::signal;
+use tokio::process::{Child, Command};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 use url::Url;
 
-#[derive(Debug, Clone, EventType, SerializePayload, DeserializePayload)]
+#[derive(Debug, EventType, DeserializePayload)]
 struct Ping {
     data: i64,
 }
 
-#[derive(Debug, Clone, EventType, SerializePayload, DeserializePayload)]
+#[derive(Debug, EventType, SerializePayload)]
 struct Pong {
     data: i64,
 }
@@ -24,15 +23,18 @@ fn get_manifest_dir() -> std::io::Result<PathBuf> {
     }
 }
 
-async fn run_server() -> std::io::Result<tokio::process::Child> {
+async fn run_server() -> std::io::Result<Child> {
     let current_dir = get_manifest_dir()?;
+
     let child = Command::new("uv")
         .args(["run", "server.py"])
         .current_dir(current_dir)
         .spawn()?;
+
     Ok(child)
 }
 
+#[tracing::instrument(skip_all, err)]
 async fn run_client() -> miette::Result<()> {
     let url = Url::parse("http://localhost:3000").into_diagnostic()?;
 
@@ -41,51 +43,38 @@ async fn run_client() -> miette::Result<()> {
     let (tx, mut rx) = client.connect("/").await?;
 
     loop {
-        tokio::select! {
-            Some(packet) = rx.recv() => {
-                if !handle_packet(&tx, packet).await? {
-                    break;
-                }
-            }
-            _ = signal::ctrl_c() => {
-                println!("Received shutdown signal");
-                tx.disconnect().await?;
+        let item = tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("ctrl c singal");
                 break;
             }
+            item = rx.recv() => item,
+        };
+
+        let signal = match item {
+            Some(signal) => signal.cast::<Event<Ping>>()?,
+            _ => break,
+        };
+
+        tracing::debug!(?signal, "received signal");
+
+        match signal {
+            Signal::ConnectError(error) => return Err(error).into_diagnostic(),
+
+            Signal::Event(ping) => {
+                let data = ping.payload.data;
+                let pong = Pong { data };
+                tx.emit(pong).await?;
+            }
+            _ => {}
         }
     }
+
+    tx.disconnect().await?;
 
     client.join().await?;
 
     Ok(())
-}
-
-async fn handle_packet(sender: &SocketSender, packet: Signal) -> miette::Result<bool> {
-    match packet.cast::<Event<Ping>>()? {
-        Signal::Connect(connection) => {
-            println!("{connection:?}");
-            Ok(true)
-        }
-        Signal::Disconnect => {
-            println!("Disconnected");
-            Ok(false)
-        }
-        Signal::ConnectError(error) => {
-            eprintln!("Connection error: {error}");
-            Err(error).into_diagnostic()
-        }
-        Signal::Event(ping) => {
-            println!("{:?}", ping.payload);
-
-            let pong = Pong {
-                data: ping.payload.data,
-            };
-
-            sender.emit(pong).await?;
-
-            Ok(true)
-        }
-    }
 }
 
 #[tokio::main]
@@ -96,11 +85,11 @@ async fn main() -> miette::Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    let mut handle = run_server().await.into_diagnostic()?;
+    let mut server = run_server().await.into_diagnostic()?;
 
     run_client().await?;
 
-    handle.kill().await.into_diagnostic()?;
+    server.kill().await.into_diagnostic()?;
 
     Ok(())
 }
