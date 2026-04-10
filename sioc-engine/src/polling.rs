@@ -1,7 +1,7 @@
 //! HTTP long-polling transport tasks for Engine.IO v4.
 
 use crate::ENGINE_IO_VERSION;
-use crate::engine::FrameSender;
+use crate::engine::EngineSender;
 use crate::error::{Error, PacketError, Result};
 use crate::packet::{Frame, Handshake, Packet};
 use crate::utils::join_tasks;
@@ -129,9 +129,9 @@ async fn polling_post(
 async fn polling_get(
     url: Url,
     http_client: Client,
-    engine_tx: FrameSender,
+    engine_tx: EngineSender,
     token: CancellationToken,
-) -> Result<FrameSender> {
+) -> Result<EngineSender> {
     while !token.is_cancelled() {
         let response = http_client
             .get(url.clone())
@@ -159,7 +159,7 @@ pub async fn polling_transport<C>(
     http_client: reqwest::Client,
     connector: C,
     handshake_tx: oneshot::Sender<Handshake>,
-    engine_tx: FrameSender,
+    engine_tx: EngineSender,
     transport_rx: mpsc::Receiver<Frame>,
     token: CancellationToken,
 ) -> Result<()>

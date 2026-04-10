@@ -38,7 +38,7 @@ pub const ENGINE_IO_VERSION: u64 = 4;
 
 /// Convenience re-exports for common usage.
 pub mod prelude {
-    pub use crate::engine::{EngineAction, FrameSender, TransitSender};
+    pub use crate::engine::{EngineAction, EngineSender};
     pub use crate::error::{Error, PayloadError, Result};
     pub use crate::packet::{Handshake, Packet, Transit};
     pub use crate::transport::TransportStrategy;

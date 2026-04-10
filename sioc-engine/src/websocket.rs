@@ -1,7 +1,7 @@
 //! WebSocket transport for Engine.IO v4.
 
 use crate::ENGINE_IO_VERSION;
-use crate::engine::FrameSender;
+use crate::engine::EngineSender;
 use crate::error::{Error, Result};
 use crate::packet::{Frame, Handshake, PROBE, Packet};
 use futures_util::{SinkExt, StreamExt};
@@ -142,7 +142,7 @@ where
 pub async fn websocket_loop(
     mut stream: WebSocketStream,
     handshake_tx: Option<oneshot::Sender<Handshake>>,
-    engine_tx: FrameSender,
+    engine_tx: EngineSender,
     mut transport_rx: mpsc::Receiver<Frame>,
     token: CancellationToken,
 ) -> Result<()> {
@@ -182,7 +182,7 @@ pub async fn websocket_loop(
 
                 tracing::trace!(frame = %message, "received message");
 
-                let frame = match message {
+                let frame: Frame = match message {
                     WebSocketMessage::Text(text) => Packet::decode(text.into())?.into(),
                     WebSocketMessage::Binary(bytes) => bytes.into(),
                     _ => continue,
@@ -213,7 +213,7 @@ pub async fn websocket_transport<C>(
     base_url: Url,
     connector: C,
     handshake_tx: oneshot::Sender<Handshake>,
-    engine_tx: FrameSender,
+    engine_tx: EngineSender,
     transport_rx: mpsc::Receiver<Frame>,
     token: CancellationToken,
 ) -> Result<()>

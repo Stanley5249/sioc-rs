@@ -3,7 +3,7 @@
 //! Manages the transport lifecycle: HTTP long-polling handshake, optional
 //! upgrade to WebSocket, and clean shutdown via cancellation.
 
-use crate::engine::FrameSender;
+use crate::engine::EngineSender;
 use crate::error::Result;
 use crate::packet::{Frame, Handshake};
 use crate::polling::polling_transport;
@@ -29,7 +29,7 @@ impl TransportStrategy {
         http_client: reqwest::Client,
         connector: C,
         handshake_tx: oneshot::Sender<Handshake>,
-        engine_tx: FrameSender,
+        engine_tx: EngineSender,
         transport_rx: mpsc::Receiver<Frame>,
         token: CancellationToken,
     ) -> JoinHandle<Result<()>>

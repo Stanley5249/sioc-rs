@@ -9,8 +9,8 @@ use sioc_engine::engine::Engine;
 use sioc_engine::transport::TransportStrategy;
 use sioc_engine::websocket::{DefaultWebSocketConnector, WebSocketConnector};
 use sioc_socket::error::Result as CoreResult;
-use sioc_socket::manager::{DirectiveSender, Manager, ManagerAction, transit_sender};
-use sioc_socket::packet::{Directive, Ns, Signal};
+use sioc_socket::manager::{Manager, ManagerAction, ManagerSender, manager_sink};
+use sioc_socket::packet::{Directive, Signal};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use url::Url;
@@ -147,17 +147,15 @@ where
             http_client,
             websocket_connector,
             self.transport_strategy,
-            transit_sender(manager_tx.clone()),
+            manager_sink(manager_tx.clone()),
         );
 
         let manager = Manager::new(manager_rx);
 
         let manager_handle = tokio::spawn(manager.run(engine));
 
-        let manager_tx = DirectiveSender::new(manager_tx);
-
         Ok(Client {
-            manager_tx,
+            manager_tx: ManagerSender(manager_tx),
             manager_handle,
         })
     }
@@ -166,7 +164,7 @@ where
 /// A connected Socket.IO client.
 #[derive(Debug)]
 pub struct Client {
-    manager_tx: DirectiveSender,
+    manager_tx: ManagerSender,
     manager_handle: JoinHandle<CoreResult<()>>,
 }
 
@@ -221,13 +219,12 @@ impl Client {
 #[derive(Debug, Clone)]
 pub struct SocketSender {
     ns: String,
-    manager_tx: DirectiveSender,
+    manager_tx: ManagerSender,
 }
 
 impl SocketSender {
-    async fn send(&self, packet: Directive) -> Result<()> {
-        let packet = Ns(self.ns.clone(), packet);
-        Ok(self.manager_tx.send(packet).await?)
+    async fn send(&self, directive: Directive) -> Result<()> {
+        Ok(self.manager_tx.send(self.ns.clone(), directive).await?)
     }
 
     /// Emits an event; returns `()` or an [`AckHandle`](crate::ack::AckHandle) depending on the ack policy.

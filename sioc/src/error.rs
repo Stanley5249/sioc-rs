@@ -1,7 +1,3 @@
-// thiserror/miette proc-macros read these fields via generated impls, but
-// rustc's unused_assignments lint doesn't see those reads.
-#![allow(unused_assignments)]
-
 //! Error types for the `sioc` public API.
 //!
 //! [`enum@Error`] is the top-level enum returned by all fallible operations in this

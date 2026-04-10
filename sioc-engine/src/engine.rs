@@ -22,38 +22,32 @@ pub enum EngineAction {
     Transit(Transit),
 }
 
-/// Restricted sender: can only deliver [`Frame`]s to the engine (used by transport tasks).
-#[derive(Clone, Debug)]
-pub struct FrameSender(mpsc::Sender<EngineAction>);
-
-impl FrameSender {
-    pub fn new(sender: mpsc::Sender<EngineAction>) -> Self {
-        Self(sender)
-    }
-
-    pub async fn send(&self, frame: Frame) -> Result<()> {
-        Ok(self.0.send(EngineAction::Frame(frame)).await?)
+impl From<Frame> for EngineAction {
+    fn from(frame: Frame) -> Self {
+        Self::Frame(frame)
     }
 }
 
-/// Sends outbound [`Message`]s to the engine (used by the socket router).
-#[derive(Clone, Debug)]
-pub struct TransitSender(mpsc::Sender<EngineAction>);
-
-impl TransitSender {
-    pub fn new(sender: mpsc::Sender<EngineAction>) -> Self {
-        Self(sender)
+impl From<Transit> for EngineAction {
+    fn from(transit: Transit) -> Self {
+        Self::Transit(transit)
     }
+}
 
-    pub async fn send(&self, message: Transit) -> Result<()> {
-        Ok(self.0.send(EngineAction::Transit(message)).await?)
+/// Sends [`EngineAction`]s to the engine task.
+#[derive(Clone, Debug)]
+pub struct EngineSender(pub mpsc::Sender<EngineAction>);
+
+impl EngineSender {
+    pub async fn send(&self, action: impl Into<EngineAction>) -> Result<()> {
+        Ok(self.0.send(action.into()).await?)
     }
 }
 
 /// Channel-based handles to the Engine.IO protocol and transport tasks.
 pub struct Engine {
     /// Sender for delivering outbound messages from the Socket.IO layer to the engine.
-    pub tx: TransitSender,
+    pub tx: EngineSender,
     /// Handle for the engine protocol task.
     pub engine_handle: JoinHandle<Result<()>>,
     /// Handle for the transport coordination task.
@@ -63,7 +57,7 @@ pub struct Engine {
 impl Engine {
     /// Spawns the engine and transport tasks and returns handles to both.
     ///
-    /// `sink` receives decoded inbound [`Message`]s from the transport.
+    /// `sink` receives decoded inbound [`Transit`]s from the transport.
     pub fn connect<C, S>(
         url: Url,
         http_client: reqwest::Client,
@@ -79,6 +73,8 @@ impl Engine {
         let (transport_tx, transport_rx) = mpsc::channel(32);
         let (handshake_tx, handshake_rx) = oneshot::channel();
 
+        let engine_tx = EngineSender(engine_tx);
+
         let token = CancellationToken::new();
 
         let transport_handle = strategy.connect(
@@ -86,7 +82,7 @@ impl Engine {
             http_client,
             websocket_connector,
             handshake_tx,
-            FrameSender::new(engine_tx.clone()),
+            engine_tx.clone(),
             transport_rx,
             token.clone(),
         );
@@ -100,7 +96,7 @@ impl Engine {
         ));
 
         Self {
-            tx: TransitSender::new(engine_tx),
+            tx: engine_tx,
             engine_handle,
             transport_handle,
         }

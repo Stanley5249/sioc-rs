@@ -4,16 +4,16 @@ use crate::error::{Error, ParseError, PayloadError, Result};
 use crate::packet::{Connect, ConnectError, Directive, DynAck, DynEvent, Ns, Packet, Signal};
 use bytes::Bytes;
 use futures_util::{Sink, SinkExt, future};
-use sioc_engine::engine::Engine;
+use sioc_engine::engine::{Engine, EngineSender};
 use sioc_engine::error::BoxedError;
-use sioc_engine::prelude::{Transit, TransitSender};
+use sioc_engine::prelude::Transit;
 use std::collections::BTreeMap;
 use std::collections::hash_map::{Entry, HashMap};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::PollSender;
 
 /// Creates a [`Sink<Transit>`] that maps each [`Transit`] to a [`ManagerAction`] and sends it.
-pub fn transit_sender(tx: mpsc::Sender<ManagerAction>) -> impl Sink<Transit, Error = BoxedError> {
+pub fn manager_sink(tx: mpsc::Sender<ManagerAction>) -> impl Sink<Transit, Error = BoxedError> {
     PollSender::new(tx).with(|transit: Transit| future::ok(transit.into()))
 }
 
@@ -39,15 +39,11 @@ impl From<Transit> for ManagerAction {
 
 /// Sends outbound [`Directive`]s to the socket router.
 #[derive(Clone, Debug)]
-pub struct DirectiveSender(mpsc::Sender<ManagerAction>);
+pub struct ManagerSender(pub mpsc::Sender<ManagerAction>);
 
-impl DirectiveSender {
-    pub fn new(tx: mpsc::Sender<ManagerAction>) -> Self {
-        Self(tx)
-    }
-
-    pub async fn send(&self, directive: Ns<Directive>) -> Result<()> {
-        Ok(self.0.send(directive.into()).await?)
+impl ManagerSender {
+    pub async fn send(&self, ns: String, directive: Directive) -> Result<()> {
+        Ok(self.0.send(Ns(ns, directive).into()).await?)
     }
 }
 
@@ -304,7 +300,7 @@ impl Manager {
     /// Encodes and sends (or buffers) one outbound directive.
     async fn dispatch_directive(
         &mut self,
-        engine_tx: &TransitSender,
+        engine_tx: &EngineSender,
         ns: String,
         directive: Directive,
     ) -> Result<()> {
@@ -387,7 +383,7 @@ impl Manager {
         Ok(())
     }
 
-    async fn route_message(&mut self, engine_tx: &TransitSender, message: Transit) -> Result<()> {
+    async fn route_message(&mut self, engine_tx: &EngineSender, message: Transit) -> Result<()> {
         match message {
             Transit::Text(bytes) => {
                 self.route_text_message(bytes, engine_tx).await?;
@@ -406,7 +402,7 @@ impl Manager {
         Ok(())
     }
 
-    async fn route_text_message(&mut self, bytes: Bytes, engine_tx: &TransitSender) -> Result<()> {
+    async fn route_text_message(&mut self, bytes: Bytes, engine_tx: &EngineSender) -> Result<()> {
         if self.reconstructor.is_pending() {
             return Err(Error::UnexpectedText(bytes));
         }
@@ -506,7 +502,7 @@ mod tests {
 
     fn mock_engine(tx: mpsc::Sender<EngineAction>) -> Engine {
         Engine {
-            tx: TransitSender::new(tx),
+            tx: EngineSender(tx),
             engine_handle: tokio::spawn(async { Ok(()) }),
             transport_handle: tokio::spawn(async { Ok(()) }),
         }
