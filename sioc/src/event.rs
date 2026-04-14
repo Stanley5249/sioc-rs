@@ -22,11 +22,14 @@
 //! or expects an acknowledgement — no runtime checks needed.
 
 use crate::ack::{AckHandle, AckType};
-use crate::binary::AttachmentBuilder;
+use crate::binary::AttachmentsBuilder;
 use crate::client::Emit;
-use crate::error::Result;
+use crate::error::{EventError, PayloadError};
 use crate::marker::{AckMarker, BinaryMarker, HasAck, HasBinary, NoAck, NoBinary};
-use crate::payload::{DeserializePayload, SerializePayload, deserialize_event, serialize_event};
+use crate::payload::{
+    DeserializePayload, EventPayload, SerializePayload, deserialize_event, serialize,
+    serialize_event,
+};
 use bytes::Bytes;
 use sioc_socket::packet::{Directive, DynEvent};
 use tokio::sync::oneshot;
@@ -69,9 +72,9 @@ impl<E> TryFrom<DynEvent> for Event<E>
 where
     E: EventType + DeserializePayload,
 {
-    type Error = crate::error::Error;
+    type Error = EventError;
 
-    fn try_from(value: DynEvent) -> Result<Self> {
+    fn try_from(value: DynEvent) -> Result<Self, EventError> {
         let payload = deserialize_event(&value.data)?;
         let id = E::Ack::parse(value.id)?;
         let attachments = E::Binary::parse(value.attachments)?;
@@ -90,7 +93,7 @@ pub trait EventHandler: Sized {
         payload: Self::Payload,
         id: Option<u64>,
         attachments: Option<Vec<Bytes>>,
-    ) -> Result<Self>;
+    ) -> Result<Self, EventError>;
 }
 
 impl<E> EventHandler for Event<E>
@@ -103,7 +106,7 @@ where
         payload: Self::Payload,
         id: Option<u64>,
         attachments: Option<Vec<Bytes>>,
-    ) -> Result<Self> {
+    ) -> Result<Self, EventError> {
         let id = E::Ack::parse(id)?;
         let attachments = E::Binary::parse(attachments)?;
         Ok(Self {
@@ -120,11 +123,11 @@ where
 {
     type Output = ();
 
-    fn prepare(self) -> Result<(Directive, ())> {
-        let data = serialize_event(&self)?.into();
+    fn prepare(self) -> Result<(Directive, ()), PayloadError> {
+        let data = serialize(&EventPayload(&self))?;
         Ok((
             Directive::Event {
-                data,
+                data: data.into(),
                 tx: None,
                 attachments: None,
             },
@@ -140,7 +143,7 @@ where
 {
     type Output = AckHandle<A>;
 
-    fn prepare(self) -> Result<(Directive, AckHandle<A>)> {
+    fn prepare(self) -> Result<(Directive, AckHandle<A>), PayloadError> {
         let (tx, rx) = oneshot::channel();
         let data = serialize_event(&self)?.into();
         Ok((
@@ -156,13 +159,13 @@ where
 
 impl<F, E> Emit<NoAck, HasBinary> for F
 where
-    F: FnOnce(&mut AttachmentBuilder) -> E,
+    F: FnOnce(&mut AttachmentsBuilder) -> E,
     E: EventType<Ack = NoAck, Binary = HasBinary> + SerializePayload,
 {
     type Output = ();
 
-    fn prepare(self) -> Result<(Directive, ())> {
-        let mut builder = AttachmentBuilder::new();
+    fn prepare(self) -> Result<(Directive, ()), PayloadError> {
+        let mut builder = AttachmentsBuilder::new();
         let data = serialize_event(&self(&mut builder))?.into();
         Ok((
             Directive::Event {
@@ -177,15 +180,15 @@ where
 
 impl<F, E, A> Emit<HasAck<A>, HasBinary> for F
 where
-    F: FnOnce(&mut AttachmentBuilder) -> E,
+    F: FnOnce(&mut AttachmentsBuilder) -> E,
     E: EventType<Ack = HasAck<A>, Binary = HasBinary> + SerializePayload,
     A: AckType,
 {
     type Output = AckHandle<A>;
 
-    fn prepare(self) -> Result<(Directive, AckHandle<A>)> {
+    fn prepare(self) -> Result<(Directive, AckHandle<A>), PayloadError> {
         let (tx, rx) = oneshot::channel();
-        let mut builder = AttachmentBuilder::new();
+        let mut builder = AttachmentsBuilder::new();
         let data = serialize_event(&self(&mut builder))?.into();
         Ok((
             Directive::Event {

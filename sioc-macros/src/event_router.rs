@@ -106,12 +106,10 @@ pub fn expand(input: syn::DeriveInput) -> darling::Result<TokenStream> {
         }
 
         impl ::std::convert::TryFrom<::sioc::prelude::DynEvent> for #enum_ident {
-            type Error = ::sioc::error::Error;
+            type Error = ::sioc::error::EventError;
 
-            fn try_from(event: ::sioc::prelude::DynEvent) -> ::sioc::error::Result<Self> {
-                let helper: #helper_ident = ::serde_json::from_slice(&event.data)
-                    .map_err(|e| ::sioc::error::PayloadError::new::<#enum_ident>(e)
-                    .with_slice(&event.data))?;
+            fn try_from(event: ::sioc::prelude::DynEvent) -> ::std::result::Result<Self, Self::Error> {
+                let helper = ::sioc::payload::deserialize(&event.data)?;
 
                 Ok(match helper {
                     #(#from_event_arms)*

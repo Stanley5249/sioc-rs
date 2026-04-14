@@ -1,8 +1,9 @@
 use crate::ack::AckType;
-use crate::error::{PayloadError, Result};
+use crate::error::PayloadError;
 use crate::event::EventType;
 use serde::ser::SerializeSeq;
-use serde_json;
+use serde::{Deserialize, Serialize};
+use serde_json::{self, Deserializer};
 use std::marker::PhantomData;
 
 /// Serializes a struct's fields as sequential elements of a JSON array.
@@ -68,25 +69,20 @@ where
 }
 
 /// Serializes an [`EventType`] + [`SerializePayload`] value into its wire-format byte representation.
-pub fn serialize_event<E>(payload: &E) -> Result<Vec<u8>>
+pub fn serialize_event<E>(payload: &E) -> Result<Vec<u8>, PayloadError>
 where
     E: EventType + SerializePayload,
 {
-    match serde_json::to_vec(&EventPayload(payload)) {
-        Ok(bytes) => Ok(bytes),
-        Err(e) => Err(PayloadError::new::<E>(e).into()),
-    }
+    serialize(&EventPayload(payload))
 }
 
 /// Deserializes a wire-format byte slice into a typed [`EventType`] + [`DeserializePayload`] value.
-pub fn deserialize_event<E>(data: &[u8]) -> Result<E>
+pub fn deserialize_event<E>(data: &[u8]) -> Result<E, PayloadError>
 where
     E: EventType + DeserializePayload,
 {
-    match serde_json::from_slice(data) {
-        Ok(EventPayload(event)) => Ok(event),
-        Err(e) => Err(PayloadError::new::<E>(e).with_slice(data).into()),
-    }
+    let EventPayload(event) = deserialize(data)?;
+    Ok(event)
 }
 
 struct EventVisitor<E>(PhantomData<E>);
@@ -169,17 +165,43 @@ where
 }
 
 /// Serializes an [`AckType`] + [`SerializePayload`] value into its wire-format byte representation.
-pub fn serialize_ack<T: AckType + SerializePayload>(payload: &T) -> Result<Vec<u8>> {
-    match serde_json::to_vec(&AckPayload(payload)) {
-        Ok(bytes) => Ok(bytes),
-        Err(e) => Err(PayloadError::new::<T>(e).into()),
-    }
+pub fn serialize_ack<A>(payload: &A) -> Result<Vec<u8>, PayloadError>
+where
+    A: AckType + SerializePayload,
+{
+    serialize(&AckPayload(payload))
 }
 
 /// Deserializes a wire-format byte slice into a typed [`AckType`] + [`DeserializePayload`] value.
-pub fn deserialize_ack<T: AckType + DeserializePayload>(data: &[u8]) -> Result<T> {
-    match serde_json::from_slice(data) {
-        Ok(AckPayload(ack)) => Ok(ack),
-        Err(e) => Err(PayloadError::new::<T>(e).with_slice(data).into()),
+pub fn deserialize_ack<A>(data: &[u8]) -> Result<A, PayloadError>
+where
+    A: AckType + DeserializePayload,
+{
+    let AckPayload(ack) = deserialize(data)?;
+    Ok(ack)
+}
+
+pub fn serialize<T>(payload: &T) -> Result<Vec<u8>, PayloadError>
+where
+    T: Serialize,
+{
+    let mut bytes = Vec::new();
+    let mut ser = serde_json::Serializer::new(&mut bytes);
+
+    match serde_path_to_error::serialize(payload, &mut ser) {
+        Ok(()) => Ok(bytes),
+        Err(e) => Err(PayloadError::new::<T>(e)),
+    }
+}
+
+pub fn deserialize<'de, T>(data: &'de [u8]) -> Result<T, PayloadError>
+where
+    T: Deserialize<'de>,
+{
+    let mut de = Deserializer::from_slice(data);
+
+    match serde_path_to_error::deserialize(&mut de) {
+        Ok(payload) => Ok(payload),
+        Err(e) => Err(PayloadError::new::<T>(e)),
     }
 }

@@ -101,7 +101,7 @@ pub mod payload;
 
 pub mod prelude {
     pub use crate::ack::{Ack, AckHandle, AckType};
-    pub use crate::binary::{AttachmentBuilder, Placeholder};
+    pub use crate::binary::{AttachmentsBuilder, Placeholder};
     pub use crate::client::{
         Acknowledge, Client, ClientBuilder, Emit, SocketReceiver, SocketSender,
     };

@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use serde::Deserialize;
+use sioc::error::EventError;
 use sioc::prelude::*;
 
 // Event types for demonstration
@@ -17,13 +18,13 @@ enum MyEvent {
 }
 
 // Helper enum for deserialization
-enum MyEventHelper {
+enum MyEventPayload {
     A(<Event<A> as EventHandler>::Payload),
     B(<Event<B> as EventHandler>::Payload),
 }
 
 // Custom deserialization for MyEventHelper
-impl<'de> Deserialize<'de> for MyEventHelper {
+impl<'de> Deserialize<'de> for MyEventPayload {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -36,7 +37,7 @@ impl<'de> Deserialize<'de> for MyEventHelper {
 struct MyEventVisitor;
 
 impl<'de> serde::de::Visitor<'de> for MyEventVisitor {
-    type Value = MyEventHelper;
+    type Value = MyEventPayload;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
         formatter.write_str("a Socket.IO event payload")
@@ -53,11 +54,11 @@ impl<'de> serde::de::Visitor<'de> for MyEventVisitor {
         match name {
             <Event<A> as EventHandler>::Payload::NAME => {
                 let payload = <Event<A> as EventHandler>::Payload::deserialize_payload(&mut seq)?;
-                Ok(MyEventHelper::A(payload))
+                Ok(MyEventPayload::A(payload))
             }
             <Event<B> as EventHandler>::Payload::NAME => {
                 let payload = <Event<B> as EventHandler>::Payload::deserialize_payload(&mut seq)?;
-                Ok(MyEventHelper::B(payload))
+                Ok(MyEventPayload::B(payload))
             }
             _ => Err(serde::de::Error::unknown_variant(
                 name,
@@ -72,19 +73,18 @@ impl<'de> serde::de::Visitor<'de> for MyEventVisitor {
 
 // Conversion from DynEvent to MyEvent
 impl TryFrom<DynEvent> for MyEvent {
-    type Error = sioc::error::Error;
+    type Error = EventError;
 
-    fn try_from(event: DynEvent) -> sioc::error::Result<Self> {
-        let helper: MyEventHelper = serde_json::from_slice(&event.data)
-            .map_err(|e| sioc::error::PayloadError::new::<MyEvent>(e).with_slice(&event.data))?;
+    fn try_from(event: DynEvent) -> Result<Self, EventError> {
+        let payload = sioc::payload::deserialize(&event.data)?;
 
-        match helper {
-            MyEventHelper::A(args) => {
+        match payload {
+            MyEventPayload::A(args) => {
                 let event_a =
                     <Event<A> as EventHandler>::handle(args, event.id, event.attachments)?;
                 Ok(MyEvent::A(event_a))
             }
-            MyEventHelper::B(args) => {
+            MyEventPayload::B(args) => {
                 let event_b =
                     <Event<B> as EventHandler>::handle(args, event.id, event.attachments)?;
                 Ok(MyEvent::B(event_b))
@@ -93,7 +93,7 @@ impl TryFrom<DynEvent> for MyEvent {
     }
 }
 
-fn main() -> sioc::error::Result<()> {
+fn main() -> Result<(), EventError> {
     // Example DynEvent for event "a"
     let event = DynEvent {
         data: Bytes::from_static(b"[\"a\"]"),

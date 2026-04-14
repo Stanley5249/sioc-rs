@@ -1,78 +1,165 @@
 //! Error types for the `sioc` public API.
 //!
-//! [`enum@Error`] is the top-level enum returned by all fallible operations in this
-//! crate.  It wraps protocol errors from `sioc-socket`, JSON serialization
-//! failures, and application-level validation errors from the marker-policy
-//! system.
+//! Each fallible operation returns a specific error type.  [`enum@Error`] is a
+//! top-level convenience wrapper that aggregates all of them via [`From`] impls,
+//! intended for application-level code that wants a single error type.
 
 use miette::Diagnostic;
-pub use sioc_socket::error::PayloadError;
+use sioc_socket::packet::{Directive, Ns};
 use thiserror::Error;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinError;
 
-/// A marker-policy validation failed.
+pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+// Provided for application-level error handling
 #[derive(Debug, Error, Diagnostic)]
-pub enum MarkerError {
-    /// An ack ID was present but the event type uses [`NoAck`](crate::marker::NoAck).
-    #[error("unexpected ack ID was provided")]
-    #[diagnostic(code(sioc::marker::unexpected_ack_id))]
-    UnexpectedAckId,
-
-    /// No ack ID was present but the event type uses [`HasAck`](crate::marker::HasAck).
-    #[error("expected ack ID was not provided")]
-    #[diagnostic(code(sioc::marker::missing_ack_id))]
-    MissingAckId,
-
-    /// Binary attachments were present but the type uses [`NoBinary`](crate::marker::NoBinary).
-    #[error("unexpected binary attachments were provided")]
-    #[diagnostic(code(sioc::marker::unexpected_binary))]
-    UnexpectedBinary,
-
-    /// No binary attachments were present but the type uses [`HasBinary`](crate::marker::HasBinary).
-    #[error("expected binary attachments were not provided")]
-    #[diagnostic(code(sioc::marker::missing_binary))]
-    MissingBinary,
+#[error(transparent)]
+#[diagnostic(transparent)]
+pub enum Error {
+    Builder(#[from] ClientBuilderError),
+    Client(#[from] ClientError),
+    Socket(#[from] SocketError),
+    Event(#[from] EventError),
+    Ack(#[from] AckError),
 }
 
-/// Top-level error returned by all `sioc` public APIs.
-#[derive(Debug, Error, Diagnostic)]
-pub enum Error {
-    /// JSON serialization failed.
-    #[error(transparent)]
-    #[diagnostic(code(sioc::ser), help("ensure all values are JSON-compatible"))]
-    Payload(#[from] PayloadError),
+/// Serialization or deserialization failure for a typed payload.
+#[derive(Debug, Error)]
+#[error("failed to convert payload of `{type_name}`")]
+pub struct PayloadError {
+    pub type_name: &'static str,
+    #[source]
+    pub source: serde_path_to_error::Error<serde_json::Error>,
+}
 
+impl PayloadError {
+    pub fn new<T>(source: serde_path_to_error::Error<serde_json::Error>) -> Self {
+        Self {
+            type_name: std::any::type_name::<T>(),
+            source,
+        }
+    }
+}
+
+/// Error returned by [`ClientBuilder::open`](crate::client::ClientBuilder::open).
+#[derive(Debug, Error, Diagnostic)]
+pub enum ClientBuilderError {
     /// URL construction failed.
     #[error("invalid URL")]
-    #[diagnostic(code(sioc::invalid_url))]
+    #[diagnostic(code(sioc::builder::url))]
     Url(#[from] url::ParseError),
-
-    /// A marker-policy validation failed.
-    #[error(transparent)]
-    #[diagnostic(transparent)]
-    Marker(#[from] MarkerError),
-
-    /// The ack oneshot channel was closed before a response arrived.
-    #[error("ack channel closed")]
-    #[diagnostic(code(sioc::ack_channel_closed))]
-    ReceiveAck(#[from] oneshot::error::RecvError),
-
-    /// The socket router task panicked or was cancelled.
-    #[error("socket router task failed")]
-    #[diagnostic(code(sioc::task))]
-    Task(#[from] JoinError),
-
-    /// A protocol or transport error propagated from the core layer.
-    #[error(transparent)]
-    #[diagnostic(transparent)]
-    Core(#[from] sioc_socket::error::Error),
-
-    /// A transport or Engine.IO error.
-    #[error(transparent)]
-    #[diagnostic(transparent)]
-    Engine(#[from] sioc_engine::error::Error),
 }
 
-/// Convenience alias used throughout `sioc`.
-pub type Result<T, E = Error> = std::result::Result<T, E>;
+/// Error returned by [`Client::join`](crate::client::Client::join).
+#[derive(Debug, Error, Diagnostic)]
+pub enum ClientError {
+    /// Background manager task panicked or was cancelled.
+    #[error("failed to join socket manager task")]
+    #[diagnostic(code(sioc::client::join))]
+    Join(#[from] JoinError),
+
+    /// Error propagated from the socket manager.
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Manager(#[from] sioc_socket::error::Error),
+}
+
+/// Error returned by [`SocketSender`](crate::client::SocketSender) operations.
+#[derive(Debug, Error, Diagnostic)]
+pub enum SocketError {
+    /// Event payload serialization failed.
+    #[error("failed to serialize payload")]
+    #[diagnostic(code(sioc::socket::payload))]
+    Payload(#[from] PayloadError),
+
+    /// Directive channel to the socket manager is closed.
+    #[error("failed to send directive to socket manager")]
+    #[diagnostic(code(sioc::socket::send))]
+    Send(#[from] mpsc::error::SendError<Ns<Directive>>),
+}
+
+/// Error converting a [`DynEvent`](sioc_socket::packet::DynEvent) into a typed [`Event`](crate::event::Event).
+#[derive(Debug, Error, Diagnostic)]
+pub enum EventError {
+    /// Event payload deserialization failed.
+    #[error("failed to deserialize event payload")]
+    #[diagnostic(code(sioc::event::payload))]
+    Payload(#[from] PayloadError),
+
+    /// Ack ID presence did not match the event type's policy.
+    #[error("invalid ack ID for the event type")]
+    #[diagnostic(code(sioc::event::ack_id))]
+    AckId(#[from] AckIdError),
+
+    /// Attachment presence did not match the event type's policy.
+    #[error("invalid attachments for the event type")]
+    #[diagnostic(code(sioc::event::attachments))]
+    Attachments(#[from] AttachmentsError),
+}
+
+/// Error returned when receiving or parsing a typed acknowledgement.
+#[derive(Debug, Error, Diagnostic)]
+pub enum AckError {
+    /// Ack payload deserialization failed.
+    #[error("failed to parse ack payload")]
+    #[diagnostic(code(sioc::ack::payload))]
+    Payload(#[from] PayloadError),
+
+    /// Attachment presence did not match the ack type's policy.
+    #[error("invalid attachments for the ack type")]
+    #[diagnostic(code(sioc::ack::attachments))]
+    Attachments(#[from] AttachmentsError),
+
+    /// Server dropped the ack channel before responding.
+    #[error("failed to receive ack")]
+    #[diagnostic(
+        code(sioc::ack::recv),
+        help("the ack sender was dropped before responding; the connection may have been lost")
+    )]
+    Recv(#[from] oneshot::error::RecvError),
+}
+
+/// Ack ID presence mismatch between the inbound packet and the event type's policy.
+#[derive(Debug, Error, Diagnostic)]
+pub enum AckIdError {
+    #[error("ack ID was missing")]
+    #[diagnostic(
+        code(sioc::ack_id::missing),
+        help(
+            "event type declares `HasAck` but the server sent no ack ID; verify the server's protocol"
+        )
+    )]
+    Missing,
+
+    #[error("ack ID was unexpected")]
+    #[diagnostic(
+        code(sioc::ack_id::unexpected),
+        help(
+            "event type declares `NoAck` but the server sent an ack ID; consider using `HasAck<A>`"
+        )
+    )]
+    Unexpected,
+}
+
+/// Attachment presence mismatch between the inbound packet and the type's binary policy.
+#[derive(Debug, Error, Diagnostic)]
+pub enum AttachmentsError {
+    #[error("attachments were missing")]
+    #[diagnostic(
+        code(sioc::attachments::missing),
+        help(
+            "type declares `HasBinary` but no attachments were in the packet; verify the server's protocol"
+        )
+    )]
+    Missing,
+
+    #[error("attachments were unexpected")]
+    #[diagnostic(
+        code(sioc::attachments::unexpected),
+        help(
+            "type declares `NoBinary` but the packet contained attachments; consider using `HasBinary`"
+        )
+    )]
+    Unexpected,
+}

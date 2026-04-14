@@ -1,7 +1,7 @@
 //! Socket.IO client and namespace handles.
 
 use crate::ack::AckType;
-use crate::error::Result;
+use crate::error::{ClientBuilderError, ClientError, PayloadError, SocketError};
 use crate::marker::{AckId, AckMarker, BinaryMarker};
 use bytes::Bytes;
 
@@ -28,7 +28,7 @@ where
     type Output;
 
     /// Serializes into a [`Directive`] and the output handle.
-    fn prepare(self) -> Result<(Directive, Self::Output)>;
+    fn prepare(self) -> Result<(Directive, Self::Output), PayloadError>;
 }
 
 /// Converts a typed acknowledgement into an ack [`Directive`].
@@ -38,7 +38,7 @@ where
     B: BinaryMarker,
 {
     /// Serializes into an ack [`Directive`].
-    fn into_directive(self, id: u64) -> Result<Directive>;
+    fn into_directive(self, id: u64) -> Result<Directive, PayloadError>;
 }
 
 /// Builder for a [`Client`] connection.
@@ -135,7 +135,7 @@ where
     ///
     /// Spawns the engine and transport tasks in the background.
     #[must_use = "dropping the Client stops the background tasks"]
-    pub fn open(self) -> Result<Client> {
+    pub fn open(self) -> Result<Client, ClientBuilderError> {
         let http_client = self.http_client.unwrap_or_default();
         let websocket_connector = self.websocket_connector;
         let url = self.url.join(&self.path)?;
@@ -177,7 +177,10 @@ impl Client {
     /// Opens a namespace and returns a sender/receiver pair.
     ///
     /// The namespace is not confirmed until a [`Packet::Connect`] arrives on the [`SocketReceiver`].
-    pub async fn connect(&self, ns: impl Into<String>) -> Result<(SocketSender, SocketReceiver)> {
+    pub async fn connect(
+        &self,
+        ns: impl Into<String>,
+    ) -> Result<(SocketSender, SocketReceiver), SocketError> {
         self.connect_with(ns, Bytes::from_static(b"")).await
     }
 
@@ -186,7 +189,7 @@ impl Client {
         &self,
         ns: impl Into<String>,
         data: impl Into<Bytes>,
-    ) -> Result<(SocketSender, SocketReceiver)> {
+    ) -> Result<(SocketSender, SocketReceiver), SocketError> {
         let (tx, rx) = mpsc::channel(32);
 
         let socket_tx = SocketSender {
@@ -208,7 +211,7 @@ impl Client {
     ///
     /// All [`SocketSender`] clones must be dropped (via [`SocketSender::disconnect`])
     /// before calling this. The manager exits only when the last sender is dropped.
-    pub async fn join(self) -> Result<()> {
+    pub async fn join(self) -> Result<(), ClientError> {
         drop(self.manager_tx);
         self.manager_handle.await??;
         Ok(())
@@ -223,12 +226,12 @@ pub struct SocketSender {
 }
 
 impl SocketSender {
-    async fn send(&self, directive: Directive) -> Result<()> {
+    async fn send(&self, directive: Directive) -> Result<(), SocketError> {
         Ok(self.manager_tx.send(self.ns.clone(), directive).await?)
     }
 
     /// Emits an event; returns `()` or an [`AckHandle`](crate::ack::AckHandle) depending on the ack policy.
-    pub async fn emit<E, A, B>(&self, event: E) -> Result<E::Output>
+    pub async fn emit<E, A, B>(&self, event: E) -> Result<E::Output, SocketError>
     where
         E: Emit<A, B>,
         A: AckMarker,
@@ -239,19 +242,20 @@ impl SocketSender {
         Ok(output)
     }
 
-    /// Sends an acknowledgement for a received event.
-    pub async fn ack<T, A, B>(&self, id: AckId<A>, data: T) -> Result<()>
+    /// Acknowledges a received event.
+    pub async fn acknowledge<T, A, B>(&self, id: AckId<A>, data: T) -> Result<(), SocketError>
     where
         T: Acknowledge<A, B>,
         A: AckType,
         B: BinaryMarker,
     {
-        self.send(data.into_directive(id.get())?).await
+        let directive = data.into_directive(id.get())?;
+        Ok(self.send(directive).await?)
     }
 
     /// Sends a disconnect packet, closing this namespace on the server.
-    pub async fn disconnect(&self) -> Result<()> {
-        self.send(Directive::Disconnect).await
+    pub async fn disconnect(&self) -> Result<(), SocketError> {
+        Ok(self.send(Directive::Disconnect).await?)
     }
 }
 

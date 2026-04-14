@@ -13,9 +13,9 @@
 //! [`SocketSender::ack`](crate::client::SocketSender::ack) — blanket [`Acknowledge`] impls
 //! handle serialization automatically for both plain acks and binary closures.
 
-use crate::binary::AttachmentBuilder;
+use crate::binary::AttachmentsBuilder;
 use crate::client::Acknowledge;
-use crate::error::{Error, Result};
+use crate::error::{AckError, PayloadError};
 use crate::marker::{BinaryMarker, HasBinary, NoBinary};
 use crate::payload::{DeserializePayload, SerializePayload, deserialize_ack, serialize_ack};
 use pin_project::pin_project;
@@ -77,9 +77,9 @@ impl<A> TryFrom<DynAck> for Ack<A>
 where
     A: AckType + DeserializePayload,
 {
-    type Error = Error;
+    type Error = AckError;
 
-    fn try_from(value: DynAck) -> Result<Self> {
+    fn try_from(value: DynAck) -> Result<Self, AckError> {
         let payload = deserialize_ack(&value.data)?;
         let attachments = A::Binary::parse(value.attachments)?;
         Ok(Self {
@@ -93,7 +93,7 @@ impl<A> Acknowledge<A, NoBinary> for A
 where
     A: AckType<Binary = NoBinary> + SerializePayload,
 {
-    fn into_directive(self, id: u64) -> Result<Directive> {
+    fn into_directive(self, id: u64) -> Result<Directive, PayloadError> {
         let data = serialize_ack(&self)?.into();
         Ok(Directive::Ack {
             data,
@@ -105,11 +105,11 @@ where
 
 impl<F, A> Acknowledge<A, HasBinary> for F
 where
-    F: FnOnce(&mut AttachmentBuilder) -> A,
+    F: FnOnce(&mut AttachmentsBuilder) -> A,
     A: AckType<Binary = HasBinary> + SerializePayload,
 {
-    fn into_directive(self, id: u64) -> Result<Directive> {
-        let mut builder = AttachmentBuilder::new();
+    fn into_directive(self, id: u64) -> Result<Directive, PayloadError> {
+        let mut builder = AttachmentsBuilder::new();
         let data = serialize_ack(&self(&mut builder))?.into();
         Ok(Directive::Ack {
             data,
@@ -126,7 +126,7 @@ where
 #[must_use = "AckHandle must be awaited to receive the ack"]
 #[pin_project]
 #[derive(Debug)]
-pub struct AckHandle<A: AckType> {
+pub struct AckHandle<A> {
     #[pin]
     rx: oneshot::Receiver<DynAck>,
     marker: PhantomData<A>,
@@ -141,12 +141,11 @@ impl<A: AckType> AckHandle<A> {
         }
     }
 }
-
 impl<A> Future for AckHandle<A>
 where
     A: AckType + DeserializePayload,
 {
-    type Output = Result<Ack<A>>;
+    type Output = Result<Ack<A>, AckError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.project().rx.poll(cx)?.map(Ack::try_from)
@@ -242,7 +241,7 @@ mod tests {
             data: Bytes::from_static(b"[]"),
             attachments: None,
         };
-        let result: Result<Ack<BinaryUnitAck>> = ack.try_into();
+        let result: Result<Ack<BinaryUnitAck>, _> = ack.try_into();
         assert!(result.is_err());
     }
 
@@ -252,14 +251,14 @@ mod tests {
             data: Bytes::from_static(b"[]"),
             attachments: Some(vec![Bytes::from_static(b"x")]),
         };
-        let result: Result<Ack<()>> = ack.try_into();
+        let result: Result<Ack<()>, _> = ack.try_into();
         assert!(result.is_err());
     }
     #[test]
     fn send_ack_into_directive_binary() {
         let id = <HasAck<BinaryBoolAck>>::parse(Some(3)).unwrap();
         let directive = Acknowledge::<BinaryBoolAck, HasBinary>::into_directive(
-            |builder: &mut AttachmentBuilder| {
+            |builder: &mut AttachmentsBuilder| {
                 let _p = builder.attach(Bytes::from_static(b"\xCA\xFE"));
                 BinaryBoolAck(true)
             },
@@ -288,7 +287,7 @@ mod tests {
         let handle = AckHandle::<()>::new(rx);
         drop(tx);
 
-        let result: Result<Ack<()>> = handle.await;
+        let result: Result<Ack<()>, _> = handle.await;
         assert!(result.is_err());
     }
 }

@@ -20,20 +20,29 @@ pub fn manager_sink(tx: mpsc::Sender<ManagerAction>) -> impl Sink<Transit, Error
 #[derive(Debug)]
 pub enum ManagerAction {
     /// Outbound directive from the client.
-    Directive(Ns<Directive>),
+    Socket(Ns<Directive>),
     /// Inbound message from the engine.
-    Transit(Transit),
+    Engine(Transit),
+}
+
+impl ManagerAction {
+    fn into_directive(self) -> Option<Ns<Directive>> {
+        match self {
+            ManagerAction::Socket(directive) => Some(directive),
+            ManagerAction::Engine(_) => None,
+        }
+    }
 }
 
 impl From<Ns<Directive>> for ManagerAction {
     fn from(directive: Ns<Directive>) -> Self {
-        ManagerAction::Directive(directive)
+        ManagerAction::Socket(directive)
     }
 }
 
 impl From<Transit> for ManagerAction {
     fn from(message: Transit) -> Self {
-        ManagerAction::Transit(message)
+        ManagerAction::Engine(message)
     }
 }
 
@@ -42,8 +51,17 @@ impl From<Transit> for ManagerAction {
 pub struct ManagerSender(pub mpsc::Sender<ManagerAction>);
 
 impl ManagerSender {
-    pub async fn send(&self, ns: String, directive: Directive) -> Result<()> {
-        Ok(self.0.send(Ns(ns, directive).into()).await?)
+    pub async fn send(
+        &self,
+        ns: String,
+        directive: Directive,
+    ) -> Result<(), mpsc::error::SendError<Ns<Directive>>> {
+        self.0.send(Ns(ns, directive).into()).await.map_err(|e| {
+            // SAFETY: the value sent is always `ManagerAction::Socket(...)`,
+            // so `into_directive()` always returns `Some`.
+            let data = unsafe { e.0.into_directive().unwrap_unchecked() };
+            mpsc::error::SendError(data)
+        })
     }
 }
 
@@ -279,10 +297,10 @@ impl Manager {
     pub async fn run(mut self, engine: Engine) -> Result<()> {
         while let Some(directive) = self.rx.recv().await {
             match directive {
-                ManagerAction::Directive(Ns(ns, packet)) => {
+                ManagerAction::Socket(Ns(ns, packet)) => {
                     self.dispatch_directive(&engine.tx, ns, packet).await?;
                 }
-                ManagerAction::Transit(message) => {
+                ManagerAction::Engine(message) => {
                     self.route_message(&engine.tx, message).await?;
                 }
             }
@@ -526,7 +544,7 @@ mod tests {
     ) -> mpsc::Receiver<Signal> {
         let (tx, rx) = mpsc::channel(32);
         manager_tx
-            .send(ManagerAction::Directive(Ns(
+            .send(ManagerAction::Socket(Ns(
                 ns.into(),
                 Directive::Connect {
                     tx,
@@ -540,7 +558,7 @@ mod tests {
 
     async fn server_connect(manager_tx: &mpsc::Sender<ManagerAction>) {
         manager_tx
-            .send(ManagerAction::Transit(Transit::Text(Bytes::from_static(
+            .send(ManagerAction::Engine(Transit::Text(Bytes::from_static(
                 CONNECT_RESPONSE,
             ))))
             .await
@@ -556,7 +574,7 @@ mod tests {
         engine_rx.recv().await.unwrap(); // drain outbound connect frame
 
         manager_tx
-            .send(ManagerAction::Directive(Ns(
+            .send(ManagerAction::Socket(Ns(
                 "/".into(),
                 Directive::Event {
                     data: Bytes::from_static(b"[\"ping\"]"),
@@ -583,7 +601,7 @@ mod tests {
 
         for i in 0u8..3 {
             manager_tx
-                .send(ManagerAction::Directive(Ns(
+                .send(ManagerAction::Socket(Ns(
                     "/".into(),
                     Directive::Event {
                         data: Bytes::copy_from_slice(&[b'[', b'"', b'a' + i, b'"', b']']),
@@ -621,10 +639,7 @@ mod tests {
 
         server_connect(&manager_tx).await;
         manager_tx
-            .send(ManagerAction::Directive(Ns(
-                "/".into(),
-                Directive::Disconnect,
-            )))
+            .send(ManagerAction::Socket(Ns("/".into(), Directive::Disconnect)))
             .await
             .unwrap();
 
@@ -647,7 +662,7 @@ mod tests {
         let (manager_tx, _engine_rx, handle) = setup_manager();
 
         manager_tx
-            .send(ManagerAction::Directive(Ns(
+            .send(ManagerAction::Socket(Ns(
                 "/no-such-ns".into(),
                 Directive::Event {
                     data: Bytes::from_static(b"[\"x\"]"),
@@ -690,10 +705,7 @@ mod tests {
 
         server_connect(&manager_tx).await;
         manager_tx
-            .send(ManagerAction::Directive(Ns(
-                "/".into(),
-                Directive::Disconnect,
-            )))
+            .send(ManagerAction::Socket(Ns("/".into(), Directive::Disconnect)))
             .await
             .unwrap();
 
@@ -719,7 +731,7 @@ mod tests {
 
         let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel();
         manager_tx
-            .send(ManagerAction::Directive(Ns(
+            .send(ManagerAction::Socket(Ns(
                 "/".into(),
                 Directive::Event {
                     data: Bytes::from_static(b"[\"greet\",\"hello\"]"),
@@ -733,7 +745,7 @@ mod tests {
         engine_rx.recv().await.unwrap(); // drain outbound event frame
 
         manager_tx
-            .send(ManagerAction::Transit(Transit::Text(Bytes::from_static(
+            .send(ManagerAction::Engine(Transit::Text(Bytes::from_static(
                 b"30[\"world\"]",
             ))))
             .await
@@ -754,14 +766,14 @@ mod tests {
         socket_rx.recv().await.unwrap(); // consume Packet::Connect
 
         manager_tx
-            .send(ManagerAction::Transit(Transit::Text(Bytes::from_static(
+            .send(ManagerAction::Engine(Transit::Text(Bytes::from_static(
                 b"52-[\"img\"]",
             ))))
             .await
             .unwrap();
 
         manager_tx
-            .send(ManagerAction::Transit(Transit::Binary(Bytes::from_static(
+            .send(ManagerAction::Engine(Transit::Binary(Bytes::from_static(
                 b"\x01\x02",
             ))))
             .await
@@ -774,7 +786,7 @@ mod tests {
         );
 
         manager_tx
-            .send(ManagerAction::Transit(Transit::Binary(Bytes::from_static(
+            .send(ManagerAction::Engine(Transit::Binary(Bytes::from_static(
                 b"\x03\x04",
             ))))
             .await

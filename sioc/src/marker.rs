@@ -14,7 +14,7 @@
 //! expected) at build time rather than at runtime.
 
 use crate::ack::AckType;
-use crate::error::MarkerError;
+use crate::error::{AckIdError, AttachmentsError};
 use bytes::Bytes;
 use std::fmt::Debug;
 use std::marker::PhantomData;
@@ -25,7 +25,7 @@ pub trait AckMarker {
     type Id: Sized + Debug;
 
     /// Validates and extracts an ack ID from the wire-level `Option`.
-    fn parse(ack_id: Option<u64>) -> Result<Self::Id, MarkerError>;
+    fn parse(ack_id: Option<u64>) -> Result<Self::Id, AckIdError>;
 }
 
 /// Marker: this packet does **not** expect an acknowledgement.
@@ -35,8 +35,8 @@ pub struct NoAck;
 impl AckMarker for NoAck {
     type Id = ();
 
-    fn parse(ack_id: Option<u64>) -> Result<Self::Id, MarkerError> {
-        ack_id.map_or(Ok(()), |_| Err(MarkerError::UnexpectedAckId))
+    fn parse(ack_id: Option<u64>) -> Result<Self::Id, AckIdError> {
+        ack_id.map_or(Ok(()), |_| Err(AckIdError::Unexpected))
     }
 }
 
@@ -50,8 +50,8 @@ where
 {
     type Id = AckId<A>;
 
-    fn parse(ack_id: Option<u64>) -> Result<Self::Id, MarkerError> {
-        ack_id.map(AckId::new).ok_or(MarkerError::MissingAckId)
+    fn parse(ack_id: Option<u64>) -> Result<Self::Id, AckIdError> {
+        ack_id.map(AckId::new).ok_or(AckIdError::Missing)
     }
 }
 
@@ -85,7 +85,7 @@ pub trait BinaryMarker {
     type Attachments: Sized + Debug;
 
     /// Validates and extracts attachments from the wire-level `Option`.
-    fn parse(attachment: Option<Vec<Bytes>>) -> Result<Self::Attachments, MarkerError>;
+    fn parse(attachment: Option<Vec<Bytes>>) -> Result<Self::Attachments, AttachmentsError>;
 
     /// Converts typed attachments back into the wire-level `Option`.
     fn get(attachments: Self::Attachments) -> Option<Vec<Bytes>>;
@@ -102,9 +102,9 @@ pub struct NoBinary;
 impl BinaryMarker for NoBinary {
     type Attachments = ();
 
-    fn parse(attachment: Option<Vec<Bytes>>) -> Result<Self::Attachments, MarkerError> {
+    fn parse(attachment: Option<Vec<Bytes>>) -> Result<Self::Attachments, AttachmentsError> {
         match attachment {
-            Some(_) => Err(MarkerError::UnexpectedBinary),
+            Some(_) => Err(AttachmentsError::Unexpected),
             None => Ok(()),
         }
     }
@@ -117,8 +117,8 @@ impl BinaryMarker for NoBinary {
 impl BinaryMarker for HasBinary {
     type Attachments = Vec<Bytes>;
 
-    fn parse(attachment: Option<Vec<Bytes>>) -> Result<Self::Attachments, MarkerError> {
-        attachment.ok_or(MarkerError::MissingBinary)
+    fn parse(attachment: Option<Vec<Bytes>>) -> Result<Self::Attachments, AttachmentsError> {
+        attachment.ok_or(AttachmentsError::Missing)
     }
 
     fn get(attachments: Self::Attachments) -> Option<Vec<Bytes>> {

@@ -65,11 +65,11 @@ impl<'de> Deserialize<'de> for Placeholder {
 /// [`SocketSender::emit`](crate::client::SocketSender::emit) or
 /// [`SocketSender::ack`](crate::client::SocketSender::ack).
 #[derive(Default)]
-pub struct AttachmentBuilder {
+pub struct AttachmentsBuilder {
     buffer: Vec<Bytes>,
 }
 
-impl AttachmentBuilder {
+impl AttachmentsBuilder {
     /// Creates an empty builder.
     pub fn new() -> Self {
         Default::default()
@@ -96,7 +96,7 @@ mod tests {
 
     #[test]
     fn builder_assigns_sequential_indices() {
-        let mut builder = AttachmentBuilder::new();
+        let mut builder = AttachmentsBuilder::new();
         let p0 = builder.attach(Bytes::from_static(b"first"));
         let p1 = builder.attach(Bytes::from_static(b"second"));
         assert_eq!(p0.num, 0);

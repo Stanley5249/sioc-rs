@@ -13,30 +13,37 @@ use tokio::sync::mpsc;
 /// Callers receive this wrapped in [`Error::Parse`].
 #[derive(Debug, Error, Diagnostic)]
 pub enum ParseError {
+    /// No bytes were available to read.
     #[error("packet is empty")]
     #[diagnostic(code(sioc::parse::empty_packet))]
     EmptyPacket,
 
+    /// First byte does not map to any known packet type.
     #[error("unknown packet type: {byte:#04x}")]
     #[diagnostic(code(sioc::parse::unknown_packet_type))]
     UnknownPacketType { byte: u8 },
 
+    /// Binary packet header has no attachment count before the `-` separator.
     #[error("binary packet missing attachment count prefix")]
     #[diagnostic(code(sioc::parse::missing_attachment_count))]
     MissingAttachmentCount,
 
-    #[error("attachment count in not a valid integer")]
+    /// Attachment count prefix is present but not a valid integer.
+    #[error("attachment count is not a valid integer")]
     #[diagnostic(code(sioc::parse::invalid_attachment_count))]
     InvalidAttachmentCount,
 
+    /// Non-default namespace is missing the `,` delimiter after the path.
     #[error("namespace missing trailing `,` delimiter")]
     #[diagnostic(code(sioc::parse::missing_namespace_delimiter))]
     MissingNamespaceDelimiter,
 
+    /// Ack packet has no numeric ID field.
     #[error("ack packet missing numeric ID")]
     #[diagnostic(code(sioc::parse::missing_ack_id))]
     MissingAckId,
 
+    /// Ack ID field is present but not a valid integer.
     #[error("packet ID is not a valid integer")]
     #[diagnostic(code(sioc::parse::invalid_ack_id))]
     InvalidAckId {
@@ -44,10 +51,12 @@ pub enum ParseError {
         source: std::num::ParseIntError,
     },
 
+    /// Text event packet carries a non-zero attachment count.
     #[error("text event packet has unexpected attachment count ({count})")]
     #[diagnostic(code(sioc::parse::unexpected_attachments))]
     UnexpectedAttachments { count: usize },
 
+    /// Packet bytes are not valid UTF-8.
     #[error("invalid UTF-8 in packet")]
     #[diagnostic(code(sioc::parse::utf8))]
     Utf8 {
@@ -55,6 +64,7 @@ pub enum ParseError {
         source: std::str::Utf8Error,
     },
 
+    /// JSON payload array in the packet is invalid.
     #[error("invalid JSON in packet")]
     #[diagnostic(code(sioc::parse::json))]
     Payload(#[from] PayloadError),
@@ -63,6 +73,7 @@ pub enum ParseError {
 /// The top-level error type for all `sioc-socket` public APIs.
 #[derive(Debug, Error, Diagnostic)]
 pub enum Error {
+    /// Error propagated from the Engine.IO transport layer.
     #[error(transparent)]
     #[diagnostic(transparent)]
     Engine(#[from] EngineError),
@@ -82,7 +93,7 @@ pub enum Error {
     SendAck { ns: String, ack: DynAck },
 
     /// Outbound directive send to the manager failed.
-    #[error("fail to send directive to manager")]
+    #[error("failed to send directive to manager")]
     #[diagnostic(code(sioc::manager_action_send))]
     SendAction(#[from] mpsc::error::SendError<crate::manager::ManagerAction>),
 
