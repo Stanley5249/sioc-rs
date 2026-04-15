@@ -1,6 +1,7 @@
 use std::time::Duration;
 
-use crate::error::{Error, PacketError, PayloadError, Result};
+use crate::error::PacketError;
+use crate::payload::deserialize;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::Deserialize;
 
@@ -29,8 +30,8 @@ impl std::fmt::Debug for Transit {
 
 /// A wire-level frame exchanged with the transport layer.
 ///
-/// `Text` carries a fully-encoded Engine.IO text packet (e.g. `b"4hello"`).
-/// `Binary` carries a raw binary payload with no packet-type prefix.
+/// [`Frame::Packet`] carries a fully-encoded Engine.IO text packet (e.g. `b"4hello"`).
+/// [`Frame::Binary`] carries a raw binary payload with no packet-type prefix.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Frame {
     /// A UTF-8 text frame (contains a complete Engine.IO packet).
@@ -56,15 +57,6 @@ impl std::fmt::Debug for Frame {
         match self {
             Self::Packet(packet) => f.debug_tuple("Packet").field(packet).finish(),
             Self::Binary(bytes) => f.debug_struct("Binary").field("len", &bytes.len()).finish(),
-        }
-    }
-}
-
-impl Frame {
-    pub fn unexpected(self, description: impl Into<String>) -> Error {
-        Error::UnexpectedFrame {
-            description: description.into(),
-            frame: self,
         }
     }
 }
@@ -128,7 +120,7 @@ pub enum Packet {
     Open(Handshake),
     /// `1` — The transport can be closed.
     Close,
-    /// `2` — Heartbeat from the server (client must reply with [`EioPacket::Pong`]).
+    /// `2` — Heartbeat from the server (client must reply with [`Packet::Pong`]).
     Ping(Bytes),
     /// `3` — Heartbeat reply.
     Pong(Bytes),
@@ -163,12 +155,7 @@ impl Packet {
         }
 
         match data.get_u8() {
-            b'0' => {
-                let handshake = serde_json::from_slice(&data)
-                    .map_err(|e| PayloadError::new::<Handshake>(e).with_slice(&data))?;
-
-                Ok(Packet::Open(handshake))
-            }
+            b'0' => Ok(Packet::Open(deserialize(&data)?)),
             b'1' => Ok(Packet::Close),
             b'2' => Ok(Packet::Ping(data)),
             b'3' => Ok(Packet::Pong(data)),
@@ -176,13 +163,6 @@ impl Packet {
             b'5' => Ok(Packet::Upgrade),
             b'6' => Ok(Packet::Noop),
             id => Err(PacketError::InvalidId { id })?,
-        }
-    }
-
-    pub fn unexpected(self, description: impl Into<String>) -> Error {
-        Error::UnexpectedPacket {
-            description: description.into(),
-            packet: self,
         }
     }
 }

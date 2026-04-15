@@ -1,7 +1,8 @@
 //! Socket.IO namespace router.
 
-use crate::error::{Error, ParseError, PayloadError, Result};
+use crate::error::{ManagerError, PacketError};
 use crate::packet::{Connect, ConnectError, Directive, DynAck, DynEvent, Ns, Packet, Signal};
+use crate::payload::deserialize;
 use bytes::Bytes;
 use futures_util::{Sink, SinkExt, future};
 use sioc_engine::engine::{Engine, EngineSender};
@@ -84,24 +85,28 @@ impl Socket {
         id
     }
 
-    fn send_ack(&mut self, ns: String, id: u64, ack: DynAck) -> Result<String> {
+    fn send_ack(&mut self, ns: String, id: u64, ack: DynAck) -> Result<String, ManagerError> {
         match self.acks.remove(&id) {
             Some(sender) => match sender.send(ack) {
                 Ok(()) => Ok(ns),
-                Err(ack) => Err(Error::SendAck { ns, ack }),
+                Err(ack) => Err(ManagerError::SendAck { ns, ack }),
             },
-            None => Err(Error::UnknownAckId { ns, id }),
+            None => Err(ManagerError::UnknownAckId { ns, id }),
         }
     }
 
-    async fn send_packet(&mut self, ns: String, packet: Signal) -> Result<String> {
+    async fn send_packet(&mut self, ns: String, packet: Signal) -> Result<String, ManagerError> {
         match self.tx.send(packet).await {
             Ok(()) => Ok(ns),
-            Err(source) => Err(Error::SendPacket { ns, source }),
+            Err(source) => Err(ManagerError::SendPacket { ns, source }),
         }
     }
 
-    async fn send_binary_packet(&mut self, ns: String, packet: BinaryPacket) -> Result<String> {
+    async fn send_binary_packet(
+        &mut self,
+        ns: String,
+        packet: BinaryPacket,
+    ) -> Result<String, ManagerError> {
         match packet {
             BinaryPacket::Event {
                 data,
@@ -134,16 +139,16 @@ impl SocketsMap {
         Self(HashMap::new())
     }
 
-    fn get_mut(&mut self, ns: String) -> Result<Ns<&mut Socket>> {
+    fn get_mut(&mut self, ns: String) -> Result<Ns<&mut Socket>, ManagerError> {
         match self.0.get_mut(&ns) {
             Some(socket) => Ok(Ns(ns, socket)),
-            None => Err(Error::UnknownNamespace { ns }),
+            None => Err(ManagerError::UnknownNamespace { ns }),
         }
     }
 
-    fn connect(&mut self, ns: String, socket: Socket) -> Result<Ns<&mut Socket>> {
+    fn connect(&mut self, ns: String, socket: Socket) -> Result<Ns<&mut Socket>, ManagerError> {
         match self.0.entry(ns) {
-            Entry::Occupied(e) => Err(Error::NamespaceConflict {
+            Entry::Occupied(e) => Err(ManagerError::NamespaceConflict {
                 ns: e.key().clone(),
             }),
             Entry::Vacant(e) => {
@@ -153,18 +158,18 @@ impl SocketsMap {
         }
     }
 
-    fn disconnect(&mut self, ns: String) -> Result<Ns<Socket>> {
+    fn disconnect(&mut self, ns: String) -> Result<Ns<Socket>, ManagerError> {
         match self.0.remove(&ns) {
             Some(socket) => Ok(Ns(ns, socket)),
-            None => Err(Error::UnknownNamespace { ns }),
+            None => Err(ManagerError::UnknownNamespace { ns }),
         }
     }
 
-    fn require(&self, ns: String) -> Result<String> {
+    fn require(&self, ns: String) -> Result<String, ManagerError> {
         if self.0.contains_key(&ns) {
             Ok(ns)
         } else {
-            Err(Error::UnknownNamespace { ns })
+            Err(ManagerError::UnknownNamespace { ns })
         }
     }
 
@@ -248,7 +253,7 @@ impl Reconstructor {
         self.pending = Some(Ns(ns, packet));
     }
 
-    fn attach_and_take(&mut self, bytes: Bytes) -> Result<Option<Ns<BinaryPacket>>> {
+    fn attach_and_take(&mut self, bytes: Bytes) -> Result<Option<Ns<BinaryPacket>>, ManagerError> {
         match std::mem::take(&mut self.pending) {
             Some(Ns(ns, mut packet)) => {
                 packet.attach(bytes);
@@ -261,7 +266,7 @@ impl Reconstructor {
                     Ok(None)
                 }
             }
-            None => Err(Error::UnexpectedBinary(bytes)),
+            None => Err(ManagerError::UnexpectedBinary(bytes)),
         }
     }
 }
@@ -270,9 +275,9 @@ struct Socket {
     tx: mpsc::Sender<Signal>,
     acks: BTreeMap<u64, oneshot::Sender<DynAck>>,
     ids: u64,
-    /// Set when the server sends a CONNECT response; gates event delivery.
+    // Set when the server sends a CONNECT response; gates event delivery.
     connected: bool,
-    /// Events encoded before `connected` is set; flushed on CONNECT response.
+    // Events encoded before `connected` is set; flushed on CONNECT response.
     buffer: Vec<Transit>,
 }
 
@@ -294,7 +299,7 @@ impl Manager {
 
     /// Runs the socket routing loop until all namespaces disconnect.
     #[tracing::instrument(skip_all, err)]
-    pub async fn run(mut self, engine: Engine) -> Result<()> {
+    pub async fn run(mut self, engine: Engine) -> Result<(), ManagerError> {
         while let Some(directive) = self.rx.recv().await {
             match directive {
                 ManagerAction::Socket(Ns(ns, packet)) => {
@@ -321,7 +326,7 @@ impl Manager {
         engine_tx: &EngineSender,
         ns: String,
         directive: Directive,
-    ) -> Result<()> {
+    ) -> Result<(), ManagerError> {
         let mut socket_buffer = None;
 
         let (ns, packet, attachments) = match directive {
@@ -401,7 +406,11 @@ impl Manager {
         Ok(())
     }
 
-    async fn route_message(&mut self, engine_tx: &EngineSender, message: Transit) -> Result<()> {
+    async fn route_message(
+        &mut self,
+        engine_tx: &EngineSender,
+        message: Transit,
+    ) -> Result<(), ManagerError> {
         match message {
             Transit::Text(bytes) => {
                 self.route_text_message(bytes, engine_tx).await?;
@@ -420,9 +429,13 @@ impl Manager {
         Ok(())
     }
 
-    async fn route_text_message(&mut self, bytes: Bytes, engine_tx: &EngineSender) -> Result<()> {
+    async fn route_text_message(
+        &mut self,
+        bytes: Bytes,
+        engine_tx: &EngineSender,
+    ) -> Result<(), ManagerError> {
         if self.reconstructor.is_pending() {
-            return Err(Error::UnexpectedText(bytes));
+            return Err(ManagerError::UnexpectedText(bytes));
         }
 
         let Ns(ns, packet) = bytes.try_into()?;
@@ -445,8 +458,7 @@ impl Manager {
                     }
                 }
 
-                let connect: Connect = serde_json::from_slice(&data)
-                    .map_err(|e| ParseError::Payload(PayloadError::new::<Connect>(e)))?;
+                let connect: Connect = deserialize(&data).map_err(PacketError::Payload)?;
 
                 socket.send_packet(ns, Signal::Connect(connect)).await?;
             }
@@ -470,8 +482,7 @@ impl Manager {
             Packet::ConnectError(data) => {
                 let Ns(ns, socket) = self.sockets.get_mut(ns)?;
 
-                let error: ConnectError = serde_json::from_slice(&data)
-                    .map_err(|e| ParseError::Payload(PayloadError::new::<ConnectError>(e)))?;
+                let error: ConnectError = deserialize(&data).map_err(PacketError::Payload)?;
 
                 socket.send_packet(ns, Signal::ConnectError(error)).await?;
             }
@@ -492,7 +503,7 @@ impl Manager {
         Ok(())
     }
 
-    async fn route_binary_message(&mut self, bytes: Bytes) -> Result<()> {
+    async fn route_binary_message(&mut self, bytes: Bytes) -> Result<(), ManagerError> {
         let count = bytes.len();
 
         match self.reconstructor.attach_and_take(bytes)? {
@@ -515,6 +526,7 @@ impl Manager {
 mod tests {
     use super::*;
     use sioc_engine::engine::EngineAction;
+    use tokio::task::JoinHandle;
 
     const CONNECT_RESPONSE: &[u8] = b"0{\"sid\":\"test\"}";
 
@@ -530,7 +542,7 @@ mod tests {
     fn setup_manager() -> (
         mpsc::Sender<ManagerAction>,
         mpsc::Receiver<EngineAction>,
-        tokio::task::JoinHandle<Result<()>>,
+        JoinHandle<Result<(), ManagerError>>,
     ) {
         let (engine_tx, engine_rx) = mpsc::channel(32);
         let (manager_tx, manager_rx) = mpsc::channel(32);
@@ -621,7 +633,7 @@ mod tests {
         for _ in 0..3 {
             assert!(matches!(
                 engine_rx.recv().await.unwrap(),
-                EngineAction::Transit(Transit::Text(_))
+                EngineAction::Sink(Transit::Text(_))
             ));
         }
         assert!(matches!(
@@ -645,11 +657,11 @@ mod tests {
 
         assert!(matches!(
             engine_rx.recv().await.unwrap(),
-            EngineAction::Transit(Transit::Text(_))
+            EngineAction::Sink(Transit::Text(_))
         ));
         assert!(matches!(
             engine_rx.recv().await.unwrap(),
-            EngineAction::Transit(Transit::Close)
+            EngineAction::Sink(Transit::Close)
         ));
 
         drop(manager_tx);
@@ -676,7 +688,7 @@ mod tests {
         drop(manager_tx);
         assert!(matches!(
             handle.await.unwrap(),
-            Err(crate::error::Error::UnknownNamespace { .. })
+            Err(crate::error::ManagerError::UnknownNamespace { .. })
         ));
     }
 
@@ -692,7 +704,7 @@ mod tests {
         drop(manager_tx);
         assert!(matches!(
             handle.await.unwrap(),
-            Err(crate::error::Error::NamespaceConflict { .. })
+            Err(crate::error::ManagerError::NamespaceConflict { .. })
         ));
     }
 

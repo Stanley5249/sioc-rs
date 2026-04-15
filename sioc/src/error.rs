@@ -10,9 +10,11 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinError;
 
+pub use sioc_engine::error::PayloadError;
+
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-// Provided for application-level error handling
+/// Top-level error aggregator for the `sioc` public API.
 #[derive(Debug, Error, Diagnostic)]
 #[error(transparent)]
 #[diagnostic(transparent)]
@@ -22,24 +24,6 @@ pub enum Error {
     Socket(#[from] SocketError),
     Event(#[from] EventError),
     Ack(#[from] AckError),
-}
-
-/// Serialization or deserialization failure for a typed payload.
-#[derive(Debug, Error)]
-#[error("failed to convert payload of `{type_name}`")]
-pub struct PayloadError {
-    pub type_name: &'static str,
-    #[source]
-    pub source: serde_path_to_error::Error<serde_json::Error>,
-}
-
-impl PayloadError {
-    pub fn new<T>(source: serde_path_to_error::Error<serde_json::Error>) -> Self {
-        Self {
-            type_name: std::any::type_name::<T>(),
-            source,
-        }
-    }
 }
 
 /// Error returned by [`ClientBuilder::open`](crate::client::ClientBuilder::open).
@@ -62,7 +46,7 @@ pub enum ClientError {
     /// Error propagated from the socket manager.
     #[error(transparent)]
     #[diagnostic(transparent)]
-    Manager(#[from] sioc_socket::error::Error),
+    Manager(#[from] sioc_socket::error::ManagerError),
 }
 
 /// Error returned by [`SocketSender`](crate::client::SocketSender) operations.

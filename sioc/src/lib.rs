@@ -114,9 +114,9 @@ pub mod prelude {
 
     pub use sioc_socket::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Signal};
 
+    pub use sioc_engine::error::WebSocketError;
     pub use sioc_engine::prelude::{
-        DefaultWebSocketConnector, TransportStrategy, WebSocketConnector, WebSocketError,
-        WebSocketStream,
+        DefaultWebSocketConnector, TransportStrategy, WebSocketConnector, WebSocketStream,
     };
 
     pub use sioc_macros::{AckType, DeserializePayload, EventRouter, EventType, SerializePayload};

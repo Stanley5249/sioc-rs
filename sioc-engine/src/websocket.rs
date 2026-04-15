@@ -2,13 +2,13 @@
 
 use crate::ENGINE_IO_VERSION;
 use crate::engine::EngineSender;
-use crate::error::{Error, Result};
+use crate::error::{TransportError, WebSocketError};
 use crate::packet::{Frame, Handshake, PROBE, Packet};
 use futures_util::{SinkExt, StreamExt};
 use std::future::Future;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
-pub use tokio_tungstenite::tungstenite::Error as WebSocketError;
+use tokio_tungstenite::tungstenite::Error as TungsteniteError;
 use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
 use tokio_tungstenite::{MaybeTlsStream, connect_async};
 use tokio_util::sync::CancellationToken;
@@ -22,18 +22,18 @@ pub trait WebSocketConnector: Send + 'static {
     fn connect(
         self,
         url: Url,
-    ) -> impl Future<Output = Result<WebSocketStream, WebSocketError>> + Send;
+    ) -> impl Future<Output = Result<WebSocketStream, TungsteniteError>> + Send;
 }
 
 impl<F, Fut> WebSocketConnector for F
 where
     F: FnOnce(Url) -> Fut + Send + 'static,
-    Fut: Future<Output = Result<WebSocketStream, WebSocketError>> + Send + 'static,
+    Fut: Future<Output = Result<WebSocketStream, TungsteniteError>> + Send + 'static,
 {
     fn connect(
         self,
         url: Url,
-    ) -> impl Future<Output = Result<WebSocketStream, WebSocketError>> + Send {
+    ) -> impl Future<Output = Result<WebSocketStream, TungsteniteError>> + Send {
         self(url)
     }
 }
@@ -44,21 +44,26 @@ where
 pub struct DefaultWebSocketConnector;
 
 impl WebSocketConnector for DefaultWebSocketConnector {
-    async fn connect(self, url: Url) -> Result<WebSocketStream, WebSocketError> {
+    async fn connect(self, url: Url) -> Result<WebSocketStream, TungsteniteError> {
         let (stream, _) = connect_async(url.as_str()).await?;
         Ok(stream)
     }
 }
 
-fn encode_frame(frame: Frame) -> Result<WebSocketMessage> {
+fn encode_frame(frame: Frame) -> Result<WebSocketMessage, TransportError> {
     Ok(match frame {
         Frame::Packet(packet) => WebSocketMessage::Text(packet.encode().try_into()?),
         Frame::Binary(bytes) => WebSocketMessage::Binary(bytes),
     })
 }
 
-async fn next_frame(stream: &mut WebSocketStream) -> Result<Frame> {
-    while let Some(message) = stream.next().await.transpose()? {
+async fn next_frame(stream: &mut WebSocketStream) -> Result<Frame, TransportError> {
+    while let Some(message) = stream
+        .next()
+        .await
+        .transpose()
+        .map_err(WebSocketError::Tungstenite)?
+    {
         let frame = match message {
             WebSocketMessage::Text(text) => Packet::decode(text.into())?.into(),
             WebSocketMessage::Binary(bytes) => bytes.into(),
@@ -66,7 +71,7 @@ async fn next_frame(stream: &mut WebSocketStream) -> Result<Frame> {
         };
         return Ok(frame);
     }
-    Err(Error::Close)
+    Err(TransportError::WebSocket(WebSocketError::Closed))
 }
 
 fn websocket_url(mut url: Url, sid: Option<&str>) -> Url {
@@ -96,21 +101,25 @@ fn websocket_url(mut url: Url, sid: Option<&str>) -> Url {
     url
 }
 
-async fn websocket_probe(stream: &mut WebSocketStream) -> Result<()> {
+async fn websocket_probe(stream: &mut WebSocketStream) -> Result<(), TransportError> {
     tracing::debug!("sending probe Ping");
 
     let packet = Packet::Ping(PROBE);
 
     stream
         .send(WebSocketMessage::Text(packet.encode().try_into()?))
-        .await?;
+        .await
+        .map_err(WebSocketError::Tungstenite)?;
 
     match next_frame(stream).await? {
         Frame::Packet(Packet::Pong(bytes)) if bytes == PROBE => {
             tracing::debug!("received probe Pong");
         }
         other => {
-            return Err(other.unexpected("expected probe Pong in response to probe Ping"));
+            return Err(TransportError::frame(
+                other,
+                "expected probe Pong in response to probe Ping",
+            ));
         }
     }
 
@@ -121,7 +130,7 @@ pub async fn websocket_connect<C>(
     base_url: Url,
     sid: Option<String>,
     connector: C,
-) -> Result<WebSocketStream, Error>
+) -> Result<WebSocketStream, TransportError>
 where
     C: WebSocketConnector,
 {
@@ -129,7 +138,10 @@ where
 
     tracing::debug!(%url, "connecting");
 
-    let mut stream = connector.connect(url).await?;
+    let mut stream = connector
+        .connect(url)
+        .await
+        .map_err(WebSocketError::Tungstenite)?;
 
     if sid.is_some() {
         websocket_probe(&mut stream).await?;
@@ -145,24 +157,34 @@ pub async fn websocket_loop(
     engine_tx: EngineSender,
     mut transport_rx: mpsc::Receiver<Frame>,
     token: CancellationToken,
-) -> Result<()> {
+) -> Result<(), TransportError> {
     match handshake_tx {
         Some(handshake_tx) => {
             let handshake = match next_frame(&mut stream).await? {
                 Frame::Packet(Packet::Open(handshake)) => handshake,
-                other => return Err(other.unexpected("expected Open packet as first frame")),
+                other => {
+                    return Err(TransportError::frame(
+                        other,
+                        "expected Open packet as first frame",
+                    ));
+                }
             };
 
             tracing::debug!(?handshake, "received OPEN");
 
-            handshake_tx.send(handshake).map_err(Error::SendHandshake)?;
+            handshake_tx
+                .send(handshake)
+                .map_err(TransportError::SendHandshake)?;
         }
         None => {
             tracing::debug!("sending UPGRADE");
 
             let message = WebSocketMessage::Text(Packet::Upgrade.encode().try_into()?);
 
-            stream.send(message).await?;
+            stream
+                .send(message)
+                .await
+                .map_err(WebSocketError::Tungstenite)?;
         }
     };
 
@@ -170,12 +192,18 @@ pub async fn websocket_loop(
         tokio::select! {
             _ = token.cancelled() => {
                 tracing::debug!("cancelling websocket");
-                stream.close(None).await?;
+                stream
+                    .close(None)
+                    .await
+                    .map_err(WebSocketError::Tungstenite)?;
                 break;
             },
 
             item = stream.next() => {
-                let Some(message) = item.transpose()? else {
+                let Some(message) = item
+                    .transpose()
+                    .map_err(WebSocketError::Tungstenite)?
+                else {
                     tracing::debug!("websocket stream closed");
                     break;
                 };
@@ -183,7 +211,9 @@ pub async fn websocket_loop(
                 tracing::trace!(frame = %message, "received message");
 
                 let frame: Frame = match message {
-                    WebSocketMessage::Text(text) => Packet::decode(text.into())?.into(),
+                    WebSocketMessage::Text(text) => {
+                        Packet::decode(text.into())?.into()
+                    }
                     WebSocketMessage::Binary(bytes) => bytes.into(),
                     _ => continue,
                 };
@@ -200,7 +230,10 @@ pub async fn websocket_loop(
 
                 tracing::trace!(frame = %message, "sending message");
 
-                stream.send(message).await?;
+                stream
+                    .send(message)
+                    .await
+                    .map_err(WebSocketError::Tungstenite)?;
             }
         };
     }
@@ -216,7 +249,7 @@ pub async fn websocket_transport<C>(
     engine_tx: EngineSender,
     transport_rx: mpsc::Receiver<Frame>,
     token: CancellationToken,
-) -> Result<()>
+) -> Result<(), TransportError>
 where
     C: WebSocketConnector,
 {

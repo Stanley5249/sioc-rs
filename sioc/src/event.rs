@@ -27,8 +27,7 @@ use crate::client::Emit;
 use crate::error::{EventError, PayloadError};
 use crate::marker::{AckMarker, BinaryMarker, HasAck, HasBinary, NoAck, NoBinary};
 use crate::payload::{
-    DeserializePayload, EventPayload, SerializePayload, deserialize_event, serialize,
-    serialize_event,
+    DeserializePayload, EventPayload, SerializePayload, deserialize_event, serialize_event,
 };
 use bytes::Bytes;
 use sioc_socket::packet::{Directive, DynEvent};
@@ -124,7 +123,7 @@ where
     type Output = ();
 
     fn prepare(self) -> Result<(Directive, ()), PayloadError> {
-        let data = serialize(&EventPayload(&self))?;
+        let data = crate::payload::serialize(&EventPayload(&self))?;
         Ok((
             Directive::Event {
                 data: data.into(),

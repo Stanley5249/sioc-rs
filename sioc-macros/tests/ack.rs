@@ -80,7 +80,7 @@ fn flexible_discards_trailing() {
 #[test]
 fn flatten_collects() {
     let ack = deserialize_ack::<Flex>(b"[true,1,\"x\"]").unwrap();
-    assert_eq!(ack.ok, true);
+    assert!(ack.ok);
     assert_eq!(ack.extras.len(), 2);
 }
 

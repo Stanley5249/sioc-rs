@@ -4,7 +4,7 @@
 //! upgrade to WebSocket, and clean shutdown via cancellation.
 
 use crate::engine::EngineSender;
-use crate::error::Result;
+use crate::error::TransportError;
 use crate::packet::{Frame, Handshake};
 use crate::polling::polling_transport;
 use crate::websocket::{WebSocketConnector, websocket_transport};
@@ -32,7 +32,7 @@ impl TransportStrategy {
         engine_tx: EngineSender,
         transport_rx: mpsc::Receiver<Frame>,
         token: CancellationToken,
-    ) -> JoinHandle<Result<()>>
+    ) -> JoinHandle<Result<(), TransportError>>
     where
         C: WebSocketConnector,
     {

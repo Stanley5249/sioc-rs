@@ -2,9 +2,8 @@
 
 use crate::ENGINE_IO_VERSION;
 use crate::engine::EngineSender;
-use crate::error::{Error, PacketError, Result};
+use crate::error::{PollingError, TransportError};
 use crate::packet::{Frame, Handshake, Packet};
-use crate::utils::join_tasks;
 use crate::websocket::{WebSocketConnector, websocket_connect, websocket_loop};
 use base64::prelude::*;
 use bytes::{BufMut, Bytes, BytesMut};
@@ -21,7 +20,7 @@ fn encode_binary(buffer: &mut BytesMut, bytes: &[u8]) {
     buffer.put_slice(b64.as_bytes());
 }
 
-fn decode_binary(bytes: Bytes) -> Result<Bytes, PacketError> {
+fn decode_binary(bytes: Bytes) -> Result<Bytes, PollingError> {
     Ok(Bytes::from(BASE64_STANDARD.decode(&bytes[1..])?))
 }
 
@@ -43,7 +42,7 @@ where
 }
 
 /// Decodes a single frame from a raw bytes value.
-fn decode_frame(bytes: Bytes) -> Result<Frame> {
+fn decode_frame(bytes: Bytes) -> Result<Frame, TransportError> {
     Ok(if bytes.first().is_some_and(|&b| b == b'b') {
         decode_binary(bytes)?.into()
     } else {
@@ -55,7 +54,7 @@ fn decode_frame(bytes: Bytes) -> Result<Frame> {
 ///
 /// `Bytes::split` on a separator always yields at least one element, so the
 /// returned `Vec` is guaranteed to be non-empty for any non-error response.
-fn decode_frames(bytes: Bytes) -> Result<Vec<Frame>> {
+fn decode_frames(bytes: Bytes) -> Result<Vec<Frame>, TransportError> {
     bytes
         .split(|&b| b == SEPARATOR)
         .map(|s| decode_frame(bytes.slice_ref(s)))
@@ -81,7 +80,7 @@ async fn polling_post(
     http_client: Client,
     mut transport_rx: mpsc::Receiver<Frame>,
     token: CancellationToken,
-) -> Result<mpsc::Receiver<Frame>> {
+) -> Result<mpsc::Receiver<Frame>, TransportError> {
     let mut buffer = Vec::with_capacity(8);
 
     loop {
@@ -103,19 +102,19 @@ async fn polling_post(
         tracing::trace!(?request, "sending POST");
 
         let response = http_client
-            .post(url.clone())
+            .post(url.as_str())
             .body(request)
             .send()
-            .await?
-            .error_for_status()?
+            .await
+            .map_err(PollingError::Http)?
+            .error_for_status()
+            .map_err(PollingError::Http)?
             .text()
-            .await?;
+            .await
+            .map_err(PollingError::Http)?;
 
-        if response.to_lowercase() != "ok" {
-            return Err(Error::UnexpectedResponse {
-                description: "expected 'ok' response to polling POST".to_string(),
-                response,
-            });
+        if !response.eq_ignore_ascii_case("ok") {
+            return Err(PollingError::UnexpectedResponse { response }.into());
         }
     }
 
@@ -131,15 +130,18 @@ async fn polling_get(
     http_client: Client,
     engine_tx: EngineSender,
     token: CancellationToken,
-) -> Result<EngineSender> {
+) -> Result<EngineSender, TransportError> {
     while !token.is_cancelled() {
         let response = http_client
-            .get(url.clone())
+            .get(url.as_str())
             .send()
-            .await?
-            .error_for_status()?
+            .await
+            .map_err(PollingError::Http)?
+            .error_for_status()
+            .map_err(PollingError::Http)?
             .bytes()
-            .await?;
+            .await
+            .map_err(PollingError::Http)?;
 
         tracing::trace!(?response, "received GET");
 
@@ -162,7 +164,7 @@ pub async fn polling_transport<C>(
     engine_tx: EngineSender,
     transport_rx: mpsc::Receiver<Frame>,
     token: CancellationToken,
-) -> Result<()>
+) -> Result<(), TransportError>
 where
     C: WebSocketConnector,
 {
@@ -173,14 +175,22 @@ where
     let bytes = http_client
         .get(url.clone())
         .send()
-        .await?
-        .error_for_status()?
+        .await
+        .map_err(PollingError::Http)?
+        .error_for_status()
+        .map_err(PollingError::Http)?
         .bytes()
-        .await?;
+        .await
+        .map_err(PollingError::Http)?;
 
     let handshake = match decode_frame(bytes)? {
         Frame::Packet(Packet::Open(handshake)) => handshake,
-        other => return Err(other.unexpected("expected Open packet as first frame")),
+        other => {
+            return Err(TransportError::frame(
+                other,
+                "expected Open packet as first frame",
+            ));
+        }
     };
 
     tracing::debug!(?handshake, "received OPEN");
@@ -189,20 +199,22 @@ where
     let do_upgrade = handshake.can_upgrade_to_websocket();
     let sid = handshake.sid.clone();
 
-    handshake_tx.send(handshake).map_err(Error::SendHandshake)?;
+    handshake_tx
+        .send(handshake)
+        .map_err(TransportError::SendHandshake)?;
 
     let _guard = token.clone().drop_guard();
 
     let child_token = token.child_token();
 
-    let post_handle = tokio::spawn(polling_get(
+    let get_handle = tokio::spawn(polling_get(
         url.clone(),
         http_client.clone(),
         engine_tx,
         child_token.clone(),
     ));
 
-    let get_handle = tokio::spawn(polling_post(
+    let post_handle = tokio::spawn(polling_post(
         url,
         http_client,
         transport_rx,
@@ -215,11 +227,15 @@ where
         tracing::debug!("pause polling transport");
         child_token.cancel();
 
-        let (engine_tx, transport_rx) = join_tasks(post_handle, get_handle).await?;
+        let (get_result, post_result) = tokio::join!(get_handle, post_handle);
+        let engine_tx = get_result??;
+        let transport_rx = post_result??;
 
         websocket_loop(stream, None, engine_tx, transport_rx, token).await?;
     } else {
-        let _ = join_tasks(post_handle, get_handle).await?;
+        let (get_result, post_result) = tokio::join!(get_handle, post_handle);
+        let _ = get_result??;
+        let _ = post_result??;
     }
 
     Ok(())

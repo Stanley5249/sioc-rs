@@ -9,16 +9,16 @@
 //! Also implements [`TryFrom<Bytes>`] for [`Ns<SioPacket>`], which is the
 //! primary inbound decoding entry-point.
 
-use crate::error::{ParseError, Result};
+use crate::error::PacketError;
 use crate::packet::{Ns, Packet};
 use bytes::{Buf, BufMut, Bytes};
 
 impl TryFrom<Bytes> for Ns<Packet> {
-    type Error = ParseError;
+    type Error = PacketError;
 
-    fn try_from(mut data: Bytes) -> Result<Self, ParseError> {
+    fn try_from(mut data: Bytes) -> Result<Self, PacketError> {
         if data.is_empty() {
-            return Err(ParseError::EmptyPacket);
+            return Err(PacketError::Empty);
         }
         let first = data.get_u8();
 
@@ -33,7 +33,7 @@ impl TryFrom<Bytes> for Ns<Packet> {
             }
             b'2' => {
                 if let Some(count) = split_attachments(&mut data).transpose()? {
-                    return Err(ParseError::UnexpectedAttachments { count });
+                    return Err(PacketError::UnexpectedAttachments { count });
                 }
                 let ns = split_namespace(&mut data)?;
                 let id = split_id(&mut data).transpose()?;
@@ -43,7 +43,7 @@ impl TryFrom<Bytes> for Ns<Packet> {
                 let ns = split_namespace(&mut data)?;
                 let id = split_id(&mut data)
                     .transpose()?
-                    .ok_or(ParseError::MissingAckId)?;
+                    .ok_or(PacketError::MissingAckId)?;
                 Ns(ns, Packet::Ack { data, id })
             }
             b'4' => {
@@ -53,7 +53,7 @@ impl TryFrom<Bytes> for Ns<Packet> {
             b'5' => {
                 let count = split_attachments(&mut data)
                     .transpose()?
-                    .ok_or(ParseError::MissingAttachmentCount)?;
+                    .ok_or(PacketError::MissingAttachmentCount)?;
                 let ns = split_namespace(&mut data)?;
                 let id = split_id(&mut data).transpose()?;
                 Ns(ns, Packet::BinaryEvent { data, id, count })
@@ -61,14 +61,14 @@ impl TryFrom<Bytes> for Ns<Packet> {
             b'6' => {
                 let count = split_attachments(&mut data)
                     .transpose()?
-                    .ok_or(ParseError::MissingAttachmentCount)?;
+                    .ok_or(PacketError::MissingAttachmentCount)?;
                 let ns = split_namespace(&mut data)?;
                 let id = split_id(&mut data)
                     .transpose()?
-                    .ok_or(ParseError::MissingAckId)?;
+                    .ok_or(PacketError::MissingAckId)?;
                 Ns(ns, Packet::BinaryAck { data, id, count })
             }
-            byte => return Err(ParseError::UnknownPacketType { byte }),
+            byte => return Err(PacketError::InvalidType { byte }),
         };
 
         Ok(packet)
@@ -156,7 +156,7 @@ pub fn write_packet(
 /// count.
 ///
 /// Returns `Some(Ok(count))` when the prefix is present and valid.
-pub fn split_attachments(data: &mut Bytes) -> Option<Result<usize, ParseError>> {
+pub fn split_attachments(data: &mut Bytes) -> Option<Result<usize, PacketError>> {
     let digit_len = data.iter().take_while(|b| b.is_ascii_digit()).count();
     if digit_len == 0 {
         return None;
@@ -167,7 +167,7 @@ pub fn split_attachments(data: &mut Bytes) -> Option<Result<usize, ParseError>> 
     let count = match std::str::from_utf8(&data[..digit_len]) {
         Ok(s) => match s.parse() {
             Ok(n) => n,
-            Err(_) => return Some(Err(ParseError::InvalidAttachmentCount)),
+            Err(e) => return Some(Err(PacketError::InvalidAttachmentCount(e))),
         },
         Err(e) => return Some(Err(e.into())),
     };
@@ -178,7 +178,7 @@ pub fn split_attachments(data: &mut Bytes) -> Option<Result<usize, ParseError>> 
 /// Consumes a `/ns,` prefix and returns the namespace string.
 ///
 /// Returns `"/"` for the default namespace.
-pub fn split_namespace(data: &mut Bytes) -> Result<String, ParseError> {
+pub fn split_namespace(data: &mut Bytes) -> Result<String, PacketError> {
     match data.first() {
         Some(&b'/') => match data.iter().position(|&b| b == b',') {
             Some(i) => {
@@ -186,7 +186,7 @@ pub fn split_namespace(data: &mut Bytes) -> Result<String, ParseError> {
                 data.advance(i + 1);
                 Ok(ns)
             }
-            None => Err(ParseError::MissingNamespaceDelimiter),
+            None => Err(PacketError::MissingNamespaceDelimiter),
         },
         _ => Ok("/".to_string()),
     }
@@ -195,7 +195,7 @@ pub fn split_namespace(data: &mut Bytes) -> Result<String, ParseError> {
 /// Consumes a run of leading ASCII digits from `data` as a `u64`.
 ///
 /// Returns `Some(Ok(id))` when digits are present and fit in `u64`.
-pub fn split_id(data: &mut Bytes) -> Option<Result<u64, ParseError>> {
+pub fn split_id(data: &mut Bytes) -> Option<Result<u64, PacketError>> {
     let i = match data.iter().position(|b| !b.is_ascii_digit()) {
         Some(0) => return None,
         Some(i) => i,
@@ -208,8 +208,10 @@ pub fn split_id(data: &mut Bytes) -> Option<Result<u64, ParseError>> {
     Some(id)
 }
 
-fn parse_id(data: &[u8]) -> Result<u64, ParseError> {
-    Ok(std::str::from_utf8(data)?.parse()?)
+fn parse_id(data: &[u8]) -> Result<u64, PacketError> {
+    std::str::from_utf8(data)?
+        .parse()
+        .map_err(PacketError::InvalidAckId)
 }
 
 #[cfg(test)]
@@ -237,7 +239,7 @@ mod tests {
     fn split_namespace_missing_delimiter() {
         let mut data = Bytes::from_static(b"/chat");
         let err = split_namespace(&mut data).unwrap_err();
-        assert!(matches!(err, ParseError::MissingNamespaceDelimiter));
+        assert!(matches!(err, PacketError::MissingNamespaceDelimiter));
     }
 
     #[test]
@@ -440,7 +442,7 @@ mod tests {
         let err: std::result::Result<Ns<Packet>, _> = data.try_into();
         assert!(matches!(
             err.unwrap_err(),
-            ParseError::UnknownPacketType { byte: b'9' }
+            PacketError::InvalidType { byte: b'9' }
         ));
     }
 
@@ -448,7 +450,7 @@ mod tests {
     fn parse_empty_packet() {
         let data = Bytes::new();
         let err: std::result::Result<Ns<Packet>, _> = data.try_into();
-        assert!(matches!(err.unwrap_err(), ParseError::EmptyPacket));
+        assert!(matches!(err.unwrap_err(), PacketError::Empty));
     }
 
     #[test]
@@ -463,7 +465,7 @@ mod tests {
     fn parse_ack_missing_id() {
         let data = Bytes::from_static(b"3[\"ok\"]");
         let err: std::result::Result<Ns<Packet>, _> = data.try_into();
-        assert!(matches!(err.unwrap_err(), ParseError::MissingAckId));
+        assert!(matches!(err.unwrap_err(), PacketError::MissingAckId));
     }
 
     #[test]
@@ -472,7 +474,7 @@ mod tests {
         let err: std::result::Result<Ns<Packet>, _> = data.try_into();
         assert!(matches!(
             err.unwrap_err(),
-            ParseError::UnexpectedAttachments { count: 1 }
+            PacketError::UnexpectedAttachments { count: 1 }
         ));
     }
 
@@ -509,7 +511,7 @@ mod tests {
         let err: std::result::Result<Ns<Packet>, _> = data.try_into();
         assert!(matches!(
             err.unwrap_err(),
-            ParseError::MissingAttachmentCount
+            PacketError::MissingAttachmentCount
         ));
     }
 
@@ -519,7 +521,7 @@ mod tests {
         let err: std::result::Result<Ns<Packet>, _> = data.try_into();
         assert!(matches!(
             err.unwrap_err(),
-            ParseError::MissingAttachmentCount
+            PacketError::MissingAttachmentCount
         ));
     }
 

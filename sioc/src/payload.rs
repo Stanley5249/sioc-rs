@@ -2,9 +2,9 @@ use crate::ack::AckType;
 use crate::error::PayloadError;
 use crate::event::EventType;
 use serde::ser::SerializeSeq;
-use serde::{Deserialize, Serialize};
-use serde_json::{self, Deserializer};
 use std::marker::PhantomData;
+
+pub use sioc_engine::payload::{deserialize, serialize};
 
 /// Serializes a struct's fields as sequential elements of a JSON array.
 pub trait SerializePayload {
@@ -179,29 +179,4 @@ where
 {
     let AckPayload(ack) = deserialize(data)?;
     Ok(ack)
-}
-
-pub fn serialize<T>(payload: &T) -> Result<Vec<u8>, PayloadError>
-where
-    T: Serialize,
-{
-    let mut bytes = Vec::new();
-    let mut ser = serde_json::Serializer::new(&mut bytes);
-
-    match serde_path_to_error::serialize(payload, &mut ser) {
-        Ok(()) => Ok(bytes),
-        Err(e) => Err(PayloadError::new::<T>(e)),
-    }
-}
-
-pub fn deserialize<'de, T>(data: &'de [u8]) -> Result<T, PayloadError>
-where
-    T: Deserialize<'de>,
-{
-    let mut de = Deserializer::from_slice(data);
-
-    match serde_path_to_error::deserialize(&mut de) {
-        Ok(payload) => Ok(payload),
-        Err(e) => Err(PayloadError::new::<T>(e)),
-    }
 }

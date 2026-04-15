@@ -8,7 +8,7 @@ use bytes::Bytes;
 use sioc_engine::engine::Engine;
 use sioc_engine::transport::TransportStrategy;
 use sioc_engine::websocket::{DefaultWebSocketConnector, WebSocketConnector};
-use sioc_socket::error::Result as CoreResult;
+use sioc_socket::error::ManagerError;
 use sioc_socket::manager::{Manager, ManagerAction, ManagerSender, manager_sink};
 use sioc_socket::packet::{Directive, Signal};
 use tokio::sync::mpsc;
@@ -165,7 +165,7 @@ where
 #[derive(Debug)]
 pub struct Client {
     manager_tx: ManagerSender,
-    manager_handle: JoinHandle<CoreResult<()>>,
+    manager_handle: JoinHandle<Result<(), ManagerError>>,
 }
 
 impl Client {
@@ -250,12 +250,12 @@ impl SocketSender {
         B: BinaryMarker,
     {
         let directive = data.into_directive(id.get())?;
-        Ok(self.send(directive).await?)
+        self.send(directive).await
     }
 
     /// Sends a disconnect packet, closing this namespace on the server.
     pub async fn disconnect(&self) -> Result<(), SocketError> {
-        Ok(self.send(Directive::Disconnect).await?)
+        self.send(Directive::Disconnect).await
     }
 }
 

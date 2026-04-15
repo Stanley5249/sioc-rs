@@ -1,86 +1,93 @@
+#![allow(unused_assignments)] // named fields in #[error("...")] trigger this spuriously
+
 //! Error types for `sioc-socket`.
 
 use crate::packet::{DynAck, Signal};
 use bytes::Bytes;
 use miette::Diagnostic;
-pub use sioc_engine::error::Error as EngineError;
-pub use sioc_engine::prelude::PayloadError;
+use sioc_engine::engine::EngineAction;
 use thiserror::Error;
 use tokio::sync::mpsc;
 
+pub use sioc_engine::error::PayloadError;
+
 /// Errors from decoding a raw Socket.IO packet.
 ///
-/// Callers receive this wrapped in [`Error::Parse`].
+/// Callers receive this wrapped in [`ManagerError::Packet`].
 #[derive(Debug, Error, Diagnostic)]
-pub enum ParseError {
+pub enum PacketError {
     /// No bytes were available to read.
     #[error("packet is empty")]
-    #[diagnostic(code(sioc::parse::empty_packet))]
-    EmptyPacket,
+    #[diagnostic(code(sioc_socket::parse::empty_packet))]
+    Empty,
 
     /// First byte does not map to any known packet type.
     #[error("unknown packet type: {byte:#04x}")]
-    #[diagnostic(code(sioc::parse::unknown_packet_type))]
-    UnknownPacketType { byte: u8 },
+    #[diagnostic(code(sioc_socket::parse::unknown_packet_type))]
+    InvalidType { byte: u8 },
 
     /// Binary packet header has no attachment count before the `-` separator.
     #[error("binary packet missing attachment count prefix")]
-    #[diagnostic(code(sioc::parse::missing_attachment_count))]
+    #[diagnostic(code(sioc_socket::parse::missing_attachment_count))]
     MissingAttachmentCount,
+
+    /// Text event packet carries a non-zero attachment count.
+    #[error("text event packet has unexpected attachment count ({count})")]
+    #[diagnostic(code(sioc_socket::parse::unexpected_attachments))]
+    UnexpectedAttachments { count: usize },
 
     /// Attachment count prefix is present but not a valid integer.
     #[error("attachment count is not a valid integer")]
-    #[diagnostic(code(sioc::parse::invalid_attachment_count))]
-    InvalidAttachmentCount,
+    #[diagnostic(code(sioc_socket::parse::invalid_attachment_count))]
+    InvalidAttachmentCount(#[source] std::num::ParseIntError),
 
     /// Non-default namespace is missing the `,` delimiter after the path.
     #[error("namespace missing trailing `,` delimiter")]
-    #[diagnostic(code(sioc::parse::missing_namespace_delimiter))]
+    #[diagnostic(code(sioc_socket::parse::missing_namespace_delimiter))]
     MissingNamespaceDelimiter,
 
     /// Ack packet has no numeric ID field.
     #[error("ack packet missing numeric ID")]
-    #[diagnostic(code(sioc::parse::missing_ack_id))]
+    #[diagnostic(code(sioc_socket::parse::missing_ack_id))]
     MissingAckId,
 
     /// Ack ID field is present but not a valid integer.
     #[error("packet ID is not a valid integer")]
-    #[diagnostic(code(sioc::parse::invalid_ack_id))]
-    InvalidAckId {
-        #[from]
-        source: std::num::ParseIntError,
-    },
-
-    /// Text event packet carries a non-zero attachment count.
-    #[error("text event packet has unexpected attachment count ({count})")]
-    #[diagnostic(code(sioc::parse::unexpected_attachments))]
-    UnexpectedAttachments { count: usize },
-
-    /// Packet bytes are not valid UTF-8.
-    #[error("invalid UTF-8 in packet")]
-    #[diagnostic(code(sioc::parse::utf8))]
-    Utf8 {
-        #[from]
-        source: std::str::Utf8Error,
-    },
+    #[diagnostic(code(sioc_socket::parse::invalid_ack_id))]
+    InvalidAckId(#[source] std::num::ParseIntError),
 
     /// JSON payload array in the packet is invalid.
     #[error("invalid JSON in packet")]
-    #[diagnostic(code(sioc::parse::json))]
+    #[diagnostic(code(sioc_socket::parse::json))]
     Payload(#[from] PayloadError),
+
+    /// Packet bytes are not valid UTF-8.
+    #[error("invalid UTF-8 in packet")]
+    #[diagnostic(code(sioc_socket::parse::utf8))]
+    Utf8(#[from] std::str::Utf8Error),
 }
 
-/// The top-level error type for all `sioc-socket` public APIs.
+/// The top-level error type for `sioc-socket` manager operations.
 #[derive(Debug, Error, Diagnostic)]
-pub enum Error {
+pub enum ManagerError {
     /// Error propagated from the Engine.IO transport layer.
     #[error(transparent)]
     #[diagnostic(transparent)]
-    Engine(#[from] EngineError),
+    Engine(#[from] sioc_engine::error::Error),
+
+    #[error("manager send failed")]
+    #[diagnostic(
+        code(sioc_socket::manager::send_action),
+        help("the receiver was dropped; the socket is probably shut down")
+    )]
+    SendAction(#[from] mpsc::error::SendError<EngineAction>),
 
     /// Inbound packet delivery to a namespace channel failed.
     #[error("manager send failed for namespace `{ns}`")]
-    #[diagnostic(code(sioc::manager_send))]
+    #[diagnostic(
+        code(sioc_socket::manager::send_packet),
+        help("the receiver was dropped; the socket is probably shut down")
+    )]
     SendPacket {
         ns: String,
         #[source]
@@ -89,44 +96,60 @@ pub enum Error {
 
     /// Ack response channel was closed before the server replied.
     #[error("ack channel closed for namespace `{ns}`")]
-    #[diagnostic(code(sioc::ack_closed))]
+    #[diagnostic(
+        code(sioc_socket::manager::send_ack),
+        help("the ack sender was dropped; the namespace may have disconnected")
+    )]
     SendAck { ns: String, ack: DynAck },
 
-    /// Outbound directive send to the manager failed.
-    #[error("failed to send directive to manager")]
-    #[diagnostic(code(sioc::manager_action_send))]
-    SendAction(#[from] mpsc::error::SendError<crate::manager::ManagerAction>),
-
-    /// Wraps a [`ParseError`] from packet decoding.
+    /// Wraps a [`PacketError`] from packet decoding.
     #[error(transparent)]
     #[diagnostic(transparent)]
-    Parse(#[from] ParseError),
+    Packet(#[from] PacketError),
 
     /// Received a text frame while a binary reassembly was in progress.
     #[error("unexpected text frame: {0:?}")]
-    #[diagnostic(code(sioc::unexpected_packet))]
+    #[diagnostic(
+        code(sioc_socket::unexpected_text),
+        help(
+            "the server sent a text frame while binary reassembly was in progress; likely a server protocol bug"
+        )
+    )]
     UnexpectedText(Bytes),
 
     /// Received a binary frame with no pending reassembly.
     #[error("unexpected binary frame: {0:?}")]
-    #[diagnostic(code(sioc::unexpected_binary_packet))]
+    #[diagnostic(
+        code(sioc_socket::unexpected_binary),
+        help(
+            "the server sent a binary frame while no reassembly was pending; likely a server protocol bug"
+        )
+    )]
     UnexpectedBinary(Bytes),
 
     /// Packet addressed to a namespace that is not open.
     #[error("packet for unknown namespace `{ns}`")]
-    #[diagnostic(code(sioc::packet_unknown_namespace))]
+    #[diagnostic(
+        code(sioc_socket::unknown_namespace),
+        help("connect the namespace before sending or receiving on it")
+    )]
     UnknownNamespace { ns: String },
 
     /// Ack ID in a server response has no registered handler.
     #[error("ack for unknown ID {id} in namespace `{ns}`")]
-    #[diagnostic(code(sioc::ack_unknown_id))]
+    #[diagnostic(
+        code(sioc_socket::unknown_ack_id),
+        help(
+            "the server sent an ack for an unregistered ID; the server may be replying to an already-acknowledged event"
+        )
+    )]
     UnknownAckId { ns: String, id: u64 },
 
     /// A `Connect` packet was sent for a namespace already open.
     #[error("namespace conflict: `{ns}`")]
-    #[diagnostic(code(sioc::namespace_conflict))]
+    #[diagnostic(
+        code(sioc_socket::namespace_conflict),
+        help("the namespace is already open; drop the existing handle before reconnecting")
+    )]
     NamespaceConflict { ns: String },
 }
-
-/// Result alias for all `sioc-socket` operations.
-pub type Result<T, E = Error> = std::result::Result<T, E>;
