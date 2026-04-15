@@ -192,10 +192,6 @@ pub async fn websocket_loop(
         tokio::select! {
             _ = token.cancelled() => {
                 tracing::debug!("cancelling websocket");
-                stream
-                    .close(None)
-                    .await
-                    .map_err(WebSocketError::Tungstenite)?;
                 break;
             },
 
@@ -237,6 +233,24 @@ pub async fn websocket_loop(
             }
         };
     }
+
+    // Drain frames queued before the engine exited so the disconnect
+    // packet is not silently dropped by a concurrent cancellation.
+    while let Some(frame) = transport_rx.recv().await {
+        let message = encode_frame(frame)?;
+
+        tracing::trace!(frame = %message, "draining message");
+
+        stream
+            .send(message)
+            .await
+            .map_err(WebSocketError::Tungstenite)?;
+    }
+
+    stream
+        .close(None)
+        .await
+        .map_err(WebSocketError::Tungstenite)?;
 
     Ok(())
 }

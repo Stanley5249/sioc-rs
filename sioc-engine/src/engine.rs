@@ -104,6 +104,10 @@ impl Engine {
         }
     }
 
+    /// Awaits the engine and transport tasks.
+    ///
+    /// The caller must send [`Transit::Close`] before calling this so the engine
+    /// exits naturally and the drop guard propagates cancellation to the transport.
     pub async fn join(self) -> Result<(), Error> {
         let (engine_result, transport_result) =
             tokio::join!(self.engine_handle, self.transport_handle);
