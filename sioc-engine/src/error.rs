@@ -153,11 +153,6 @@ pub enum TransportError {
     #[diagnostic(transparent)]
     Packet(#[from] PacketError),
 
-    /// A WebSocket text frame contained invalid UTF-8.
-    #[error("invalid UTF-8 in WebSocket frame")]
-    #[diagnostic(code(sioc_engine::transport::websocket::utf8))]
-    Utf8(#[from] std::str::Utf8Error),
-
     /// Handshake data could not be forwarded to the engine task.
     #[error("failed to send handshake to engine task")]
     #[diagnostic(
@@ -200,6 +195,11 @@ pub enum WebSocketError {
     #[diagnostic(code(sioc_engine::transport::websocket))]
     Tungstenite(#[from] tokio_tungstenite::tungstenite::Error),
 
+    /// An outbound packet could not be encoded as a UTF-8 WebSocket text frame.
+    #[error("packet encoding produced invalid UTF-8")]
+    #[diagnostic(code(sioc_engine::transport::websocket::utf8))]
+    Utf8(#[from] std::str::Utf8Error),
+
     /// The WebSocket stream ended without a close frame.
     #[error("WebSocket stream closed unexpectedly")]
     #[diagnostic(
@@ -218,17 +218,17 @@ pub enum PollingError {
     Http(#[from] reqwest::Error),
 
     /// HTTP polling POST returned a non-`ok` response body.
-    #[error("unexpected polling response: {response}")]
+    #[error("unexpected polling response: {0}")]
     #[diagnostic(
         code(sioc_engine::transport::unexpected_response),
         help(
             "the server returned an unexpected body; verify the server implementation and Engine.IO version"
         )
     )]
-    UnexpectedResponse { response: String },
+    Response(String),
 
     /// Binary attachment is not valid base64.
     #[error("base64 decode error")]
-    #[diagnostic(code(sioc_engine::packet::base64))]
+    #[diagnostic(code(sioc_engine::transport::polling::base64))]
     Base64(#[from] base64::DecodeError),
 }

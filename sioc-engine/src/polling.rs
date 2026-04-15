@@ -114,7 +114,7 @@ async fn polling_post(
             .map_err(PollingError::Http)?;
 
         if !response.eq_ignore_ascii_case("ok") {
-            return Err(PollingError::UnexpectedResponse { response }.into());
+            return Err(PollingError::Response(response).into());
         }
     }
 

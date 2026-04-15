@@ -56,8 +56,8 @@ pub enum PacketError {
     #[diagnostic(code(sioc_socket::parse::invalid_ack_id))]
     InvalidAckId(#[source] std::num::ParseIntError),
 
-    /// JSON payload array in the packet is invalid.
-    #[error("invalid JSON in packet")]
+    /// JSON payload in the packet is malformed.
+    #[error(transparent)]
     #[diagnostic(code(sioc_socket::parse::json))]
     Payload(#[from] PayloadError),
 
@@ -75,7 +75,8 @@ pub enum ManagerError {
     #[diagnostic(transparent)]
     Engine(#[from] sioc_engine::error::Error),
 
-    #[error("manager send failed")]
+    /// Sending an action to the engine layer failed because the channel is closed.
+    #[error("engine action channel closed")]
     #[diagnostic(
         code(sioc_socket::manager::send_action),
         help("the receiver was dropped; the socket is probably shut down")
