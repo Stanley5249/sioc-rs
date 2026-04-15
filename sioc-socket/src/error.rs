@@ -95,11 +95,11 @@ pub enum ManagerError {
         source: mpsc::error::SendError<Signal>,
     },
 
-    /// Ack response channel was closed before the server replied.
+    /// Server ack arrived but the caller's receiver was already dropped.
     #[error("ack channel closed for namespace `{ns}`")]
     #[diagnostic(
         code(sioc_socket::manager::send_ack),
-        help("the ack sender was dropped; the namespace may have disconnected")
+        help("the ack receiver was dropped; the namespace may have disconnected")
     )]
     SendAck { ns: String, ack: DynAck },
 
@@ -128,8 +128,8 @@ pub enum ManagerError {
     )]
     UnexpectedBinary(Bytes),
 
-    /// Packet addressed to a namespace that is not open.
-    #[error("packet for unknown namespace `{ns}`")]
+    /// Operation on a namespace that is not open.
+    #[error("unknown namespace `{ns}`")]
     #[diagnostic(
         code(sioc_socket::unknown_namespace),
         help("connect the namespace before sending or receiving on it")
@@ -146,7 +146,7 @@ pub enum ManagerError {
     )]
     UnknownAckId { ns: String, id: u64 },
 
-    /// A `Connect` packet was sent for a namespace already open.
+    /// Attempted to open a namespace that is already open.
     #[error("namespace conflict: `{ns}`")]
     #[diagnostic(
         code(sioc_socket::namespace_conflict),
