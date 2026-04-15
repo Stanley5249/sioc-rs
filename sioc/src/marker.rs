@@ -36,7 +36,10 @@ impl AckMarker for NoAck {
     type Id = ();
 
     fn parse(ack_id: Option<u64>) -> Result<Self::Id, AckIdError> {
-        ack_id.map_or(Ok(()), |_| Err(AckIdError::Unexpected))
+        match ack_id {
+            Some(_) => Err(AckIdError::Unexpected),
+            None => Ok(()),
+        }
     }
 }
 
