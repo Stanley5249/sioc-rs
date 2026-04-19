@@ -38,29 +38,29 @@ pub enum ClientBuilderError {
 /// Error returned by [`Client::join`](crate::client::Client::join).
 #[derive(Debug, Error, Diagnostic)]
 pub enum ClientError {
-    /// Background manager task panicked or was cancelled.
-    #[error("failed to join socket manager task")]
-    #[diagnostic(code(sioc::client::join))]
-    Join(#[from] JoinError),
-
     /// Error propagated from the socket manager.
     #[error(transparent)]
     #[diagnostic(transparent)]
     Manager(#[from] sioc_socket::error::ManagerError),
+
+    /// Background manager task panicked or was cancelled.
+    #[error("failed to join socket manager task")]
+    #[diagnostic(code(sioc::client::join))]
+    Join(#[from] JoinError),
 }
 
 /// Error returned by [`SocketSender`](crate::client::SocketSender) operations.
 #[derive(Debug, Error, Diagnostic)]
 pub enum SocketError {
-    /// Event payload serialization failed.
-    #[error("failed to serialize payload")]
-    #[diagnostic(code(sioc::socket::payload))]
-    Payload(#[from] PayloadError),
-
     /// Directive channel to the socket manager is closed.
     #[error("failed to send directive to socket manager")]
     #[diagnostic(code(sioc::socket::send))]
     Send(#[from] mpsc::error::SendError<Ns<Directive>>),
+
+    /// Event payload serialization failed.
+    #[error("failed to serialize payload")]
+    #[diagnostic(code(sioc::socket::payload))]
+    Payload(#[from] PayloadError),
 }
 
 /// Error converting a [`DynEvent`](sioc_socket::packet::DynEvent) into a typed [`Event`](crate::event::Event).
@@ -85,6 +85,14 @@ pub enum EventError {
 /// Error returned when receiving or parsing a typed acknowledgement.
 #[derive(Debug, Error, Diagnostic)]
 pub enum AckError {
+    /// Server dropped the ack channel before responding.
+    #[error("failed to receive ack")]
+    #[diagnostic(
+        code(sioc::ack::recv),
+        help("the ack sender was dropped before responding; the connection may have been lost")
+    )]
+    Recv(#[from] oneshot::error::RecvError),
+
     /// Ack payload deserialization failed.
     #[error("failed to parse ack payload")]
     #[diagnostic(code(sioc::ack::payload))]
@@ -94,14 +102,6 @@ pub enum AckError {
     #[error("invalid attachments for the ack type")]
     #[diagnostic(code(sioc::ack::attachments))]
     Attachments(#[from] AttachmentsError),
-
-    /// Server dropped the ack channel before responding.
-    #[error("failed to receive ack")]
-    #[diagnostic(
-        code(sioc::ack::recv),
-        help("the ack sender was dropped before responding; the connection may have been lost")
-    )]
-    Recv(#[from] oneshot::error::RecvError),
 }
 
 /// Ack ID presence mismatch between the inbound packet and the event type's policy.

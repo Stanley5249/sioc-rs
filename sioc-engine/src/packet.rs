@@ -9,7 +9,7 @@ pub const PROBE: Bytes = Bytes::from_static(b"probe");
 
 /// Content exchanged between the Socket.IO and Engine.IO layers.
 #[derive(Clone, PartialEq, Eq)]
-pub enum Transit {
+pub enum Message {
     /// A UTF-8 text payload.
     Text(Bytes),
     /// A raw binary payload.
@@ -18,7 +18,7 @@ pub enum Transit {
     Close,
 }
 
-impl std::fmt::Debug for Transit {
+impl std::fmt::Debug for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Text(bytes) => f.debug_tuple("Text").field(bytes).finish(),

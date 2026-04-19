@@ -1,7 +1,7 @@
 //! Engine.IO protocol task.
 
 use crate::error::{BoxedError, EngineError, Error, TransportError};
-use crate::packet::{Frame, Handshake, Packet, Transit};
+use crate::packet::{Frame, Handshake, Packet, Message};
 use crate::transport::TransportStrategy;
 use crate::websocket::WebSocketConnector;
 use futures_util::{Sink, SinkExt};
@@ -18,7 +18,7 @@ pub enum EngineAction {
     /// An inbound frame from the transport layer.
     Transport(Frame),
     /// An outbound message from the upper layer.
-    Sink(Transit),
+    Sink(Message),
 }
 
 impl From<Frame> for EngineAction {
@@ -27,9 +27,9 @@ impl From<Frame> for EngineAction {
     }
 }
 
-impl From<Transit> for EngineAction {
-    fn from(transit: Transit) -> Self {
-        Self::Sink(transit)
+impl From<Message> for EngineAction {
+    fn from(message: Message) -> Self {
+        Self::Sink(message)
     }
 }
 
@@ -59,7 +59,7 @@ pub struct Engine {
 impl Engine {
     /// Spawns the engine and transport tasks and returns handles to both.
     ///
-    /// `sink` receives decoded inbound [`Transit`]s from the transport.
+    /// `sink` receives decoded inbound [`Message`]s from the transport.
     pub fn connect<C, S>(
         url: Url,
         http_client: reqwest::Client,
@@ -69,7 +69,7 @@ impl Engine {
     ) -> Self
     where
         C: WebSocketConnector,
-        S: Sink<Transit, Error = BoxedError> + Unpin + Send + 'static,
+        S: Sink<Message, Error = BoxedError> + Unpin + Send + 'static,
     {
         let (engine_tx, engine_rx) = mpsc::channel(32);
         let (transport_tx, transport_rx) = mpsc::channel(32);
@@ -106,13 +106,13 @@ impl Engine {
 
     /// Awaits the engine and transport tasks.
     ///
-    /// The caller must send [`Transit::Close`] before calling this so the engine
+    /// The caller must send [`Message::Close`] before calling this so the engine
     /// exits naturally and the drop guard propagates cancellation to the transport.
     pub async fn join(self) -> Result<(), Error> {
         let (engine_result, transport_result) =
             tokio::join!(self.engine_handle, self.transport_handle);
-        engine_result.map_err(EngineError::Task)??;
-        transport_result.map_err(TransportError::Task)??;
+        engine_result.map_err(EngineError::Join)??;
+        transport_result.map_err(TransportError::Join)??;
         Ok(())
     }
 }
@@ -144,7 +144,7 @@ async fn engine_loop<S>(
     token: CancellationToken,
 ) -> Result<(), EngineError>
 where
-    S: Sink<Transit, Error = BoxedError> + Unpin,
+    S: Sink<Message, Error = BoxedError> + Unpin,
 {
     // Ensure the transport shuts down whenever the engine exits, regardless of the reason.
     let _guard = token.drop_guard();
@@ -180,9 +180,9 @@ where
                             heartbeat.reset();
                         }
                         Packet::Message(data) => {
-                            sink.send(Transit::Text(data))
+                            sink.send(Message::Text(data))
                                 .await
-                                .map_err(EngineError::SendTransit)?;
+                                .map_err(EngineError::SendSink)?;
                         }
                         Packet::Noop => {}
 
@@ -197,22 +197,22 @@ where
                 Frame::Binary(data) => {
                     tracing::trace!(len = data.len(), "received binary");
 
-                    sink.send(Transit::Binary(data))
+                    sink.send(Message::Binary(data))
                         .await
-                        .map_err(EngineError::SendTransit)?;
+                        .map_err(EngineError::SendSink)?;
                 }
             },
             EngineAction::Sink(message) => match message {
-                Transit::Text(bytes) => {
+                Message::Text(bytes) => {
                     let packet = Packet::Message(bytes);
                     tracing::trace!(?packet, "sending packet");
                     transport_tx.send(packet.into()).await?;
                 }
-                Transit::Binary(bytes) => {
+                Message::Binary(bytes) => {
                     tracing::trace!(len = bytes.len(), "sending binary");
                     transport_tx.send(bytes.into()).await?;
                 }
-                Transit::Close => {
+                Message::Close => {
                     tracing::debug!("client closed");
                     break;
                 }

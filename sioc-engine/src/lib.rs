@@ -2,7 +2,7 @@
 //!
 //! Engine.IO is the low-level transport protocol underneath Socket.IO.
 //! It negotiates a connection (HTTP long-polling or WebSocket), manages
-//! heartbeats, and delivers raw [`Transit`](packet::Transit) frames.
+//! heartbeats, and delivers raw [`Message`](packet::Message) frames.
 //! Most users will never touch this crate directly — the higher-level
 //! `sioc-socket` and `sioc` crates build on top of it.
 //!
@@ -39,7 +39,7 @@ pub const ENGINE_IO_VERSION: u64 = 4;
 /// Convenience re-exports for common usage.
 pub mod prelude {
     pub use crate::engine::{EngineAction, EngineSender};
-    pub use crate::packet::{Handshake, Packet, Transit};
+    pub use crate::packet::{Handshake, Packet, Message};
     pub use crate::transport::TransportStrategy;
     pub use crate::websocket::{DefaultWebSocketConnector, WebSocketConnector, WebSocketStream};
 }

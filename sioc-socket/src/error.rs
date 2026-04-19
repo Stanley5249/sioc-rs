@@ -16,6 +16,16 @@ pub use sioc_engine::error::PayloadError;
 /// Callers receive this wrapped in [`ManagerError::Packet`].
 #[derive(Debug, Error, Diagnostic)]
 pub enum PacketError {
+    /// JSON payload in the packet is malformed.
+    #[error(transparent)]
+    #[diagnostic(code(sioc_socket::parse::json))]
+    Payload(#[from] PayloadError),
+
+    /// Packet bytes are not valid UTF-8.
+    #[error("invalid UTF-8 in packet")]
+    #[diagnostic(code(sioc_socket::parse::utf8))]
+    Utf8(#[from] std::str::Utf8Error),
+
     /// No bytes were available to read.
     #[error("packet is empty")]
     #[diagnostic(code(sioc_socket::parse::empty_packet))]
@@ -55,16 +65,6 @@ pub enum PacketError {
     #[error("packet ID is not a valid integer")]
     #[diagnostic(code(sioc_socket::parse::invalid_ack_id))]
     InvalidAckId(#[source] std::num::ParseIntError),
-
-    /// JSON payload in the packet is malformed.
-    #[error(transparent)]
-    #[diagnostic(code(sioc_socket::parse::json))]
-    Payload(#[from] PayloadError),
-
-    /// Packet bytes are not valid UTF-8.
-    #[error("invalid UTF-8 in packet")]
-    #[diagnostic(code(sioc_socket::parse::utf8))]
-    Utf8(#[from] std::str::Utf8Error),
 }
 
 /// The top-level error type for `sioc-socket` manager operations.
@@ -75,21 +75,26 @@ pub enum ManagerError {
     #[diagnostic(transparent)]
     Engine(#[from] sioc_engine::error::Error),
 
+    /// Wraps a [`PacketError`] from packet decoding.
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Packet(#[from] PacketError),
+
     /// Sending an action to the engine layer failed because the channel is closed.
     #[error("engine action channel closed")]
     #[diagnostic(
-        code(sioc_socket::manager::send_action),
+        code(sioc_socket::manager::send_engine),
         help("the receiver was dropped; the socket is probably shut down")
     )]
-    SendAction(#[from] mpsc::error::SendError<EngineAction>),
+    SendEngine(#[from] mpsc::error::SendError<EngineAction>),
 
     /// Inbound packet delivery to a namespace channel failed.
     #[error("manager send failed for namespace `{ns}`")]
     #[diagnostic(
-        code(sioc_socket::manager::send_packet),
+        code(sioc_socket::manager::send_socket),
         help("the receiver was dropped; the socket is probably shut down")
     )]
-    SendPacket {
+    SendSocket {
         ns: String,
         #[source]
         source: mpsc::error::SendError<Signal>,
@@ -103,15 +108,10 @@ pub enum ManagerError {
     )]
     SendAck { ns: String, ack: DynAck },
 
-    /// Wraps a [`PacketError`] from packet decoding.
-    #[error(transparent)]
-    #[diagnostic(transparent)]
-    Packet(#[from] PacketError),
-
     /// Received a text frame while a binary reassembly was in progress.
     #[error("unexpected text frame: {0:?}")]
     #[diagnostic(
-        code(sioc_socket::unexpected_text),
+        code(sioc_socket::manager::unexpected_text),
         help(
             "the server sent a text frame while binary reassembly was in progress; likely a server protocol bug"
         )
@@ -121,7 +121,7 @@ pub enum ManagerError {
     /// Received a binary frame with no pending reassembly.
     #[error("unexpected binary frame: {0:?}")]
     #[diagnostic(
-        code(sioc_socket::unexpected_binary),
+        code(sioc_socket::manager::unexpected_binary),
         help(
             "the server sent a binary frame while no reassembly was pending; likely a server protocol bug"
         )
@@ -131,7 +131,7 @@ pub enum ManagerError {
     /// Operation on a namespace that is not open.
     #[error("unknown namespace `{ns}`")]
     #[diagnostic(
-        code(sioc_socket::unknown_namespace),
+        code(sioc_socket::manager::unknown_namespace),
         help("connect the namespace before sending or receiving on it")
     )]
     UnknownNamespace { ns: String },
@@ -139,7 +139,7 @@ pub enum ManagerError {
     /// Ack ID in a server response has no registered handler.
     #[error("ack for unknown ID {id} in namespace `{ns}`")]
     #[diagnostic(
-        code(sioc_socket::unknown_ack_id),
+        code(sioc_socket::manager::unknown_ack_id),
         help(
             "the server sent an ack for an unregistered ID; the server may be replying to an already-acknowledged event"
         )
@@ -149,7 +149,7 @@ pub enum ManagerError {
     /// Attempted to open a namespace that is already open.
     #[error("namespace conflict: `{ns}`")]
     #[diagnostic(
-        code(sioc_socket::namespace_conflict),
+        code(sioc_socket::manager::namespace_conflict),
         help("the namespace is already open; drop the existing handle before reconnecting")
     )]
     NamespaceConflict { ns: String },

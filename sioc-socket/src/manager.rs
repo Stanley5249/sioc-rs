@@ -7,15 +7,15 @@ use bytes::Bytes;
 use futures_util::{Sink, SinkExt, future};
 use sioc_engine::engine::{Engine, EngineSender};
 use sioc_engine::error::BoxedError;
-use sioc_engine::prelude::Transit;
+use sioc_engine::prelude::Message;
 use std::collections::BTreeMap;
 use std::collections::hash_map::{Entry, HashMap};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::PollSender;
 
-/// Creates a [`Sink<Transit>`] that maps each [`Transit`] to a [`ManagerAction`] and sends it.
-pub fn manager_sink(tx: mpsc::Sender<ManagerAction>) -> impl Sink<Transit, Error = BoxedError> {
-    PollSender::new(tx).with(|transit: Transit| future::ok(transit.into()))
+/// Creates a [`Sink<Message>`] that maps each [`Message`] to a [`ManagerAction`] and sends it.
+pub fn manager_sink(tx: mpsc::Sender<ManagerAction>) -> impl Sink<Message, Error = BoxedError> {
+    PollSender::new(tx).with(|message: Message| future::ok(message.into()))
 }
 
 #[derive(Debug)]
@@ -23,7 +23,7 @@ pub enum ManagerAction {
     /// Outbound directive from the client.
     Socket(Ns<Directive>),
     /// Inbound message from the engine.
-    Engine(Transit),
+    Engine(Message),
 }
 
 impl ManagerAction {
@@ -41,8 +41,8 @@ impl From<Ns<Directive>> for ManagerAction {
     }
 }
 
-impl From<Transit> for ManagerAction {
-    fn from(message: Transit) -> Self {
+impl From<Message> for ManagerAction {
+    fn from(message: Message) -> Self {
         ManagerAction::Engine(message)
     }
 }
@@ -98,7 +98,7 @@ impl Socket {
     async fn send_packet(&mut self, ns: String, packet: Signal) -> Result<String, ManagerError> {
         match self.tx.send(packet).await {
             Ok(()) => Ok(ns),
-            Err(source) => Err(ManagerError::SendPacket { ns, source }),
+            Err(source) => Err(ManagerError::SendSocket { ns, source }),
         }
     }
 
@@ -278,7 +278,7 @@ struct Socket {
     // Set when the server sends a CONNECT response; gates event delivery.
     connected: bool,
     // Events encoded before `connected` is set; flushed on CONNECT response.
-    buffer: Vec<Transit>,
+    buffer: Vec<Message>,
 }
 
 /// Routes packets between the Socket.IO API and the engine.IO transport.
@@ -310,7 +310,7 @@ impl Manager {
                 }
             }
             if self.sockets.is_empty() {
-                engine.tx.send(Transit::Close).await?;
+                engine.tx.send(Message::Close).await?;
                 break;
             }
         }
@@ -387,8 +387,8 @@ impl Manager {
 
         tracing::trace!(ns, ?packet, "sending packet");
 
-        let text = Transit::Text(packet.encode(&ns));
-        let binaries = attachments.into_iter().flatten().map(Transit::Binary);
+        let text = Message::Text(packet.encode(&ns));
+        let binaries = attachments.into_iter().flatten().map(Message::Binary);
         let messages = std::iter::once(text).chain(binaries);
 
         match socket_buffer {
@@ -409,18 +409,18 @@ impl Manager {
     async fn route_message(
         &mut self,
         engine_tx: &EngineSender,
-        message: Transit,
+        message: Message,
     ) -> Result<(), ManagerError> {
         match message {
-            Transit::Text(bytes) => {
+            Message::Text(bytes) => {
                 self.route_text_message(bytes, engine_tx).await?;
             }
 
-            Transit::Binary(attachment) => {
+            Message::Binary(attachment) => {
                 self.route_binary_message(attachment).await?;
             }
 
-            Transit::Close => {
+            Message::Close => {
                 tracing::debug!("closing all namespaces");
                 self.sockets.close();
             }
@@ -570,7 +570,7 @@ mod tests {
 
     async fn server_connect(manager_tx: &mpsc::Sender<ManagerAction>) {
         manager_tx
-            .send(ManagerAction::Engine(Transit::Text(Bytes::from_static(
+            .send(ManagerAction::Engine(Message::Text(Bytes::from_static(
                 CONNECT_RESPONSE,
             ))))
             .await
@@ -633,7 +633,7 @@ mod tests {
         for _ in 0..3 {
             assert!(matches!(
                 engine_rx.recv().await.unwrap(),
-                EngineAction::Sink(Transit::Text(_))
+                EngineAction::Sink(Message::Text(_))
             ));
         }
         assert!(matches!(
@@ -657,11 +657,11 @@ mod tests {
 
         assert!(matches!(
             engine_rx.recv().await.unwrap(),
-            EngineAction::Sink(Transit::Text(_))
+            EngineAction::Sink(Message::Text(_))
         ));
         assert!(matches!(
             engine_rx.recv().await.unwrap(),
-            EngineAction::Sink(Transit::Close)
+            EngineAction::Sink(Message::Close)
         ));
 
         drop(manager_tx);
@@ -757,7 +757,7 @@ mod tests {
         engine_rx.recv().await.unwrap(); // drain outbound event frame
 
         manager_tx
-            .send(ManagerAction::Engine(Transit::Text(Bytes::from_static(
+            .send(ManagerAction::Engine(Message::Text(Bytes::from_static(
                 b"30[\"world\"]",
             ))))
             .await
@@ -778,14 +778,14 @@ mod tests {
         socket_rx.recv().await.unwrap(); // consume Packet::Connect
 
         manager_tx
-            .send(ManagerAction::Engine(Transit::Text(Bytes::from_static(
+            .send(ManagerAction::Engine(Message::Text(Bytes::from_static(
                 b"52-[\"img\"]",
             ))))
             .await
             .unwrap();
 
         manager_tx
-            .send(ManagerAction::Engine(Transit::Binary(Bytes::from_static(
+            .send(ManagerAction::Engine(Message::Binary(Bytes::from_static(
                 b"\x01\x02",
             ))))
             .await
@@ -798,7 +798,7 @@ mod tests {
         );
 
         manager_tx
-            .send(ManagerAction::Engine(Transit::Binary(Bytes::from_static(
+            .send(ManagerAction::Engine(Message::Binary(Bytes::from_static(
                 b"\x03\x04",
             ))))
             .await

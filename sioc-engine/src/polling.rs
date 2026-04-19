@@ -106,12 +106,12 @@ async fn polling_post(
             .body(request)
             .send()
             .await
-            .map_err(PollingError::Http)?
+            .map_err(PollingError::Reqwest)?
             .error_for_status()
-            .map_err(PollingError::Http)?
+            .map_err(PollingError::Reqwest)?
             .text()
             .await
-            .map_err(PollingError::Http)?;
+            .map_err(PollingError::Reqwest)?;
 
         if !response.eq_ignore_ascii_case("ok") {
             return Err(PollingError::Response(response).into());
@@ -136,12 +136,12 @@ async fn polling_get(
             .get(url.as_str())
             .send()
             .await
-            .map_err(PollingError::Http)?
+            .map_err(PollingError::Reqwest)?
             .error_for_status()
-            .map_err(PollingError::Http)?
+            .map_err(PollingError::Reqwest)?
             .bytes()
             .await
-            .map_err(PollingError::Http)?;
+            .map_err(PollingError::Reqwest)?;
 
         tracing::trace!(?response, "received GET");
 
@@ -176,12 +176,12 @@ where
         .get(url.clone())
         .send()
         .await
-        .map_err(PollingError::Http)?
+        .map_err(PollingError::Reqwest)?
         .error_for_status()
-        .map_err(PollingError::Http)?
+        .map_err(PollingError::Reqwest)?
         .bytes()
         .await
-        .map_err(PollingError::Http)?;
+        .map_err(PollingError::Reqwest)?;
 
     let handshake = match decode_frame(bytes)? {
         Frame::Packet(Packet::Open(handshake)) => handshake,
