@@ -13,23 +13,23 @@ categories = ["network-programming", "asynchronous", "web-programming"]
 
 [dependencies]
 # Workspace dependencies
+sioc-engine.workspace = true
+sioc-macros.workspace = true
+sioc-socket.workspace = true
+
 bytes.workspace = true
 futures-util.workspace = true
 miette.workspace = true
-pin-project = "1.1.11"
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_path_to_error.workspace = true
-sioc-socket.workspace = true
-sioc-engine.workspace = true
-sioc-macros.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 url.workspace = true
+
+pin-project = "1.1.11"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
-
-[features]
-default = []

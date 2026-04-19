@@ -4,13 +4,13 @@ use crate::ack::AckType;
 use crate::error::{ClientBuilderError, ClientError, PayloadError, SocketError};
 use crate::marker::{AckId, AckMarker, BinaryMarker};
 use bytes::Bytes;
-
 use sioc_engine::engine::Engine;
 use sioc_engine::transport::TransportStrategy;
 use sioc_engine::websocket::{DefaultWebSocketConnector, WebSocketConnector};
 use sioc_socket::error::ManagerError;
 use sioc_socket::manager::{Manager, ManagerAction, ManagerSender, manager_sink};
 use sioc_socket::packet::{Directive, Signal};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use url::Url;
@@ -155,8 +155,8 @@ where
         let manager_handle = tokio::spawn(manager.run(engine));
 
         Ok(Client {
-            manager_tx: ManagerSender(manager_tx),
-            manager_handle,
+            tx: ManagerSender::new(manager_tx),
+            handle: manager_handle,
         })
     }
 }
@@ -164,8 +164,8 @@ where
 /// A connected Socket.IO client.
 #[derive(Debug)]
 pub struct Client {
-    manager_tx: ManagerSender,
-    manager_handle: JoinHandle<Result<(), ManagerError>>,
+    tx: ManagerSender,
+    handle: JoinHandle<Result<(), ManagerError>>,
 }
 
 impl Client {
@@ -176,7 +176,7 @@ impl Client {
 
     /// Opens a namespace and returns a sender/receiver pair.
     ///
-    /// The namespace is not confirmed until a [`Packet::Connect`] arrives on the [`SocketReceiver`].
+    /// The namespace is not confirmed until a [`Signal::Connect`] arrives on the [`SocketReceiver`].
     pub async fn connect(
         &self,
         ns: impl Into<String>,
@@ -192,10 +192,8 @@ impl Client {
     ) -> Result<(SocketSender, SocketReceiver), SocketError> {
         let (tx, rx) = mpsc::channel(32);
 
-        let socket_tx = SocketSender {
-            ns: ns.into(),
-            manager_tx: self.manager_tx.clone(),
-        };
+        let socket_tx = SocketSender::new(ns.into(), self.tx.clone());
+
         let socket_rx = SocketReceiver { rx };
 
         let directive = Directive::Connect {
@@ -209,25 +207,40 @@ impl Client {
 
     /// Awaits the background manager task.
     ///
-    /// All [`SocketSender`] clones must be dropped (via [`SocketSender::disconnect`])
-    /// before calling this. The manager exits only when the last sender is dropped.
+    /// The [`SocketSender`] must be dropped or explicitly disconnected before calling this.
+    /// The manager exits only when the sender is dropped.
     pub async fn join(self) -> Result<(), ClientError> {
-        drop(self.manager_tx);
-        self.manager_handle.await??;
+        drop(self.tx);
+        self.handle.await??;
         Ok(())
     }
 }
 
-/// Cloneable sender for a Socket.IO namespace.
-#[derive(Debug, Clone)]
+/// Sender for a Socket.IO namespace.
+///
+/// Owns the connection lifetime: dropping sends a disconnect packet automatically.
+/// Wrap in [`Arc`](std::sync::Arc) to share across tasks.
+#[derive(Debug)]
 pub struct SocketSender {
     ns: String,
-    manager_tx: ManagerSender,
+    tx: ManagerSender,
+    is_connected: AtomicBool,
 }
 
 impl SocketSender {
+    fn new(ns: String, tx: ManagerSender) -> Self {
+        Self {
+            ns,
+            tx,
+            is_connected: AtomicBool::new(true),
+        }
+    }
+
     async fn send(&self, directive: Directive) -> Result<(), SocketError> {
-        Ok(self.manager_tx.send(self.ns.clone(), directive).await?)
+        self.tx
+            .send(self.ns.clone(), directive)
+            .await
+            .map_err(SocketError::Send)
     }
 
     /// Emits an event; returns `()` or an [`AckHandle`](crate::ack::AckHandle) depending on the ack policy.
@@ -253,9 +266,29 @@ impl SocketSender {
         self.send(directive).await
     }
 
-    /// Sends a disconnect packet, closing this namespace on the server.
+    /// Closes this namespace; no-op if already disconnected.
     pub async fn disconnect(&self) -> Result<(), SocketError> {
-        self.send(Directive::Disconnect).await
+        // Relaxed suffices: ns and manager_tx are immutable after construction,
+        // so no other shared data needs synchronizing through this flag.
+        if self.is_connected.swap(false, Ordering::Relaxed) {
+            self.send(Directive::Disconnect).await?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for SocketSender {
+    fn drop(&mut self) {
+        // Same reasoning as disconnect(): Relaxed is sufficient.
+        if self.is_connected.swap(false, Ordering::Relaxed) {
+            let type_name = std::any::type_name::<Self>();
+
+            tracing::warn!(ns = self.ns, "{type_name} dropped while connected");
+
+            // try_send is non-blocking; if the channel is full or closed the
+            // disconnect packet is lost, but we've already logged the warning.
+            let _ = self.tx.try_send(self.ns.clone(), Directive::Disconnect);
+        }
     }
 }
 

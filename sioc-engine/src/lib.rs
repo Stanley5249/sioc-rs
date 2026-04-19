@@ -39,7 +39,7 @@ pub const ENGINE_IO_VERSION: u64 = 4;
 /// Convenience re-exports for common usage.
 pub mod prelude {
     pub use crate::engine::{EngineAction, EngineSender};
-    pub use crate::packet::{Handshake, Packet, Message};
+    pub use crate::packet::{Handshake, Message, Packet};
     pub use crate::transport::TransportStrategy;
     pub use crate::websocket::{DefaultWebSocketConnector, WebSocketConnector, WebSocketStream};
 }

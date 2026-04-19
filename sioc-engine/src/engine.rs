@@ -1,7 +1,7 @@
 //! Engine.IO protocol task.
 
 use crate::error::{BoxedError, EngineError, Error, TransportError};
-use crate::packet::{Frame, Handshake, Packet, Message};
+use crate::packet::{Frame, Handshake, Message, Packet};
 use crate::transport::TransportStrategy;
 use crate::websocket::WebSocketConnector;
 use futures_util::{Sink, SinkExt};

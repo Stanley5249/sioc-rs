@@ -10,6 +10,7 @@ use sioc_engine::error::BoxedError;
 use sioc_engine::prelude::Message;
 use std::collections::BTreeMap;
 use std::collections::hash_map::{Entry, HashMap};
+use tokio::sync::mpsc::error::{SendError, TrySendError};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::PollSender;
 
@@ -27,10 +28,10 @@ pub enum ManagerAction {
 }
 
 impl ManagerAction {
-    fn into_directive(self) -> Option<Ns<Directive>> {
+    unsafe fn into_directive(self) -> Ns<Directive> {
         match self {
-            ManagerAction::Socket(directive) => Some(directive),
-            ManagerAction::Engine(_) => None,
+            ManagerAction::Socket(directive) => directive,
+            ManagerAction::Engine(_) => unsafe { std::hint::unreachable_unchecked() },
         }
     }
 }
@@ -49,20 +50,36 @@ impl From<Message> for ManagerAction {
 
 /// Sends outbound [`Directive`]s to the socket router.
 #[derive(Clone, Debug)]
-pub struct ManagerSender(pub mpsc::Sender<ManagerAction>);
+pub struct ManagerSender(mpsc::Sender<ManagerAction>);
 
+// SAFETY: the value sent is always `ManagerAction::Socket(...)`.
 impl ManagerSender {
+    pub fn new(tx: mpsc::Sender<ManagerAction>) -> Self {
+        Self(tx)
+    }
+
     pub async fn send(
         &self,
         ns: String,
         directive: Directive,
-    ) -> Result<(), mpsc::error::SendError<Ns<Directive>>> {
-        self.0.send(Ns(ns, directive).into()).await.map_err(|e| {
-            // SAFETY: the value sent is always `ManagerAction::Socket(...)`,
-            // so `into_directive()` always returns `Some`.
-            let data = unsafe { e.0.into_directive().unwrap_unchecked() };
-            mpsc::error::SendError(data)
-        })
+    ) -> Result<(), SendError<Ns<Directive>>> {
+        self.0
+            .send(Ns(ns, directive).into())
+            .await
+            .map_err(|e| SendError(unsafe { e.0.into_directive() }))
+    }
+
+    pub fn try_send(
+        &self,
+        ns: String,
+        directive: Directive,
+    ) -> Result<(), TrySendError<Ns<Directive>>> {
+        self.0
+            .try_send(Ns(ns, directive).into())
+            .map_err(|e| match e {
+                TrySendError::Full(x) => TrySendError::Full(unsafe { x.into_directive() }),
+                TrySendError::Closed(x) => TrySendError::Closed(unsafe { x.into_directive() }),
+            })
     }
 }
 
