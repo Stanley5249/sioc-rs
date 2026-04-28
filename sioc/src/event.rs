@@ -54,7 +54,6 @@ pub trait EventType: Sized {
 /// Construct via [`TryFrom<DynEvent>`] after receiving a [`DynEvent`]
 /// from the namespace channel. The ack and binary policies are determined
 /// by the associated types on `E`.
-#[derive(Debug)]
 pub struct Event<E>
 where
     E: EventType,
@@ -67,6 +66,19 @@ where
     pub attachments: <E::Binary as BinaryMarker>::Attachments,
 }
 
+impl<E> std::fmt::Debug for Event<E>
+where
+    E: EventType + std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut map = f.debug_map();
+        map.entry(&"payload", &self.payload);
+        E::Ack::fmt_entry(&self.id, &mut map);
+        E::Binary::fmt_entry(&self.attachments, &mut map);
+        map.finish()
+    }
+}
+
 impl<E> TryFrom<DynEvent> for Event<E>
 where
     E: EventType + DeserializePayload,
@@ -74,7 +86,7 @@ where
     type Error = EventError;
 
     fn try_from(value: DynEvent) -> Result<Self, EventError> {
-        let payload = deserialize_event(&value.data)?;
+        let payload = deserialize_event(&value.payload)?;
         let id = E::Ack::parse(value.id)?;
         let attachments = E::Binary::parse(value.attachments)?;
         Ok(Self {

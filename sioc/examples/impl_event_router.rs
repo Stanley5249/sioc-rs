@@ -76,7 +76,7 @@ impl TryFrom<DynEvent> for MyEvent {
     type Error = EventError;
 
     fn try_from(event: DynEvent) -> Result<Self, EventError> {
-        let payload = sioc::payload::deserialize(&event.data)?;
+        let payload = sioc::payload::deserialize(&event.payload)?;
 
         match payload {
             MyEventPayload::A(args) => {
@@ -96,7 +96,7 @@ impl TryFrom<DynEvent> for MyEvent {
 fn main() -> Result<(), EventError> {
     // Example DynEvent for event "a"
     let event = DynEvent {
-        data: ByteString::from_static("[\"a\"]"),
+        payload: ByteString::from_static("[\"a\"]"),
         attachments: None,
         id: None,
     };

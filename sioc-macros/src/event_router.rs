@@ -109,7 +109,7 @@ pub fn expand(input: syn::DeriveInput) -> darling::Result<TokenStream> {
             type Error = ::sioc::error::EventError;
 
             fn try_from(event: ::sioc::prelude::DynEvent) -> ::std::result::Result<Self, Self::Error> {
-                let helper = ::sioc::payload::deserialize(&event.data)?;
+                let helper = ::sioc::payload::deserialize(&event.payload)?;
 
                 Ok(match helper {
                     #(#from_event_arms)*

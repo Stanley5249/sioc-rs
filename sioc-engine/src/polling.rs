@@ -86,7 +86,7 @@ async fn polling_post(
     loop {
         let count = tokio::select! {
             _ = token.cancelled() => {
-                tracing::debug!("cancel polling post");
+                tracing::debug!("cancelled polling POST");
                 break;
             },
             count = transport_rx.recv_many(&mut buffer, 8) => count,
@@ -99,7 +99,7 @@ async fn polling_post(
         let request = encode_frames(&buffer);
         buffer.clear();
 
-        tracing::trace!(?request, "sending POST");
+        tracing::trace!(len = request.len(), "sending POST");
 
         let response = http_client
             .post(url.as_str())
@@ -143,14 +143,14 @@ async fn polling_get(
             .await
             .map_err(PollingError::Reqwest)?;
 
-        tracing::trace!(?response, "received GET");
+        tracing::trace!(len = response.len(), "received GET");
 
         for frame in decode_frames(response)? {
             engine_tx.send(frame).await?;
         }
     }
 
-    tracing::debug!("cancel polling get");
+    tracing::debug!("cancelled polling GET");
 
     Ok(engine_tx)
 }
@@ -193,7 +193,7 @@ where
         }
     };
 
-    tracing::debug!(?handshake, "received OPEN");
+    tracing::debug!(sid = %handshake.sid, "received OPEN");
 
     url.query_pairs_mut().append_pair("sid", &handshake.sid);
     let do_upgrade = handshake.can_upgrade_to_websocket();
@@ -224,7 +224,7 @@ where
     if do_upgrade {
         let stream = websocket_connect(base_url, Some(sid), connector).await?;
 
-        tracing::debug!("pause polling transport");
+        tracing::debug!("paused polling transport");
         child_token.cancel();
 
         let (get_result, post_result) = tokio::join!(get_handle, post_handle);

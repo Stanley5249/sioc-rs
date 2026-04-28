@@ -45,7 +45,7 @@ async fn run_client() -> miette::Result<()> {
     loop {
         let item = tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                tracing::info!("ctrl c singal");
+                tracing::info!("ctrl-c signal");
                 break;
             }
             item = rx.recv() => item,

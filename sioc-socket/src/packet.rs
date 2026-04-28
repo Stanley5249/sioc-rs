@@ -33,7 +33,7 @@ pub struct ConnectError {
 /// Type-erased inbound event after binary reassembly.
 #[derive(Clone)]
 pub struct DynEvent {
-    pub data: ByteString,
+    pub payload: ByteString,
     pub id: Option<u64>,
     pub attachments: Option<Vec<Bytes>>,
 }
@@ -41,7 +41,7 @@ pub struct DynEvent {
 impl std::fmt::Debug for DynEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut debug = f.debug_struct("DynEvent");
-        debug.field("data", &self.data);
+        debug.field("payload", &self.payload);
         if let Some(id) = self.id {
             debug.field("id", &id);
         }
@@ -53,12 +53,12 @@ impl std::fmt::Debug for DynEvent {
 }
 
 impl DynEvent {
-    pub fn new<T>(data: T, id: Option<u64>) -> Self
+    pub fn new<T>(payload: T, id: Option<u64>) -> Self
     where
         T: Into<ByteString>,
     {
         Self {
-            data: data.into(),
+            payload: payload.into(),
             id,
             attachments: None,
         }

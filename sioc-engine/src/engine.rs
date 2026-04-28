@@ -150,7 +150,7 @@ where
     let _guard = token.drop_guard();
 
     let handshake = handshake_rx.await?;
-    tracing::debug!(?handshake, "received handshake");
+    tracing::debug!(%handshake.sid, "received handshake");
 
     let mut heartbeat = Heartbeat::new(handshake.ping_window());
 

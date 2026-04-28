@@ -105,7 +105,7 @@ fn websocket_url(mut url: Url, sid: Option<&str>) -> Url {
 }
 
 async fn websocket_probe(stream: &mut WebSocketStream) -> Result<(), TransportError> {
-    tracing::debug!("sending probe Ping");
+    tracing::debug!("sending probe PING");
 
     let text = Packet::Ping(PROBE).encode_string();
 
@@ -116,7 +116,7 @@ async fn websocket_probe(stream: &mut WebSocketStream) -> Result<(), TransportEr
 
     match next_frame(stream).await? {
         Frame::Packet(Packet::Pong(bytes)) if bytes == PROBE => {
-            tracing::debug!("received probe Pong");
+            tracing::debug!("received probe PONG");
         }
         other => {
             return Err(TransportError::frame(
@@ -173,7 +173,7 @@ pub async fn websocket_loop(
                 }
             };
 
-            tracing::debug!(?handshake, "received OPEN");
+            tracing::debug!(sid = %handshake.sid, "received OPEN");
 
             handshake_tx
                 .send(handshake)
@@ -195,7 +195,7 @@ pub async fn websocket_loop(
     loop {
         tokio::select! {
             _ = token.cancelled() => {
-                tracing::debug!("cancelling websocket");
+                tracing::debug!("cancelled websocket");
                 break;
             },
 
@@ -243,7 +243,7 @@ pub async fn websocket_loop(
     while let Some(frame) = transport_rx.recv().await {
         let message = encode_frame(frame)?;
 
-        tracing::trace!(frame = %message, "draining message");
+        tracing::trace!(frame = %message, "drained message");
 
         stream
             .send(message)

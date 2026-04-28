@@ -16,7 +16,7 @@
 use crate::ack::AckType;
 use crate::error::{AckIdError, AttachmentsError};
 use bytes::Bytes;
-use std::fmt::Debug;
+use std::fmt::{Debug, DebugMap};
 use std::marker::PhantomData;
 
 /// Determines how acknowledgement IDs are handled at the type level.
@@ -26,6 +26,8 @@ pub trait AckMarker {
 
     /// Validates and extracts an ack ID from the wire-level `Option`.
     fn parse(ack_id: Option<u64>) -> Result<Self::Id, AckIdError>;
+
+    fn fmt_entry(ack_id: &Self::Id, map: &mut DebugMap<'_, '_>);
 }
 
 /// Marker: this packet does **not** expect an acknowledgement.
@@ -41,6 +43,8 @@ impl AckMarker for NoAck {
             None => Ok(()),
         }
     }
+
+    fn fmt_entry(_ack_id: &Self::Id, _map: &mut DebugMap<'_, '_>) {}
 }
 
 /// Marker: this packet expects an acknowledgement of type `A`.
@@ -56,6 +60,10 @@ where
     fn parse(ack_id: Option<u64>) -> Result<Self::Id, AckIdError> {
         ack_id.map(AckId::new).ok_or(AckIdError::Missing)
     }
+
+    fn fmt_entry(ack_id: &Self::Id, map: &mut DebugMap<'_, '_>) {
+        map.entry(&"id", ack_id);
+    }
 }
 
 /// A raw ack ID wrapped with the expected ack payload type `A`.
@@ -67,7 +75,7 @@ pub struct AckId<A>(u64, PhantomData<A>);
 
 impl<A> std::fmt::Debug for AckId<A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("AckId").field(&self.0).finish()
+        write!(f, "{}", self.0)
     }
 }
 
@@ -92,6 +100,8 @@ pub trait BinaryMarker {
 
     /// Converts typed attachments back into the wire-level `Option`.
     fn get(attachments: Self::Attachments) -> Option<Vec<Bytes>>;
+
+    fn fmt_entry(attachments: &Self::Attachments, map: &mut DebugMap<'_, '_>);
 }
 
 /// Marker: this packet carries binary attachments.
@@ -115,6 +125,8 @@ impl BinaryMarker for NoBinary {
     fn get(_attachments: Self::Attachments) -> Option<Vec<Bytes>> {
         None
     }
+
+    fn fmt_entry(_attachments: &Self::Attachments, _map: &mut DebugMap<'_, '_>) {}
 }
 
 impl BinaryMarker for HasBinary {
@@ -126,6 +138,10 @@ impl BinaryMarker for HasBinary {
 
     fn get(attachments: Self::Attachments) -> Option<Vec<Bytes>> {
         Some(attachments)
+    }
+
+    fn fmt_entry(attachments: &Self::Attachments, map: &mut DebugMap<'_, '_>) {
+        map.entry(&"attachments", attachments);
     }
 }
 
