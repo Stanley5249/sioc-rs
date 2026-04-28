@@ -207,19 +207,14 @@ where
 
     let child_token = token.child_token();
 
-    let get_handle = tokio::spawn(polling_get(
+    let get_fut = polling_get(
         url.clone(),
         http_client.clone(),
         engine_tx,
         child_token.clone(),
-    ));
+    );
 
-    let post_handle = tokio::spawn(polling_post(
-        url,
-        http_client,
-        transport_rx,
-        child_token.clone(),
-    ));
+    let post_fut = polling_post(url, http_client, transport_rx, child_token.clone());
 
     if do_upgrade {
         let stream = websocket_connect(base_url, Some(sid), connector).await?;
@@ -227,15 +222,17 @@ where
         tracing::debug!("paused polling transport");
         child_token.cancel();
 
-        let (get_result, post_result) = tokio::join!(get_handle, post_handle);
-        let engine_tx = get_result??;
-        let transport_rx = post_result??;
+        let (get_result, post_result) = tokio::join!(get_fut, post_fut,);
+
+        let engine_tx = get_result?;
+        let transport_rx = post_result?;
 
         websocket_loop(stream, None, engine_tx, transport_rx, token).await?;
     } else {
-        let (get_result, post_result) = tokio::join!(get_handle, post_handle);
-        let _ = get_result??;
-        let _ = post_result??;
+        let (get_result, post_result) = tokio::join!(get_fut, post_fut);
+
+        let _ = get_result?;
+        let _ = post_result?;
     }
 
     Ok(())

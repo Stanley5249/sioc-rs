@@ -72,7 +72,9 @@ impl Engine {
         S: Sink<Message, Error = BoxedError> + Unpin + Send + 'static,
     {
         let (engine_tx, engine_rx) = mpsc::channel(32);
+
         let (transport_tx, transport_rx) = mpsc::channel(32);
+
         let (handshake_tx, handshake_rx) = oneshot::channel();
 
         let engine_tx = EngineSender(engine_tx);
@@ -89,7 +91,7 @@ impl Engine {
             token.clone(),
         );
 
-        let engine_handle = tokio::spawn(engine_loop(
+        let engine_handle = tokio::spawn(engine_io(
             sink,
             engine_rx,
             transport_tx,
@@ -136,7 +138,7 @@ impl Heartbeat {
 }
 
 #[tracing::instrument(skip_all, err)]
-async fn engine_loop<S>(
+async fn engine_io<S>(
     mut sink: S,
     mut engine_rx: mpsc::Receiver<EngineAction>,
     transport_tx: mpsc::Sender<Frame>,
@@ -176,6 +178,7 @@ where
                             break;
                         }
                         Packet::Ping(data) => {
+                            tracing::trace!("sending PONG");
                             transport_tx.send(Packet::Pong(data).into()).await?;
                             heartbeat.reset();
                         }

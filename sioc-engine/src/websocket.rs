@@ -5,8 +5,10 @@ use crate::engine::EngineSender;
 use crate::error::{TransportError, WebSocketError};
 use crate::packet::{Frame, Handshake, PROBE, Packet, bytestring_from_utf8_bytes};
 use bytestring::ByteString;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, Stream, StreamExt, TryStreamExt};
 use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll, ready};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Error as TungsteniteError;
@@ -15,7 +17,60 @@ use tokio_tungstenite::{MaybeTlsStream, connect_async};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-pub type WebSocketStream = tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>;
+/// Framed WebSocket stream that speaks [`Frame`] instead of raw [`WebSocketMessage`].
+pub struct WebSocketStream(pub tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>);
+
+impl Stream for WebSocketStream {
+    type Item = Result<Frame, WebSocketError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            return Poll::Ready(match ready!(self.0.poll_next_unpin(cx)) {
+                None => None,
+                Some(Err(e)) => Some(Err(WebSocketError::Tungstenite(e))),
+                Some(Ok(WebSocketMessage::Text(text))) => Some(
+                    Packet::decode_bytes(bytestring_from_utf8_bytes(text))
+                        .map(Frame::from)
+                        .map_err(WebSocketError::Packet),
+                ),
+                Some(Ok(WebSocketMessage::Binary(bytes))) => Some(Ok(Frame::Binary(bytes))),
+                Some(Ok(_)) => continue,
+            });
+        }
+    }
+}
+
+impl Sink<Frame> for WebSocketStream {
+    type Error = WebSocketError;
+
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.0
+            .poll_ready_unpin(cx)
+            .map_err(WebSocketError::Tungstenite)
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, frame: Frame) -> Result<(), Self::Error> {
+        let msg = match frame {
+            Frame::Packet(packet) => WebSocketMessage::text(packet.encode_string()),
+            Frame::Binary(bytes) => WebSocketMessage::binary(bytes),
+        };
+        self.0
+            .start_send_unpin(msg)
+            .map_err(WebSocketError::Tungstenite)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.0
+            .poll_flush_unpin(cx)
+            .map_err(WebSocketError::Tungstenite)
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.0
+            .poll_close_unpin(cx)
+            .map_err(WebSocketError::Tungstenite)
+    }
+}
 
 /// A WebSocket connector that can open a stream from a [`Url`].
 pub trait WebSocketConnector: Send + 'static {
@@ -41,40 +96,11 @@ where
 
 /// Opens a plain `tokio-tungstenite` WebSocket connection with no custom TLS
 /// or header configuration.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct DefaultWebSocketConnector;
-
-impl WebSocketConnector for DefaultWebSocketConnector {
+impl WebSocketConnector for () {
     async fn connect(self, url: Url) -> Result<WebSocketStream, TungsteniteError> {
         let (stream, _) = connect_async(url.as_str()).await?;
-        Ok(stream)
+        Ok(WebSocketStream(stream))
     }
-}
-
-fn encode_frame(frame: Frame) -> Result<WebSocketMessage, TransportError> {
-    Ok(match frame {
-        Frame::Packet(packet) => WebSocketMessage::text(packet.encode_string()),
-        Frame::Binary(bytes) => WebSocketMessage::binary(bytes),
-    })
-}
-
-async fn next_frame(stream: &mut WebSocketStream) -> Result<Frame, TransportError> {
-    while let Some(message) = stream
-        .next()
-        .await
-        .transpose()
-        .map_err(WebSocketError::Tungstenite)?
-    {
-        let frame = match message {
-            WebSocketMessage::Text(text) => {
-                Packet::decode_bytes(bytestring_from_utf8_bytes(text))?.into()
-            }
-            WebSocketMessage::Binary(bytes) => bytes.into(),
-            _ => continue,
-        };
-        return Ok(frame);
-    }
-    Err(TransportError::WebSocket(WebSocketError::Closed))
 }
 
 fn websocket_url(mut url: Url, sid: Option<&str>) -> Url {
@@ -107,14 +133,9 @@ fn websocket_url(mut url: Url, sid: Option<&str>) -> Url {
 async fn websocket_probe(stream: &mut WebSocketStream) -> Result<(), TransportError> {
     tracing::debug!("sending probe PING");
 
-    let text = Packet::Ping(PROBE).encode_string();
+    stream.send(Packet::Ping(PROBE).into()).await?;
 
-    stream
-        .send(WebSocketMessage::text(text))
-        .await
-        .map_err(WebSocketError::Tungstenite)?;
-
-    match next_frame(stream).await? {
+    match stream.try_next().await?.ok_or(WebSocketError::Closed)? {
         Frame::Packet(Packet::Pong(bytes)) if bytes == PROBE => {
             tracing::debug!("received probe PONG");
         }
@@ -163,7 +184,7 @@ pub async fn websocket_loop(
 ) -> Result<(), TransportError> {
     match handshake_tx {
         Some(handshake_tx) => {
-            let handshake = match next_frame(&mut stream).await? {
+            let handshake = match stream.try_next().await?.ok_or(WebSocketError::Closed)? {
                 Frame::Packet(Packet::Open(handshake)) => handshake,
                 other => {
                     return Err(TransportError::frame(
@@ -182,13 +203,7 @@ pub async fn websocket_loop(
         None => {
             tracing::debug!("sending UPGRADE");
 
-            let text: String = Packet::Upgrade.encode_bytes().into();
-            let message = WebSocketMessage::text(text);
-
-            stream
-                .send(message)
-                .await
-                .map_err(WebSocketError::Tungstenite)?;
+            stream.send(Packet::Upgrade.into()).await?;
         }
     };
 
@@ -199,24 +214,13 @@ pub async fn websocket_loop(
                 break;
             },
 
-            item = stream.next() => {
-                let Some(message) = item
-                    .transpose()
-                    .map_err(WebSocketError::Tungstenite)?
-                else {
+            result = stream.try_next() => {
+                let Some(frame) = result? else {
                     tracing::debug!("websocket stream closed");
                     break;
                 };
 
-                tracing::trace!(frame = %message, "received message");
-
-                let frame: Frame = match message {
-                    WebSocketMessage::Text(text) => {
-                        Packet::decode_bytes(bytestring_from_utf8_bytes(text))?.into()
-                    }
-                    WebSocketMessage::Binary(bytes) => bytes.into(),
-                    _ => continue,
-                };
+                tracing::trace!(?frame, "received frame");
 
                 engine_tx.send(frame).await?;
             }
@@ -226,14 +230,10 @@ pub async fn websocket_loop(
                     tracing::debug!("transport channel closed");
                     break;
                 };
-                let message = encode_frame(frame)?;
 
-                tracing::trace!(frame = %message, "sending message");
+                tracing::trace!(?frame, "sending frame");
 
-                stream
-                    .send(message)
-                    .await
-                    .map_err(WebSocketError::Tungstenite)?;
+                stream.send(frame).await?;
             }
         };
     }
@@ -241,20 +241,12 @@ pub async fn websocket_loop(
     // Drain frames queued before the engine exited so the disconnect
     // packet is not silently dropped by a concurrent cancellation.
     while let Some(frame) = transport_rx.recv().await {
-        let message = encode_frame(frame)?;
+        tracing::trace!(?frame, "drained frame");
 
-        tracing::trace!(frame = %message, "drained message");
-
-        stream
-            .send(message)
-            .await
-            .map_err(WebSocketError::Tungstenite)?;
+        stream.send(frame).await?;
     }
 
-    stream
-        .close(None)
-        .await
-        .map_err(WebSocketError::Tungstenite)?;
+    stream.close().await?;
 
     Ok(())
 }

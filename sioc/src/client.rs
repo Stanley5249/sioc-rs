@@ -6,7 +6,7 @@ use crate::marker::{AckId, AckMarker, BinaryMarker};
 use bytestring::ByteString;
 use sioc_engine::engine::Engine;
 use sioc_engine::transport::TransportStrategy;
-use sioc_engine::websocket::{DefaultWebSocketConnector, WebSocketConnector};
+use sioc_engine::websocket::WebSocketConnector;
 use sioc_socket::error::ManagerError;
 use sioc_socket::manager::{Manager, ManagerAction, ManagerSender, manager_sink};
 use sioc_socket::packet::{Directive, Signal};
@@ -56,7 +56,7 @@ where
 /// # Ok(())
 /// # }
 /// ```
-pub struct ClientBuilder<C = DefaultWebSocketConnector> {
+pub struct ClientBuilder<C = ()> {
     url: Url,
     path: String,
     http_client: Option<reqwest::Client>,
@@ -64,14 +64,14 @@ pub struct ClientBuilder<C = DefaultWebSocketConnector> {
     transport_strategy: TransportStrategy,
 }
 
-impl ClientBuilder<DefaultWebSocketConnector> {
+impl ClientBuilder<()> {
     /// Creates a builder targeting `url`.
     pub fn new(url: impl Into<Url>) -> Self {
         Self {
             url: url.into(),
             path: "socket.io/".to_string(),
             http_client: None,
-            websocket_connector: DefaultWebSocketConnector,
+            websocket_connector: (),
             transport_strategy: TransportStrategy::default(),
         }
     }
@@ -106,7 +106,7 @@ where
     /// let client = ClientBuilder::new(Url::parse("http://localhost:3000").unwrap())
     ///     .websocket_connector(|url| async move {
     ///         // add custom logging or TLS config here
-    ///         DefaultWebSocketConnector.connect(url).await
+    ///         ().connect(url).await
     ///     })
     ///     .open()?;
     /// # Ok(())

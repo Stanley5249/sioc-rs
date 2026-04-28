@@ -208,9 +208,8 @@ impl Packet {
 pub(crate) fn bytestring_from_utf8_bytes(
     utf8: tokio_tungstenite::tungstenite::Utf8Bytes,
 ) -> ByteString {
-    let bytes: Bytes = utf8.into();
     // SAFETY: `tungstenite::Utf8Bytes` guarantees the inner `Bytes` is valid UTF-8.
-    unsafe { ByteString::from_bytes_unchecked(bytes) }
+    unsafe { ByteString::from_bytes_unchecked(utf8.into()) }
 }
 
 #[cfg(test)]

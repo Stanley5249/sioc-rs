@@ -171,6 +171,11 @@ pub enum WebSocketError {
         help("the server closed the TCP connection without sending a WebSocket close frame")
     )]
     Closed,
+
+    /// A packet decoding error within a WebSocket text frame.
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Packet(#[from] PacketError),
 }
 
 /// Errors specific to the HTTP long-polling transport.

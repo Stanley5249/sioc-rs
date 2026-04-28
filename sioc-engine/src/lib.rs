@@ -41,5 +41,5 @@ pub mod prelude {
     pub use crate::engine::{EngineAction, EngineSender};
     pub use crate::packet::{Handshake, Message, Packet};
     pub use crate::transport::TransportStrategy;
-    pub use crate::websocket::{DefaultWebSocketConnector, WebSocketConnector, WebSocketStream};
+    pub use crate::websocket::{WebSocketConnector, WebSocketStream};
 }
