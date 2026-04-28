@@ -4,6 +4,7 @@ use crate::error::{ManagerError, PacketError};
 use crate::packet::{Connect, ConnectError, Directive, DynAck, DynEvent, Ns, Packet, Signal};
 use crate::payload::deserialize;
 use bytes::Bytes;
+use bytestring::ByteString;
 use futures_util::{Sink, SinkExt, future};
 use sioc_engine::engine::{Engine, EngineSender};
 use sioc_engine::error::BoxedError;
@@ -52,7 +53,7 @@ impl From<Message> for ManagerAction {
 #[derive(Clone, Debug)]
 pub struct ManagerSender(mpsc::Sender<ManagerAction>);
 
-// SAFETY: the value sent is always `ManagerAction::Socket(...)`.
+// Safety: the value sent is always `ManagerAction::Socket(...)`.
 impl ManagerSender {
     pub fn new(tx: mpsc::Sender<ManagerAction>) -> Self {
         Self(tx)
@@ -60,7 +61,7 @@ impl ManagerSender {
 
     pub async fn send(
         &self,
-        ns: String,
+        ns: ByteString,
         directive: Directive,
     ) -> Result<(), SendError<Ns<Directive>>> {
         self.0
@@ -71,7 +72,7 @@ impl ManagerSender {
 
     pub fn try_send(
         &self,
-        ns: String,
+        ns: ByteString,
         directive: Directive,
     ) -> Result<(), TrySendError<Ns<Directive>>> {
         self.0
@@ -102,7 +103,12 @@ impl Socket {
         id
     }
 
-    fn send_ack(&mut self, ns: String, id: u64, ack: DynAck) -> Result<String, ManagerError> {
+    fn send_ack(
+        &mut self,
+        ns: ByteString,
+        id: u64,
+        ack: DynAck,
+    ) -> Result<ByteString, ManagerError> {
         match self.acks.remove(&id) {
             Some(sender) => match sender.send(ack) {
                 Ok(()) => Ok(ns),
@@ -112,7 +118,11 @@ impl Socket {
         }
     }
 
-    async fn send_packet(&mut self, ns: String, packet: Signal) -> Result<String, ManagerError> {
+    async fn send_packet(
+        &mut self,
+        ns: ByteString,
+        packet: Signal,
+    ) -> Result<ByteString, ManagerError> {
         match self.tx.send(packet).await {
             Ok(()) => Ok(ns),
             Err(source) => Err(ManagerError::SendSocket { ns, source }),
@@ -121,9 +131,9 @@ impl Socket {
 
     async fn send_binary_packet(
         &mut self,
-        ns: String,
+        ns: ByteString,
         packet: BinaryPacket,
-    ) -> Result<String, ManagerError> {
+    ) -> Result<ByteString, ManagerError> {
         match packet {
             BinaryPacket::Event {
                 data,
@@ -149,21 +159,21 @@ impl Socket {
     }
 }
 
-struct SocketsMap(HashMap<String, Socket>);
+struct SocketsMap(HashMap<ByteString, Socket>);
 
 impl SocketsMap {
     fn new() -> Self {
         Self(HashMap::new())
     }
 
-    fn get_mut(&mut self, ns: String) -> Result<Ns<&mut Socket>, ManagerError> {
+    fn get_mut(&mut self, ns: ByteString) -> Result<Ns<&mut Socket>, ManagerError> {
         match self.0.get_mut(&ns) {
             Some(socket) => Ok(Ns(ns, socket)),
             None => Err(ManagerError::UnknownNamespace { ns }),
         }
     }
 
-    fn connect(&mut self, ns: String, socket: Socket) -> Result<Ns<&mut Socket>, ManagerError> {
+    fn connect(&mut self, ns: ByteString, socket: Socket) -> Result<Ns<&mut Socket>, ManagerError> {
         match self.0.entry(ns) {
             Entry::Occupied(e) => Err(ManagerError::NamespaceConflict {
                 ns: e.key().clone(),
@@ -175,14 +185,14 @@ impl SocketsMap {
         }
     }
 
-    fn disconnect(&mut self, ns: String) -> Result<Ns<Socket>, ManagerError> {
+    fn disconnect(&mut self, ns: ByteString) -> Result<Ns<Socket>, ManagerError> {
         match self.0.remove(&ns) {
             Some(socket) => Ok(Ns(ns, socket)),
             None => Err(ManagerError::UnknownNamespace { ns }),
         }
     }
 
-    fn require(&self, ns: String) -> Result<String, ManagerError> {
+    fn require(&self, ns: ByteString) -> Result<ByteString, ManagerError> {
         if self.0.contains_key(&ns) {
             Ok(ns)
         } else {
@@ -201,13 +211,13 @@ impl SocketsMap {
 
 enum BinaryPacket {
     Event {
-        data: Bytes,
+        data: ByteString,
         id: Option<u64>,
         attachments: Vec<Bytes>,
         count: usize,
     },
     Ack {
-        data: Bytes,
+        data: ByteString,
         id: u64,
         attachments: Vec<Bytes>,
         count: usize,
@@ -215,7 +225,7 @@ enum BinaryPacket {
 }
 
 impl BinaryPacket {
-    fn event(data: Bytes, id: Option<u64>, count: usize) -> Self {
+    fn event(data: ByteString, id: Option<u64>, count: usize) -> Self {
         Self::Event {
             data,
             id,
@@ -224,7 +234,7 @@ impl BinaryPacket {
         }
     }
 
-    fn ack(data: Bytes, id: u64, count: usize) -> Self {
+    fn ack(data: ByteString, id: u64, count: usize) -> Self {
         Self::Ack {
             data,
             id,
@@ -266,7 +276,7 @@ impl Reconstructor {
         self.pending.is_some()
     }
 
-    fn insert(&mut self, ns: String, packet: BinaryPacket) {
+    fn insert(&mut self, ns: ByteString, packet: BinaryPacket) {
         self.pending = Some(Ns(ns, packet));
     }
 
@@ -341,7 +351,7 @@ impl Manager {
     async fn dispatch_directive(
         &mut self,
         engine_tx: &EngineSender,
-        ns: String,
+        ns: ByteString,
         directive: Directive,
     ) -> Result<(), ManagerError> {
         let mut socket_buffer = None;
@@ -402,15 +412,15 @@ impl Manager {
             }
         };
 
-        tracing::trace!(ns, ?packet, "sending packet");
+        tracing::trace!(%ns, ?packet, "sending packet");
 
-        let text = Message::Text(packet.encode(&ns));
+        let text = Message::Text(packet.encode(&ns).into());
         let binaries = attachments.into_iter().flatten().map(Message::Binary);
         let messages = std::iter::once(text).chain(binaries);
 
         match socket_buffer {
             Some(buffer) => {
-                tracing::trace!(ns, "buffering packets");
+                tracing::trace!(%ns, "buffering packets");
                 buffer.extend(messages);
             }
             None => {
@@ -429,8 +439,8 @@ impl Manager {
         message: Message,
     ) -> Result<(), ManagerError> {
         match message {
-            Message::Text(bytes) => {
-                self.route_text_message(bytes, engine_tx).await?;
+            Message::Text(text) => {
+                self.route_text_message(text, engine_tx).await?;
             }
 
             Message::Binary(attachment) => {
@@ -448,16 +458,16 @@ impl Manager {
 
     async fn route_text_message(
         &mut self,
-        bytes: Bytes,
+        text: ByteString,
         engine_tx: &EngineSender,
     ) -> Result<(), ManagerError> {
         if self.reconstructor.is_pending() {
-            return Err(ManagerError::UnexpectedText(bytes));
+            return Err(ManagerError::UnexpectedText(text));
         }
 
-        let Ns(ns, packet) = bytes.try_into()?;
+        let Ns(ns, packet) = text.try_into()?;
 
-        tracing::trace!(ns, ?packet, "received packet");
+        tracing::trace!(%ns, ?packet, "received packet");
 
         match packet {
             Packet::Connect(data) => {
@@ -468,7 +478,7 @@ impl Manager {
                 let len = socket.buffer.len();
 
                 if len > 0 {
-                    tracing::trace!(ns, len, "sending buffered packets");
+                    tracing::trace!(%ns, len, "sending buffered packets");
 
                     for message in socket.buffer.drain(..) {
                         engine_tx.send(message).await?;
@@ -527,7 +537,7 @@ impl Manager {
             Some(Ns(ns, packet)) => {
                 let Ns(ns, socket) = self.sockets.get_mut(ns)?;
 
-                tracing::trace!(ns, count, status = "complete", "received binary attachment");
+                tracing::trace!(%ns, count, status = "complete", "received binary attachment");
 
                 socket.send_binary_packet(ns, packet).await?;
             }
@@ -545,7 +555,7 @@ mod tests {
     use sioc_engine::engine::EngineAction;
     use tokio::task::JoinHandle;
 
-    const CONNECT_RESPONSE: &[u8] = b"0{\"sid\":\"test\"}";
+    const CONNECT_RESPONSE: &str = "0{\"sid\":\"test\"}";
 
     fn mock_engine(tx: mpsc::Sender<EngineAction>) -> Engine {
         Engine {
@@ -577,7 +587,7 @@ mod tests {
                 ns.into(),
                 Directive::Connect {
                     tx,
-                    data: Bytes::new(),
+                    data: ByteString::new(),
                 },
             )))
             .await
@@ -587,9 +597,9 @@ mod tests {
 
     async fn server_connect(manager_tx: &mpsc::Sender<ManagerAction>) {
         manager_tx
-            .send(ManagerAction::Engine(Message::Text(Bytes::from_static(
-                CONNECT_RESPONSE,
-            ))))
+            .send(ManagerAction::Engine(Message::Text(
+                ByteString::from_static(CONNECT_RESPONSE),
+            )))
             .await
             .unwrap();
     }
@@ -606,7 +616,7 @@ mod tests {
             .send(ManagerAction::Socket(Ns(
                 "/".into(),
                 Directive::Event {
-                    data: Bytes::from_static(b"[\"ping\"]"),
+                    data: ByteString::from_static("[\"ping\"]"),
                     tx: None,
                     attachments: None,
                 },
@@ -628,12 +638,14 @@ mod tests {
         let mut socket_rx = open_namespace(&manager_tx, "/").await;
         engine_rx.recv().await.unwrap();
 
-        for i in 0u8..3 {
+        for c in 'a'..='c' {
+            let data = format!("[\"{}\"]", c);
+
             manager_tx
                 .send(ManagerAction::Socket(Ns(
                     "/".into(),
                     Directive::Event {
-                        data: Bytes::copy_from_slice(&[b'[', b'"', b'a' + i, b'"', b']']),
+                        data: ByteString::from(data),
                         tx: None,
                         attachments: None,
                     },
@@ -694,7 +706,7 @@ mod tests {
             .send(ManagerAction::Socket(Ns(
                 "/no-such-ns".into(),
                 Directive::Event {
-                    data: Bytes::from_static(b"[\"x\"]"),
+                    data: ByteString::from_static("[\"x\"]"),
                     tx: None,
                     attachments: None,
                 },
@@ -763,7 +775,7 @@ mod tests {
             .send(ManagerAction::Socket(Ns(
                 "/".into(),
                 Directive::Event {
-                    data: Bytes::from_static(b"[\"greet\",\"hello\"]"),
+                    data: ByteString::from_static("[\"greet\",\"hello\"]"),
                     tx: Some(ack_tx),
                     attachments: None,
                 },
@@ -774,15 +786,15 @@ mod tests {
         engine_rx.recv().await.unwrap(); // drain outbound event frame
 
         manager_tx
-            .send(ManagerAction::Engine(Message::Text(Bytes::from_static(
-                b"30[\"world\"]",
-            ))))
+            .send(ManagerAction::Engine(Message::Text(
+                ByteString::from_static("30[\"world\"]"),
+            )))
             .await
             .unwrap();
 
         tokio::task::yield_now().await;
         let ack = ack_rx.try_recv().unwrap();
-        assert_eq!(&ack.data[..], b"[\"world\"]");
+        assert_eq!(ack.data, "[\"world\"]");
     }
 
     /// A binary event is held until all attachment frames arrive, then delivered as a complete packet.
@@ -795,9 +807,9 @@ mod tests {
         socket_rx.recv().await.unwrap(); // consume Packet::Connect
 
         manager_tx
-            .send(ManagerAction::Engine(Message::Text(Bytes::from_static(
-                b"52-[\"img\"]",
-            ))))
+            .send(ManagerAction::Engine(Message::Text(
+                ByteString::from_static("52-[\"img\"]"),
+            )))
             .await
             .unwrap();
 

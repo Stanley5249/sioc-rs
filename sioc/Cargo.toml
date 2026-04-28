@@ -2,14 +2,13 @@
 name = "sioc"
 version = "0.1.0"
 edition = "2024"
-authors = ["Stanley5249 <seer852741@gmail.com>"]
 description = "Async Socket.IO client with type-safe event handling"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/Stanley5249/sioc-rs"
 documentation = "https://docs.rs/sioc"
 readme = "README.md"
-keywords = ["socketio", "websocket", "async", "networking", "realtime"]
-categories = ["network-programming", "asynchronous", "web-programming"]
+repository = "https://github.com/Stanley5249/sioc-rs"
+license = "MIT OR Apache-2.0"
+keywords = ["async", "networking", "realtime", "socketio", "websocket"]
+categories = ["asynchronous", "network-programming", "web-programming"]
 
 [dependencies]
 # Workspace dependencies
@@ -18,6 +17,7 @@ sioc-macros.workspace = true
 sioc-socket.workspace = true
 
 bytes.workspace = true
+bytestring.workspace = true
 futures-util.workspace = true
 miette.workspace = true
 reqwest.workspace = true

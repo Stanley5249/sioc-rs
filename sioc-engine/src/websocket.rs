@@ -3,7 +3,8 @@
 use crate::ENGINE_IO_VERSION;
 use crate::engine::EngineSender;
 use crate::error::{TransportError, WebSocketError};
-use crate::packet::{Frame, Handshake, PROBE, Packet};
+use crate::packet::{Frame, Handshake, PROBE, Packet, bytestring_from_utf8_bytes};
+use bytestring::ByteString;
 use futures_util::{SinkExt, StreamExt};
 use std::future::Future;
 use tokio::net::TcpStream;
@@ -52,10 +53,8 @@ impl WebSocketConnector for DefaultWebSocketConnector {
 
 fn encode_frame(frame: Frame) -> Result<WebSocketMessage, TransportError> {
     Ok(match frame {
-        Frame::Packet(packet) => {
-            WebSocketMessage::Text(packet.encode().try_into().map_err(WebSocketError::Utf8)?)
-        }
-        Frame::Binary(bytes) => WebSocketMessage::Binary(bytes),
+        Frame::Packet(packet) => WebSocketMessage::text(packet.encode_string()),
+        Frame::Binary(bytes) => WebSocketMessage::binary(bytes),
     })
 }
 
@@ -67,7 +66,9 @@ async fn next_frame(stream: &mut WebSocketStream) -> Result<Frame, TransportErro
         .map_err(WebSocketError::Tungstenite)?
     {
         let frame = match message {
-            WebSocketMessage::Text(text) => Packet::decode(text.into())?.into(),
+            WebSocketMessage::Text(text) => {
+                Packet::decode_bytes(bytestring_from_utf8_bytes(text))?.into()
+            }
             WebSocketMessage::Binary(bytes) => bytes.into(),
             _ => continue,
         };
@@ -106,12 +107,10 @@ fn websocket_url(mut url: Url, sid: Option<&str>) -> Url {
 async fn websocket_probe(stream: &mut WebSocketStream) -> Result<(), TransportError> {
     tracing::debug!("sending probe Ping");
 
-    let packet = Packet::Ping(PROBE);
+    let text = Packet::Ping(PROBE).encode_string();
 
     stream
-        .send(WebSocketMessage::Text(
-            packet.encode().try_into().map_err(WebSocketError::Utf8)?,
-        ))
+        .send(WebSocketMessage::text(text))
         .await
         .map_err(WebSocketError::Tungstenite)?;
 
@@ -132,7 +131,7 @@ async fn websocket_probe(stream: &mut WebSocketStream) -> Result<(), TransportEr
 
 pub async fn websocket_connect<C>(
     base_url: Url,
-    sid: Option<String>,
+    sid: Option<ByteString>,
     connector: C,
 ) -> Result<WebSocketStream, TransportError>
 where
@@ -183,12 +182,8 @@ pub async fn websocket_loop(
         None => {
             tracing::debug!("sending UPGRADE");
 
-            let message = WebSocketMessage::Text(
-                Packet::Upgrade
-                    .encode()
-                    .try_into()
-                    .map_err(WebSocketError::Utf8)?,
-            );
+            let text: String = Packet::Upgrade.encode_bytes().into();
+            let message = WebSocketMessage::text(text);
 
             stream
                 .send(message)
@@ -217,7 +212,7 @@ pub async fn websocket_loop(
 
                 let frame: Frame = match message {
                     WebSocketMessage::Text(text) => {
-                        Packet::decode(text.into())?.into()
+                        Packet::decode_bytes(bytestring_from_utf8_bytes(text))?.into()
                     }
                     WebSocketMessage::Binary(bytes) => bytes.into(),
                     _ => continue,

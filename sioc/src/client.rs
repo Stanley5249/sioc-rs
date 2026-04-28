@@ -3,7 +3,7 @@
 use crate::ack::AckType;
 use crate::error::{ClientBuilderError, ClientError, PayloadError, SocketError};
 use crate::marker::{AckId, AckMarker, BinaryMarker};
-use bytes::Bytes;
+use bytestring::ByteString;
 use sioc_engine::engine::Engine;
 use sioc_engine::transport::TransportStrategy;
 use sioc_engine::websocket::{DefaultWebSocketConnector, WebSocketConnector};
@@ -177,19 +177,23 @@ impl Client {
     /// Opens a namespace and returns a sender/receiver pair.
     ///
     /// The namespace is not confirmed until a [`Signal::Connect`] arrives on the [`SocketReceiver`].
-    pub async fn connect(
-        &self,
-        ns: impl Into<String>,
-    ) -> Result<(SocketSender, SocketReceiver), SocketError> {
-        self.connect_with(ns, Bytes::from_static(b"")).await
+    pub async fn connect<S>(&self, ns: S) -> Result<(SocketSender, SocketReceiver), SocketError>
+    where
+        S: Into<ByteString>,
+    {
+        self.connect_with(ns, ByteString::new()).await
     }
 
     /// Opens a namespace with a connection payload.
-    pub async fn connect_with(
+    pub async fn connect_with<S, B>(
         &self,
-        ns: impl Into<String>,
-        data: impl Into<Bytes>,
-    ) -> Result<(SocketSender, SocketReceiver), SocketError> {
+        ns: S,
+        data: B,
+    ) -> Result<(SocketSender, SocketReceiver), SocketError>
+    where
+        S: Into<ByteString>,
+        B: Into<ByteString>,
+    {
         let (tx, rx) = mpsc::channel(32);
 
         let socket_tx = SocketSender::new(ns.into(), self.tx.clone());
@@ -222,13 +226,13 @@ impl Client {
 /// Wrap in [`Arc`](std::sync::Arc) to share across tasks.
 #[derive(Debug)]
 pub struct SocketSender {
-    ns: String,
+    ns: ByteString,
     tx: ManagerSender,
     is_connected: AtomicBool,
 }
 
 impl SocketSender {
-    fn new(ns: String, tx: ManagerSender) -> Self {
+    fn new(ns: ByteString, tx: ManagerSender) -> Self {
         Self {
             ns,
             tx,
@@ -283,7 +287,7 @@ impl Drop for SocketSender {
         if self.is_connected.swap(false, Ordering::Relaxed) {
             let type_name = std::any::type_name::<Self>();
 
-            tracing::warn!(ns = self.ns, "{type_name} dropped while connected");
+            tracing::warn!(ns = %self.ns, "{type_name} dropped while connected");
 
             // try_send is non-blocking; if the channel is full or closed the
             // disconnect packet is lost, but we've already logged the warning.

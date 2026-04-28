@@ -1,17 +1,17 @@
 [workspace]
-members = ["sioc", "sioc-socket", "sioc-engine", "sioc-macros", "examples/*"]
 resolver = "3"
+members = ["examples/*", "sioc", "sioc-engine", "sioc-macros", "sioc-socket"]
 
 [workspace.dependencies]
 sioc = { path = "./sioc" }
-sioc-socket = { path = "./sioc-socket" }
 sioc-engine = { path = "./sioc-engine" }
 sioc-macros = { path = "./sioc-macros" }
+sioc-socket = { path = "./sioc-socket" }
 
 # Async runtime
+futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "sync", "time"] }
 tokio-util = "0.7"
-futures-util = "0.3"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -20,16 +20,17 @@ serde_path_to_error = "0.1"
 
 # Zero-copy buffers
 bytes = "1"
+bytestring = { version = "1", features = ["serde"] }
 
 # Error handling
-thiserror = "2"
 miette = { version = "7", features = ["fancy"] }
+thiserror = "2"
 
 # URL parsing
 url = "2"
 
 # HTTP and WebSocket clients
-reqwest = { version = "0.13", default-features = false }
+reqwest = { version = "0.13", default-features = false, features = ["charset"] }
 tokio-tungstenite = { version = "0.28", features = ["url"] }
 
 # Logging

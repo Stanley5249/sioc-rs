@@ -36,19 +36,19 @@ where
 
 #[test]
 fn wire_unit() {
-    assert_eq!(serialize_ack(&Empty).unwrap(), b"[]");
+    assert_eq!(serialize_ack(&Empty).unwrap(), "[]");
 }
 
 #[test]
 fn wire_tuple() {
-    assert_eq!(serialize_ack(&Status(true, 200)).unwrap(), b"[true,200]");
+    assert_eq!(serialize_ack(&Status(true, 200)).unwrap(), "[true,200]");
 }
 
 #[test]
 fn wire_named() {
     assert_eq!(
         serialize_ack(&Save { ok: true, id: 7 }).unwrap(),
-        b"[true,7]"
+        "[true,7]"
     );
 }
 
@@ -69,17 +69,17 @@ fn roundtrip_named() {
 
 #[test]
 fn strict_rejects_trailing() {
-    assert!(deserialize_ack::<Strict>(b"[true,\"extra\"]").is_err());
+    assert!(deserialize_ack::<Strict>("[true,\"extra\"]").is_err());
 }
 
 #[test]
 fn flexible_discards_trailing() {
-    assert_eq!(deserialize_ack::<Empty>(b"[null]").unwrap(), Empty);
+    assert_eq!(deserialize_ack::<Empty>("[null]").unwrap(), Empty);
 }
 
 #[test]
 fn flatten_collects() {
-    let ack = deserialize_ack::<Flex>(b"[true,1,\"x\"]").unwrap();
+    let ack = deserialize_ack::<Flex>("[true,1,\"x\"]").unwrap();
     assert!(ack.ok);
     assert_eq!(ack.extras.len(), 2);
 }

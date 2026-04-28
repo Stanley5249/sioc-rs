@@ -1,4 +1,4 @@
-use bytes::Bytes;
+use bytestring::ByteString;
 use serde::Deserialize;
 use sioc::error::EventError;
 use sioc::prelude::*;
@@ -96,7 +96,7 @@ impl TryFrom<DynEvent> for MyEvent {
 fn main() -> Result<(), EventError> {
     // Example DynEvent for event "a"
     let event = DynEvent {
-        data: Bytes::from_static(b"[\"a\"]"),
+        data: ByteString::from_static("[\"a\"]"),
         attachments: None,
         id: None,
     };

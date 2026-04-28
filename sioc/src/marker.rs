@@ -60,7 +60,7 @@ where
 
 /// A raw ack ID wrapped with the expected ack payload type `A`.
 ///
-/// This ensures that when you send an ack via [`SocketSender::ack`](crate::client::SocketSender::ack),
+/// This ensures that when you send an ack via [`SocketSender::acknowledge`](crate::client::SocketSender::acknowledge),
 /// the response type matches what the sender originally requested.
 #[must_use = "AckId must be used to send an acknowledgment"]
 pub struct AckId<A>(u64, PhantomData<A>);

@@ -34,7 +34,7 @@ where
             buffer.put_u8(SEPARATOR);
         }
         match frame {
-            Frame::Packet(packet) => buffer.put_slice(&packet.encode()),
+            Frame::Packet(packet) => buffer.put_slice(packet.encode_bytes().as_bytes()),
             Frame::Binary(bytes) => encode_binary(&mut buffer, bytes),
         }
     }
@@ -44,9 +44,9 @@ where
 /// Decodes a single frame from a raw bytes value.
 fn decode_frame(bytes: Bytes) -> Result<Frame, TransportError> {
     Ok(if bytes.first().is_some_and(|&b| b == b'b') {
-        decode_binary(bytes)?.into()
+        Frame::Binary(decode_binary(bytes)?)
     } else {
-        Packet::decode(bytes)?.into()
+        Frame::Packet(Packet::decode_bytes(bytes.try_into()?)?)
     })
 }
 

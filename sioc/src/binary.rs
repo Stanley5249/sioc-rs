@@ -4,7 +4,7 @@
 //! Each binary buffer in the JSON is replaced by a **placeholder** object
 //! `{"_placeholder": true, "num": 0}` that references the frame by index.
 //!
-//! Use [`AttachmentBuilder`] inside a binary emit/ack closure to register
+//! Use [`AttachmentsBuilder`] inside a binary emit/ack closure to register
 //! binary payloads and obtain [`Placeholder`]s to embed in your struct fields.
 
 use bytes::Bytes;
@@ -14,7 +14,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// A binary attachment placeholder serialised as
 /// `{"_placeholder": true, "num": <index>}`.
 ///
-/// Obtained from [`AttachmentBuilder::attach`].  Embed this in your event or
+/// Obtained from [`AttachmentsBuilder::attach`].  Embed this in your event or
 /// ack struct wherever you would normally put a `Bytes` field — the manager
 /// sends the real binary data as a follow-up frame referenced by `num`.
 pub struct Placeholder {
@@ -63,7 +63,7 @@ impl<'de> Deserialize<'de> for Placeholder {
 ///
 /// Passed into the builder closure when emitting binary events or acks via
 /// [`SocketSender::emit`](crate::client::SocketSender::emit) or
-/// [`SocketSender::ack`](crate::client::SocketSender::ack).
+/// [`SocketSender::acknowledge`](crate::client::SocketSender::acknowledge).
 #[derive(Default)]
 pub struct AttachmentsBuilder {
     buffer: Vec<Bytes>,

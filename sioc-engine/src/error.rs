@@ -4,6 +4,7 @@
 
 use crate::engine::EngineAction;
 use crate::packet::{Frame, Handshake, Packet};
+use bytestring::ByteString;
 use miette::Diagnostic;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
@@ -129,6 +130,11 @@ pub enum TransportError {
     #[diagnostic(code(sioc_engine::transport::join))]
     Join(#[from] JoinError),
 
+    /// Received bytes were not valid UTF-8 when text was expected.
+    #[error("expected UTF-8, but got invalid bytes")]
+    #[diagnostic(code(sioc_engine::transport::utf8))]
+    Utf8(#[from] std::str::Utf8Error),
+
     /// A frame arrived that is not valid in the current protocol state.
     #[error("unexpected frame {frame:?}: {message}")]
     #[diagnostic(
@@ -157,11 +163,6 @@ pub enum WebSocketError {
     #[error(transparent)]
     #[diagnostic(code(sioc_engine::transport::websocket::tungstenite))]
     Tungstenite(#[from] tokio_tungstenite::tungstenite::Error),
-
-    /// An outbound packet could not be encoded as a UTF-8 WebSocket text frame.
-    #[error("packet encoding produced invalid UTF-8")]
-    #[diagnostic(code(sioc_engine::transport::websocket::utf8))]
-    Utf8(#[from] std::str::Utf8Error),
 
     /// The WebSocket stream ended without a close frame.
     #[error("WebSocket stream closed unexpectedly")]
@@ -199,20 +200,24 @@ pub enum PollingError {
 /// Errors from decoding a raw Engine.IO packet.
 #[derive(Debug, Error, Diagnostic)]
 pub enum PacketError {
-    /// Packet JSON payload is malformed.
-    #[error(transparent)]
-    #[diagnostic(transparent)]
-    Payload(#[from] PayloadError),
-
-    /// First byte is not a recognised packet-type digit.
-    #[error("invalid type id {id:#04x}")]
-    #[diagnostic(code(sioc_engine::packet::invalid_id))]
-    InvalidId { id: u8 },
-
     /// Packet bytes are empty.
     #[error("empty packet")]
     #[diagnostic(code(sioc_engine::packet::empty))]
     Empty,
+
+    /// First char of a packet is not a valid Engine.IO type id.
+    #[error("invalid type id {id}")]
+    #[diagnostic(code(sioc_engine::packet::invalid_id))]
+    InvalidId { id: char },
+
+    /// Open packet's JSON payload is malformed.
+    #[error("failed to parse Open payload")]
+    #[diagnostic(code(sioc_engine::packet::handshake))]
+    Handshake(#[from] serde_json::Error),
+
+    /// Unexpected payload for the packet type.
+    #[error("unexpected payload for type id {id}")]
+    Payload { id: char, payload: ByteString },
 }
 
 /// JSON serialization or deserialization failure.

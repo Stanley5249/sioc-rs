@@ -4,6 +4,7 @@
 
 use crate::packet::{DynAck, Signal};
 use bytes::Bytes;
+use bytestring::ByteString;
 use miette::Diagnostic;
 use sioc_engine::engine::EngineAction;
 use thiserror::Error;
@@ -32,9 +33,9 @@ pub enum PacketError {
     Empty,
 
     /// First byte does not map to any known packet type.
-    #[error("unknown packet type: {byte:#04x}")]
+    #[error("unknown packet type {id}")]
     #[diagnostic(code(sioc_socket::parse::unknown_packet_type))]
-    InvalidType { byte: u8 },
+    InvalidId { id: char },
 
     /// Binary packet header has no attachment count before the `-` separator.
     #[error("binary packet missing attachment count prefix")]
@@ -95,7 +96,7 @@ pub enum ManagerError {
         help("the receiver was dropped; the socket is probably shut down")
     )]
     SendSocket {
-        ns: String,
+        ns: ByteString,
         #[source]
         source: mpsc::error::SendError<Signal>,
     },
@@ -106,7 +107,7 @@ pub enum ManagerError {
         code(sioc_socket::manager::send_ack),
         help("the ack receiver was dropped; the namespace may have disconnected")
     )]
-    SendAck { ns: String, ack: DynAck },
+    SendAck { ns: ByteString, ack: DynAck },
 
     /// Received a text frame while a binary reassembly was in progress.
     #[error("unexpected text frame: {0:?}")]
@@ -116,7 +117,7 @@ pub enum ManagerError {
             "the server sent a text frame while binary reassembly was in progress; likely a server protocol bug"
         )
     )]
-    UnexpectedText(Bytes),
+    UnexpectedText(ByteString),
 
     /// Received a binary frame with no pending reassembly.
     #[error("unexpected binary frame: {0:?}")]
@@ -134,7 +135,7 @@ pub enum ManagerError {
         code(sioc_socket::manager::unknown_namespace),
         help("connect the namespace before sending or receiving on it")
     )]
-    UnknownNamespace { ns: String },
+    UnknownNamespace { ns: ByteString },
 
     /// Ack ID in a server response has no registered handler.
     #[error("ack for unknown ID {id} in namespace `{ns}`")]
@@ -144,7 +145,7 @@ pub enum ManagerError {
             "the server sent an ack for an unregistered ID; the server may be replying to an already-acknowledged event"
         )
     )]
-    UnknownAckId { ns: String, id: u64 },
+    UnknownAckId { ns: ByteString, id: u64 },
 
     /// Attempted to open a namespace that is already open.
     #[error("namespace conflict: `{ns}`")]
@@ -152,5 +153,5 @@ pub enum ManagerError {
         code(sioc_socket::manager::namespace_conflict),
         help("the namespace is already open; drop the existing handle before reconnecting")
     )]
-    NamespaceConflict { ns: String },
+    NamespaceConflict { ns: ByteString },
 }

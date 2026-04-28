@@ -211,12 +211,11 @@ pub fn derive_deserialize_payload(input: TokenStream) -> TokenStream {
 
 /// Derives `TryFrom<DynEvent>` for a dispatcher enum.
 ///
-/// Each variant must be a newtype holding a type that implements [`EventHandler`]
-/// (e.g. `Event<E>`).
+/// Each variant must be a newtype wrapping `Event<E>` for some `E: EventType + DeserializePayload`.
 ///
 /// The macro generates an internal helper enum with a `serde::Deserialize` impl
 /// that dispatches on the event name string, plus a `TryFrom<DynEvent>` impl that
-/// routes each deserialized payload through [`EventHandler::handle`].
+/// routes each deserialized payload to the matching variant.
 ///
 /// # Example
 ///

@@ -1,7 +1,8 @@
 //! Socket.IO v4 packet types.
 
 use crate::parse::{hint_packet_size, write_packet};
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
+use bytestring::ByteString;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use thiserror::Error;
@@ -9,13 +10,13 @@ use tokio::sync::{mpsc, oneshot};
 
 /// A value tagged with a Socket.IO namespace path (e.g. `"/chat"`).
 #[derive(Debug)]
-pub struct Ns<T>(pub String, pub T);
+pub struct Ns<T>(pub ByteString, pub T);
 
 /// Server payload confirming a successful namespace connection.
 #[derive(Debug, Deserialize)]
 pub struct Connect {
     /// Server-assigned session ID.
-    pub sid: String,
+    pub sid: ByteString,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -24,7 +25,7 @@ pub struct Connect {
 #[derive(Debug, Error, Deserialize)]
 #[error("{message}")]
 pub struct ConnectError {
-    pub message: String,
+    pub message: ByteString,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -32,7 +33,7 @@ pub struct ConnectError {
 /// Type-erased inbound event after binary reassembly.
 #[derive(Clone)]
 pub struct DynEvent {
-    pub data: Bytes,
+    pub data: ByteString,
     pub id: Option<u64>,
     pub attachments: Option<Vec<Bytes>>,
 }
@@ -52,9 +53,12 @@ impl std::fmt::Debug for DynEvent {
 }
 
 impl DynEvent {
-    pub fn new(data: Bytes, id: Option<u64>) -> Self {
+    pub fn new<T>(data: T, id: Option<u64>) -> Self
+    where
+        T: Into<ByteString>,
+    {
         Self {
-            data,
+            data: data.into(),
             id,
             attachments: None,
         }
@@ -71,7 +75,7 @@ impl DynEvent {
 /// Convert to a typed `sioc::Ack` via `TryFrom<DynAck>`.
 #[derive(Clone)]
 pub struct DynAck {
-    pub data: Bytes,
+    pub data: ByteString,
     pub attachments: Option<Vec<Bytes>>,
 }
 
@@ -87,9 +91,12 @@ impl std::fmt::Debug for DynAck {
 }
 
 impl DynAck {
-    pub fn new(data: Bytes) -> Self {
+    pub fn new<T>(data: T) -> Self
+    where
+        T: Into<ByteString>,
+    {
         Self {
-            data,
+            data: data.into(),
             attachments: None,
         }
     }
@@ -102,7 +109,7 @@ impl DynAck {
 
 /// A fully decoded inbound packet.
 ///
-/// The default `E = DynEvent` carries raw events; use [`cast`](Packet::cast) to
+/// The default `E = DynEvent` carries raw events; use [`cast`](Signal::cast) to
 /// convert to a typed event.
 #[derive(Debug)]
 pub enum Signal<E = DynEvent> {
@@ -117,7 +124,7 @@ pub enum Signal<E = DynEvent> {
 }
 
 impl Signal {
-    /// Converts the [`Event`](Packet::Event) variant via `TryFrom<DynEvent>`, passing other variants through.
+    /// Converts the [`Event`](Signal::Event) variant via `TryFrom<DynEvent>`, passing other variants through.
     pub fn cast<E>(self) -> Result<Signal<E>, E::Error>
     where
         E: TryFrom<DynEvent>,
@@ -137,19 +144,19 @@ pub enum Directive {
     /// Opens a namespace; `data` is an optional authentication payload.
     Connect {
         tx: mpsc::Sender<Signal>,
-        data: Bytes,
+        data: ByteString,
     },
     /// Closes the namespace.
     Disconnect,
     /// Emits an event; if `tx` is set, an ack ID is assigned and the response routed to it.
     Event {
-        data: Bytes,
+        data: ByteString,
         tx: Option<oneshot::Sender<DynAck>>,
         attachments: Option<Vec<Bytes>>,
     },
     /// Acknowledges a previously received event.
     Ack {
-        data: Bytes,
+        data: ByteString,
         id: u64,
         attachments: Option<Vec<Bytes>>,
     },
@@ -158,34 +165,30 @@ pub enum Directive {
 /// A wire-level packet decoded from a single text frame.
 ///
 /// Binary variants carry an attachment count; the socket router collects
-/// the follow-up binary frames and reassembles them into a [`Packet`].
+/// the follow-up binary frames and reassembles them into a [`Signal`].
 #[derive(Debug)]
 pub enum Packet {
     /// Type `0` — namespace connection confirmed.
-    Connect(Bytes),
+    Connect(ByteString),
     /// Type `1` — namespace disconnection.
     Disconnect,
-    /// Types `2` — event (text or binary).
-    Event {
-        data: Bytes,
-        id: Option<u64>,
-    },
-    /// Types `3` — acknowledgement (text or binary).
-    Ack {
-        data: Bytes,
-        id: u64,
-    },
+    /// Type `2` — event (text or binary).
+    Event { data: ByteString, id: Option<u64> },
+    /// Type `3` — acknowledgement (text or binary).
+    Ack { data: ByteString, id: u64 },
     /// Type `4` — namespace connection rejected.
-    ConnectError(Bytes),
+    ConnectError(ByteString),
 
+    /// Type `5` — binary event with `count` follow-up binary frames.
     BinaryEvent {
-        data: Bytes,
+        data: ByteString,
         id: Option<u64>,
         count: usize,
     },
 
+    /// Type `6` — binary acknowledgement with `count` follow-up binary frames.
     BinaryAck {
-        data: Bytes,
+        data: ByteString,
         id: u64,
         count: usize,
     },
@@ -199,7 +202,7 @@ impl Packet {
             Self::Disconnect => hint_packet_size(ns, false, false, None),
             Self::Event { data, id } => hint_packet_size(ns, false, id.is_some(), Some(data)),
             Self::Ack { data, .. } => hint_packet_size(ns, false, true, Some(data)),
-            Self::ConnectError(bytes) => hint_packet_size(ns, false, false, Some(bytes)),
+            Self::ConnectError(data) => hint_packet_size(ns, false, false, Some(data)),
             Self::BinaryEvent { data, id, .. } => {
                 hint_packet_size(ns, true, id.is_some(), Some(data))
             }
@@ -207,8 +210,8 @@ impl Packet {
         }
     }
 
-    pub fn encode(&self, ns: &str) -> Bytes {
-        let mut buffer = BytesMut::with_capacity(self.size_hint(ns));
+    pub fn encode(&self, ns: &str) -> String {
+        let mut buffer = String::with_capacity(self.size_hint(ns));
 
         match self {
             Self::Connect(bytes) => write_packet(&mut buffer, b'0', None, ns, None, Some(bytes)),
@@ -227,7 +230,7 @@ impl Packet {
             }
         }
 
-        buffer.freeze()
+        buffer
     }
 }
 
@@ -236,7 +239,7 @@ impl Ns<Packet> {
         self.1.size_hint(&self.0)
     }
 
-    pub fn encode(&self) -> Bytes {
+    pub fn encode(&self) -> String {
         self.1.encode(&self.0)
     }
 }

@@ -10,7 +10,7 @@
 //! - [`AckHandle`] — a future that resolves when the server's ack arrives.
 //!
 //! Outbound acks are sent directly via
-//! [`SocketSender::ack`](crate::client::SocketSender::ack) — blanket [`Acknowledge`] impls
+//! [`SocketSender::acknowledge`](crate::client::SocketSender::acknowledge) — blanket [`Acknowledge`] impls
 //! handle serialization automatically for both plain acks and binary closures.
 
 use crate::binary::AttachmentsBuilder;
@@ -45,8 +45,8 @@ use tokio::sync::oneshot;
 /// struct SaveAck { ok: bool, id: u64 }
 ///
 /// fn main() {
-///     assert_eq!(serialize_ack(&()).unwrap(), b"[]");
-///     assert_eq!(serialize_ack(&SaveAck { ok: true, id: 7 }).unwrap(), b"[true,7]");
+///     assert_eq!(serialize_ack(&()).unwrap(), "[]");
+///     assert_eq!(serialize_ack(&SaveAck { ok: true, id: 7 }).unwrap(), "[true,7]");
 /// }
 /// ```
 pub trait AckType: Sized {
@@ -157,6 +157,7 @@ mod tests {
     use super::*;
     use crate::marker::{AckMarker, HasAck, HasBinary};
     use bytes::Bytes;
+    use bytestring::ByteString;
 
     #[derive(Debug, PartialEq)]
     struct BinaryBoolAck(bool);
@@ -214,19 +215,19 @@ mod tests {
 
     #[test]
     fn serialize_unit_ack() {
-        assert_eq!(serialize_ack(&()).unwrap(), b"[]");
+        assert_eq!(serialize_ack(&()).unwrap(), "[]");
     }
 
     #[test]
     fn deserialize_unit_ack() {
-        assert_eq!(deserialize_ack::<()>(b"[]").unwrap(), ());
+        assert_eq!(deserialize_ack::<()>("[]").unwrap(), ());
     }
 
     #[test]
     fn from_ack_with_binary() {
         let attachment = Bytes::from_static(b"\xDE\xAD");
         let ack = DynAck {
-            data: Bytes::from_static(b"[true]"),
+            data: ByteString::from_static("[true]"),
             attachments: Some(vec![attachment.clone()]),
         };
         let ack: Ack<BinaryBoolAck> = ack.try_into().unwrap();
@@ -238,7 +239,7 @@ mod tests {
     #[test]
     fn from_ack_missing_binary_fails() {
         let ack = DynAck {
-            data: Bytes::from_static(b"[]"),
+            data: ByteString::from_static("[]"),
             attachments: None,
         };
         let result: Result<Ack<BinaryUnitAck>, _> = ack.try_into();
@@ -248,7 +249,7 @@ mod tests {
     #[test]
     fn from_ack_unexpected_binary_fails() {
         let ack = DynAck {
-            data: Bytes::from_static(b"[]"),
+            data: ByteString::from_static("[]"),
             attachments: Some(vec![Bytes::from_static(b"x")]),
         };
         let result: Result<Ack<()>, _> = ack.try_into();
@@ -271,7 +272,7 @@ mod tests {
                 id,
                 attachments,
             } => {
-                assert_eq!(&data[..], b"[true]");
+                assert_eq!(&data[..], "[true]");
                 assert_eq!(id, 3);
                 let att = attachments.expect("expected attachments");
                 assert_eq!(att.len(), 1);

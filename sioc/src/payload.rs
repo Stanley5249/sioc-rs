@@ -68,16 +68,16 @@ where
     }
 }
 
-/// Serializes an [`EventType`] + [`SerializePayload`] value into its wire-format byte representation.
-pub fn serialize_event<E>(payload: &E) -> Result<Vec<u8>, PayloadError>
+/// Serializes an [`EventType`] + [`SerializePayload`] value into its wire-format string representation.
+pub fn serialize_event<E>(payload: &E) -> Result<String, PayloadError>
 where
     E: EventType + SerializePayload,
 {
     serialize(&EventPayload(payload))
 }
 
-/// Deserializes a wire-format byte slice into a typed [`EventType`] + [`DeserializePayload`] value.
-pub fn deserialize_event<E>(data: &[u8]) -> Result<E, PayloadError>
+/// Deserializes a wire-format string into a typed [`EventType`] + [`DeserializePayload`] value.
+pub fn deserialize_event<E>(data: &str) -> Result<E, PayloadError>
 where
     E: EventType + DeserializePayload,
 {
@@ -164,16 +164,16 @@ where
     }
 }
 
-/// Serializes an [`AckType`] + [`SerializePayload`] value into its wire-format byte representation.
-pub fn serialize_ack<A>(payload: &A) -> Result<Vec<u8>, PayloadError>
+/// Serializes an [`AckType`] + [`SerializePayload`] value into its wire-format string representation.
+pub fn serialize_ack<A>(payload: &A) -> Result<String, PayloadError>
 where
     A: AckType + SerializePayload,
 {
     serialize(&AckPayload(payload))
 }
 
-/// Deserializes a wire-format byte slice into a typed [`AckType`] + [`DeserializePayload`] value.
-pub fn deserialize_ack<A>(data: &[u8]) -> Result<A, PayloadError>
+/// Deserializes a wire-format string into a typed [`AckType`] + [`DeserializePayload`] value.
+pub fn deserialize_ack<A>(data: &str) -> Result<A, PayloadError>
 where
     A: AckType + DeserializePayload,
 {

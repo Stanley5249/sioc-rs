@@ -1,17 +1,17 @@
 use std::time::Duration;
 
 use crate::error::PacketError;
-use crate::payload::deserialize;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::Bytes;
+use bytestring::ByteString;
 use serde::Deserialize;
 
-pub const PROBE: Bytes = Bytes::from_static(b"probe");
+pub const PROBE: ByteString = ByteString::from_static("probe");
 
 /// Content exchanged between the Socket.IO and Engine.IO layers.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Message {
     /// A UTF-8 text payload.
-    Text(Bytes),
+    Text(ByteString),
     /// A raw binary payload.
     Binary(Bytes),
     /// Signals a clean connection close.
@@ -30,7 +30,7 @@ impl std::fmt::Debug for Message {
 
 /// A wire-level frame exchanged with the transport layer.
 ///
-/// [`Frame::Packet`] carries a fully-encoded Engine.IO text packet (e.g. `b"4hello"`).
+/// [`Frame::Packet`] carries a fully-encoded Engine.IO text packet (e.g. `"4hello"`).
 /// [`Frame::Binary`] carries a raw binary payload with no packet-type prefix.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Frame {
@@ -77,10 +77,10 @@ impl std::fmt::Debug for Frame {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Handshake {
     /// Session identifier; sent as the `sid` query parameter in all subsequent requests.
-    pub sid: String,
+    pub sid: ByteString,
 
     /// Available transport upgrades (e.g. `["websocket"]`).
-    pub upgrades: Vec<String>,
+    pub upgrades: Vec<ByteString>,
 
     /// Server ping interval in milliseconds.
     #[serde(rename = "pingInterval")]
@@ -100,17 +100,17 @@ impl Handshake {
         self.upgrades.iter().any(|u| u == "websocket")
     }
 
-    /// Combined `pingInterval + pingTimeout` as a [`Duration`](std::time::Duration).
+    /// Combined `pingInterval + pingTimeout` as a [`Duration`].
     pub fn ping_window(&self) -> Duration {
         Duration::from_millis(self.ping_interval + self.ping_timeout)
     }
 }
 
-fn encode_packet(prefix: u8, data: &[u8]) -> Bytes {
-    let mut buffer = BytesMut::with_capacity(1 + data.len());
-    buffer.put_u8(prefix);
-    buffer.put_slice(data);
-    buffer.freeze()
+fn encode_packet(prefix: u8, data: &str) -> ByteString {
+    let mut s = String::with_capacity(1 + data.len());
+    s.push(prefix as char);
+    s.push_str(data);
+    s.into()
 }
 
 /// A packet in the Engine.IO v4 protocol.
@@ -121,11 +121,11 @@ pub enum Packet {
     /// `1` — The transport can be closed.
     Close,
     /// `2` — Heartbeat from the server (client must reply with [`Packet::Pong`]).
-    Ping(Bytes),
+    Ping(ByteString),
     /// `3` — Heartbeat reply.
-    Pong(Bytes),
+    Pong(ByteString),
     /// `4` — Application-level text data.
-    Message(Bytes),
+    Message(ByteString),
     /// `5` — Sent by the client to finalise a transport upgrade.
     Upgrade,
     /// `6` — Sent by the server to flush a pending long-poll GET during upgrade.
@@ -133,38 +133,84 @@ pub enum Packet {
 }
 
 impl Packet {
-    /// Encodes this packet into a [`Frame`] for transport.
-    pub fn encode(&self) -> Bytes {
+    /// Encodes this packet into a [`ByteString`].
+    pub fn encode_bytes(&self) -> ByteString {
         match self {
             Self::Open(..) => panic!("client should never encode an Open packet"),
-            Self::Close => Bytes::from_static(b"1"),
+            Self::Close => ByteString::from_static("1"),
             Self::Ping(data) => encode_packet(b'2', data),
             Self::Pong(data) => encode_packet(b'3', data),
             Self::Message(data) => encode_packet(b'4', data),
-            Self::Upgrade => Bytes::from_static(b"5"),
+            Self::Upgrade => ByteString::from_static("5"),
             Self::Noop => panic!("client should never encode a Noop packet"),
         }
     }
 
+    /// Encodes this packet into a [`String`].
+    pub fn encode_string(&self) -> String {
+        self.encode_bytes().into()
+    }
+
     /// Decodes a single packet from a text frame.
     ///
-    /// The first byte is the packet-type digit (`b'0'`..=`b'6'`).
-    pub fn decode(mut data: Bytes) -> Result<Self, PacketError> {
-        if data.is_empty() {
-            Err(PacketError::Empty)?;
-        }
+    /// The first character is the packet-type digit (`'0'`..=`'6'`).
+    pub fn decode_bytes(data: ByteString) -> Result<Self, PacketError> {
+        let mut chars = data.chars();
 
-        match data.get_u8() {
-            b'0' => Ok(Packet::Open(deserialize(&data)?)),
-            b'1' => Ok(Packet::Close),
-            b'2' => Ok(Packet::Ping(data)),
-            b'3' => Ok(Packet::Pong(data)),
-            b'4' => Ok(Packet::Message(data)),
-            b'5' => Ok(Packet::Upgrade),
-            b'6' => Ok(Packet::Noop),
+        let id = match chars.next() {
+            Some(c) => c,
+            None => return Err(PacketError::Empty),
+        };
+
+        let payload = chars.as_str();
+
+        match id {
+            '0' => Ok(Packet::Open(serde_json::from_str(payload)?)),
+            '1' => {
+                if payload.is_empty() {
+                    Ok(Packet::Close)
+                } else {
+                    Err(PacketError::Payload {
+                        id: '1',
+                        payload: data.slice_ref(payload),
+                    })
+                }
+            }
+            '2' => Ok(Packet::Ping(data.slice_ref(payload))),
+            '3' => Ok(Packet::Pong(data.slice_ref(payload))),
+            '4' => Ok(Packet::Message(data.slice_ref(payload))),
+            '5' => {
+                if payload.is_empty() {
+                    Ok(Packet::Upgrade)
+                } else {
+                    Err(PacketError::Payload {
+                        id: '5',
+                        payload: data.slice_ref(payload),
+                    })
+                }
+            }
+            '6' => {
+                if payload.is_empty() {
+                    Ok(Packet::Noop)
+                } else {
+                    Err(PacketError::Payload {
+                        id: '6',
+                        payload: data.slice_ref(payload),
+                    })
+                }
+            }
             id => Err(PacketError::InvalidId { id })?,
         }
     }
+}
+
+/// Converts an inbound WebSocket text frame into a [`ByteString`] without copying.
+pub(crate) fn bytestring_from_utf8_bytes(
+    utf8: tokio_tungstenite::tungstenite::Utf8Bytes,
+) -> ByteString {
+    let bytes: Bytes = utf8.into();
+    // SAFETY: `tungstenite::Utf8Bytes` guarantees the inner `Bytes` is valid UTF-8.
+    unsafe { ByteString::from_bytes_unchecked(bytes) }
 }
 
 #[cfg(test)]
@@ -189,8 +235,8 @@ mod tests {
             "pingInterval": 25000,
             "pingTimeout": 20000
         });
-        let bytes = Bytes::from(format!("0{}", json));
-        assert!(Packet::decode(bytes).is_err());
+        let bytes = ByteString::from(format!("0{}", json));
+        assert!(Packet::decode_bytes(bytes).is_err());
     }
 
     #[test]
@@ -205,16 +251,16 @@ mod tests {
     #[test]
     fn decode_invalid_packet_id() {
         assert!(matches!(
-            Packet::decode(Bytes::from_static(b"9")),
-            Err(crate::error::PacketError::InvalidId { id: b'9' })
+            Packet::decode_bytes(ByteString::from_static("9")),
+            Err(PacketError::InvalidId { id: '9' })
         ));
     }
 
     #[test]
     fn decode_empty_packet() {
         assert!(matches!(
-            Packet::decode(Bytes::new()),
-            Err(crate::error::PacketError::Empty)
+            Packet::decode_bytes(ByteString::new()),
+            Err(PacketError::Empty)
         ));
     }
 
@@ -240,7 +286,7 @@ mod tests {
 
     #[test]
     fn encode_decode_ping_round_trip() {
-        let payload = Bytes::from_static(b"probe");
+        let payload = ByteString::from_static("probe");
         let Frame::Packet(packet) = Packet::Ping(payload.clone()).into() else {
             panic!("expected Packet frame");
         };
@@ -252,7 +298,7 @@ mod tests {
 
     #[test]
     fn encode_decode_pong_round_trip() {
-        let payload = Bytes::from_static(b"probe");
+        let payload = ByteString::from_static("probe");
         let Frame::Packet(packet) = Packet::Pong(payload.clone()).into() else {
             panic!("expected Packet frame");
         };
@@ -264,7 +310,7 @@ mod tests {
 
     #[test]
     fn encode_decode_text_message_round_trip() {
-        let text = Bytes::from_static(b"hello world");
+        let text = ByteString::from_static("hello world");
         let Frame::Packet(packet) = Packet::Message(text.clone()).into() else {
             panic!("expected Packet frame");
         };
@@ -292,7 +338,7 @@ mod tests {
 
     #[test]
     fn encode_ping_empty_payload() {
-        let Frame::Packet(packet) = Packet::Ping(Bytes::new()).into() else {
+        let Frame::Packet(packet) = Packet::Ping(ByteString::new()).into() else {
             panic!("expected Packet frame");
         };
         let Packet::Ping(decoded) = packet else {

@@ -86,7 +86,7 @@
 //! - Fully async, built on [Tokio](https://tokio.rs).
 //! - Derive macros for zero-boilerplate event and ack definitions.
 //! - Compile-time enforcement of binary attachment and acknowledgement policies.
-//! - Zero-copy packet parsing via [`bytes::Bytes`].
+//! - Zero-copy packet parsing via [`bytestring::ByteString`] and [`bytes::Bytes`].
 //!
 //! [spec]: https://socket.io/docs/v4/socket-io-protocol/
 //! [eio-spec]: https://socket.io/docs/v4/engine-io-protocol/

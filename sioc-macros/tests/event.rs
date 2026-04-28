@@ -57,12 +57,12 @@ fn name_implicit() {
 
 #[test]
 fn wire_unit() {
-    assert_eq!(serialize_event(&Ping).unwrap(), b"[\"ping\"]");
+    assert_eq!(serialize_event(&Ping).unwrap(), "[\"ping\"]");
 }
 
 #[test]
 fn wire_tuple() {
-    assert_eq!(serialize_event(&Moved(3, -7)).unwrap(), b"[\"moved\",3,-7]");
+    assert_eq!(serialize_event(&Moved(3, -7)).unwrap(), "[\"moved\",3,-7]");
 }
 
 #[test]
@@ -73,7 +73,7 @@ fn wire_named() {
             user: "alice".into()
         })
         .unwrap(),
-        b"[\"join\",\"lobby\",\"alice\"]",
+        "[\"join\",\"lobby\",\"alice\"]",
     );
 }
 
@@ -109,18 +109,18 @@ fn roundtrip_generic() {
 
 #[test]
 fn wrong_name_fails() {
-    assert!(deserialize_event::<Ping>(b"[\"pong\"]").is_err());
+    assert!(deserialize_event::<Ping>("[\"pong\"]").is_err());
 }
 
 #[test]
 fn strict_rejects_trailing() {
-    assert!(deserialize_event::<Chat>(b"[\"chat\",\"hi\",null]").is_err());
+    assert!(deserialize_event::<Chat>("[\"chat\",\"hi\",null]").is_err());
 }
 
 #[test]
 fn flexible_discards_trailing() {
     assert_eq!(
-        deserialize_event::<Ping>(b"[\"ping\",null,42]").unwrap(),
+        deserialize_event::<Ping>("[\"ping\",null,42]").unwrap(),
         Ping
     );
 }
@@ -128,7 +128,7 @@ fn flexible_discards_trailing() {
 #[test]
 fn flatten_collects() {
     use serde_json::json;
-    let evt = deserialize_event::<Stream>(b"[\"stream\",\"s1\",\"rock\",\"jazz\"]").unwrap();
+    let evt = deserialize_event::<Stream>("[\"stream\",\"s1\",\"rock\",\"jazz\"]").unwrap();
     assert_eq!(
         evt,
         Stream {

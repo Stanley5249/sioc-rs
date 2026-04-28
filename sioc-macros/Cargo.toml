@@ -2,12 +2,14 @@
 name = "sioc-macros"
 version = "0.1.0"
 edition = "2024"
-authors = ["Stanley5249 <seer852741@gmail.com>"]
 description = "Procedural macros for Sioc"
-license = "MIT OR Apache-2.0"
 repository = "https://github.com/Stanley5249/sioc-rs"
-keywords = ["socketio", "macros", "procedural-macro", "codegen"]
-categories = ["network-programming", "development-tools::procedural-macro-helpers"]
+license = "MIT OR Apache-2.0"
+keywords = ["codegen", "macros", "procedural-macro", "socketio"]
+categories = [
+  "development-tools::procedural-macro-helpers",
+  "network-programming"
+]
 
 [lib]
 proc-macro = true
@@ -20,6 +22,6 @@ quote = "1"
 syn = { version = "2", features = ["full"] }
 
 [dev-dependencies]
-sioc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sioc.workspace = true
