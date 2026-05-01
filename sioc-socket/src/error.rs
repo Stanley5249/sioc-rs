@@ -10,8 +10,6 @@ use sioc_engine::engine::EngineAction;
 use thiserror::Error;
 use tokio::sync::mpsc;
 
-pub use sioc_engine::error::PayloadError;
-
 /// Errors from decoding a raw Socket.IO packet.
 ///
 /// Callers receive this wrapped in [`ManagerError::Packet`].
@@ -20,7 +18,7 @@ pub enum PacketError {
     /// JSON payload in the packet is malformed.
     #[error(transparent)]
     #[diagnostic(code(sioc_socket::parse::json))]
-    Payload(#[from] PayloadError),
+    Json(#[from] serde_json::Error),
 
     /// Packet bytes are not valid UTF-8.
     #[error("invalid UTF-8 in packet")]

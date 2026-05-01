@@ -23,10 +23,6 @@ pub mod manager;
 pub mod packet;
 pub mod parse;
 
-pub mod payload {
-    pub use sioc_engine::payload::{deserialize, serialize};
-}
-
 pub mod prelude {
     pub use crate::manager::ManagerAction;
     pub use crate::packet::{Connect, ConnectError, DynAck, DynEvent, Ns};

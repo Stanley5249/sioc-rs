@@ -2,7 +2,6 @@
 
 use crate::error::{ManagerError, PacketError};
 use crate::packet::{Connect, ConnectError, Directive, DynAck, DynEvent, Ns, Packet, Signal};
-use crate::payload::deserialize;
 use bytes::Bytes;
 use bytestring::ByteString;
 use futures_util::{Sink, SinkExt, future};
@@ -485,7 +484,7 @@ impl Manager {
                     }
                 }
 
-                let connect: Connect = deserialize(&data).map_err(PacketError::Payload)?;
+                let connect: Connect = serde_json::from_str(&data).map_err(PacketError::Json)?;
 
                 socket.send_packet(ns, Signal::Connect(connect)).await?;
             }
@@ -509,7 +508,7 @@ impl Manager {
             Packet::ConnectError(data) => {
                 let Ns(ns, socket) = self.sockets.get_mut(ns)?;
 
-                let error: ConnectError = deserialize(&data).map_err(PacketError::Payload)?;
+                let error: ConnectError = serde_json::from_str(&data).map_err(PacketError::Json)?;
 
                 socket.send_packet(ns, Signal::ConnectError(error)).await?;
             }

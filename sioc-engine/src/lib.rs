@@ -28,7 +28,6 @@
 pub mod engine;
 pub mod error;
 pub mod packet;
-pub mod payload;
 pub mod polling;
 pub mod transport;
 pub mod websocket;

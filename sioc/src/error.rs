@@ -10,7 +10,25 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinError;
 
-pub use sioc_engine::error::PayloadError;
+/// JSON serialization or deserialization failure.
+#[derive(Debug, Error, Diagnostic)]
+#[error("payload error for `{type_name}`: {source}")]
+#[diagnostic(code(sioc::payload))]
+pub struct PayloadError {
+    type_name: &'static str,
+    #[source]
+    source: serde_path_to_error::Error<serde_json::Error>,
+}
+
+impl PayloadError {
+    /// Creates a `PayloadError` for type `T`.
+    pub fn new<T>(source: serde_path_to_error::Error<serde_json::Error>) -> Self {
+        Self {
+            type_name: std::any::type_name::<T>(),
+            source,
+        }
+    }
+}
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
