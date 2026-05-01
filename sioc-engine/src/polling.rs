@@ -6,78 +6,120 @@ use crate::error::{PollingError, TransportError};
 use crate::packet::{Frame, Handshake, Packet};
 use crate::websocket::{WebSocketConnector, websocket_connect, websocket_loop};
 use base64::prelude::*;
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::Bytes;
+use bytestring::ByteString;
 use reqwest::Client;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-const SEPARATOR: u8 = 0x1e;
+const SEPARATOR: char = '\x1e';
 
-fn encode_binary(buffer: &mut BytesMut, bytes: &[u8]) {
-    let b64 = BASE64_STANDARD.encode(bytes);
-    buffer.put_u8(b'b');
-    buffer.put_slice(b64.as_bytes());
-}
+impl Frame {
+    fn decode_binary(data: &[u8]) -> Result<Self, PollingError> {
+        Ok(Self::Binary(Bytes::from(BASE64_STANDARD.decode(data)?)))
+    }
 
-fn decode_binary(bytes: Bytes) -> Result<Bytes, PollingError> {
-    Ok(Bytes::from(BASE64_STANDARD.decode(&bytes[1..])?))
-}
+    fn decode_packet(bytes: ByteString) -> Result<Self, PollingError> {
+        Ok(Self::Packet(Packet::decode(bytes)?))
+    }
 
-fn encode_frames<'a, I>(frames: I) -> Bytes
-where
-    I: IntoIterator<Item = &'a Frame>,
-{
-    let mut buffer = BytesMut::new();
-    for (i, frame) in frames.into_iter().enumerate() {
-        if i > 0 {
-            buffer.put_u8(SEPARATOR);
-        }
-        match frame {
-            Frame::Packet(packet) => buffer.put_slice(packet.encode_bytes().as_bytes()),
-            Frame::Binary(bytes) => encode_binary(&mut buffer, bytes),
+    fn decode(bytes: ByteString) -> Result<Self, PollingError> {
+        let mut chars = bytes.chars();
+
+        if chars.next().is_some_and(|b| b == 'b') {
+            Self::decode_binary(chars.as_str().as_bytes())
+        } else {
+            Self::decode_packet(bytes)
         }
     }
-    buffer.freeze()
+
+    fn write(&self, buffer: &mut String) {
+        match self {
+            Frame::Packet(packet) => packet.write(buffer),
+            Frame::Binary(bytes) => {
+                buffer.push('b');
+                BASE64_STANDARD.encode_string(bytes, buffer);
+            }
+        }
+    }
 }
 
-/// Decodes a single frame from a raw bytes value.
-fn decode_frame(bytes: Bytes) -> Result<Frame, TransportError> {
-    Ok(if bytes.first().is_some_and(|&b| b == b'b') {
-        Frame::Binary(decode_binary(bytes)?)
-    } else {
-        Frame::Packet(Packet::decode_bytes(bytes.try_into()?)?)
-    })
-}
-
-/// Decode all frames from a polling response body.
-///
-/// `Bytes::split` on a separator always yields at least one element, so the
-/// returned `Vec` is guaranteed to be non-empty for any non-error response.
-fn decode_frames(bytes: Bytes) -> Result<Vec<Frame>, TransportError> {
+fn decode_frames(bytes: ByteString) -> Result<Vec<Frame>, PollingError> {
     bytes
-        .split(|&b| b == SEPARATOR)
-        .map(|s| decode_frame(bytes.slice_ref(s)))
+        .split(SEPARATOR)
+        .map(|s| Frame::decode(bytes.slice_ref(s)))
         .collect()
+}
+
+fn encode_frames(frames: &[Frame]) -> String {
+    let mut buffer = String::new();
+    for (i, frame) in frames.iter().enumerate() {
+        if i > 0 {
+            buffer.push(SEPARATOR);
+        }
+        frame.write(&mut buffer);
+    }
+    buffer
+}
+
+#[derive(Clone)]
+struct PollingClient(Client);
+
+impl PollingClient {
+    async fn get(&self, url: &Url) -> Result<Vec<Frame>, PollingError> {
+        let response = self
+            .0
+            .get(url.as_str())
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+
+        tracing::trace!(len = response.len(), "received GET");
+        decode_frames(response.into())
+    }
+
+    async fn post(&self, url: &Url, frames: &[Frame]) -> Result<(), PollingError> {
+        let body = encode_frames(frames);
+        tracing::trace!(len = body.len(), "sending POST");
+
+        let response = self
+            .0
+            .post(url.as_str())
+            .body(body)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+
+        if !response.eq_ignore_ascii_case("ok") {
+            return Err(PollingError::Response(response));
+        }
+
+        Ok(())
+    }
 }
 
 /// Builds the polling URL by appending the EIO version and transport parameters.
 fn polling_url(mut base_url: Url) -> Url {
     base_url
         .query_pairs_mut()
-        .append_pair("EIO", &ENGINE_IO_VERSION.to_string())
+        .append_pair("EIO", ENGINE_IO_VERSION)
         .append_pair("transport", "polling");
     base_url
 }
 
-/// Loops batched POST requests, draining outbound frames from `engine_rx`.
+/// Loops batched POST requests, draining outbound frames from `transport_rx`.
 ///
-/// Returns `engine_rx` on exit so the WebSocket phase can reuse it.
-/// Exits when `cancel` fires or `engine_rx` closes.
+/// Returns `transport_rx` on exit so the WebSocket phase can reuse it.
+/// Exits when `token` fires or `transport_rx` closes.
 #[tracing::instrument(skip_all, err)]
 async fn polling_post(
     url: Url,
-    http_client: Client,
+    client: PollingClient,
     mut transport_rx: mpsc::Receiver<Frame>,
     token: CancellationToken,
 ) -> Result<mpsc::Receiver<Frame>, TransportError> {
@@ -96,26 +138,8 @@ async fn polling_post(
             break;
         }
 
-        let request = encode_frames(&buffer);
+        client.post(&url, &buffer).await?;
         buffer.clear();
-
-        tracing::trace!(len = request.len(), "sending POST");
-
-        let response = http_client
-            .post(url.as_str())
-            .body(request)
-            .send()
-            .await
-            .map_err(PollingError::Reqwest)?
-            .error_for_status()
-            .map_err(PollingError::Reqwest)?
-            .text()
-            .await
-            .map_err(PollingError::Reqwest)?;
-
-        if !response.eq_ignore_ascii_case("ok") {
-            return Err(PollingError::Response(response).into());
-        }
     }
 
     Ok(transport_rx)
@@ -123,29 +147,16 @@ async fn polling_post(
 
 /// Loops GET requests, decoding each response and forwarding frames to the engine.
 ///
-/// Exits when `cancel` fires, the engine channel closes, or an HTTP error occurs.
+/// Exits when `token` fires, the engine channel closes, or an HTTP error occurs.
 #[tracing::instrument(skip_all, err)]
 async fn polling_get(
     url: Url,
-    http_client: Client,
+    client: PollingClient,
     engine_tx: EngineSender,
     token: CancellationToken,
 ) -> Result<EngineSender, TransportError> {
     while !token.is_cancelled() {
-        let response = http_client
-            .get(url.as_str())
-            .send()
-            .await
-            .map_err(PollingError::Reqwest)?
-            .error_for_status()
-            .map_err(PollingError::Reqwest)?
-            .bytes()
-            .await
-            .map_err(PollingError::Reqwest)?;
-
-        tracing::trace!(len = response.len(), "received GET");
-
-        for frame in decode_frames(response)? {
+        for frame in client.get(&url).await? {
             engine_tx.send(frame).await?;
         }
     }
@@ -168,22 +179,13 @@ pub async fn polling_transport<C>(
 where
     C: WebSocketConnector,
 {
+    let client = PollingClient(http_client);
+
     let mut url = polling_url(base_url.clone());
 
     tracing::debug!(%url, "connecting");
 
-    let bytes = http_client
-        .get(url.clone())
-        .send()
-        .await
-        .map_err(PollingError::Reqwest)?
-        .error_for_status()
-        .map_err(PollingError::Reqwest)?
-        .bytes()
-        .await
-        .map_err(PollingError::Reqwest)?;
-
-    let handshake = match decode_frame(bytes)? {
+    let handshake = match client.get(&url).await?.remove(0) {
         Frame::Packet(Packet::Open(handshake)) => handshake,
         other => {
             return Err(TransportError::frame(
@@ -207,14 +209,9 @@ where
 
     let child_token = token.child_token();
 
-    let get_fut = polling_get(
-        url.clone(),
-        http_client.clone(),
-        engine_tx,
-        child_token.clone(),
-    );
+    let get_fut = polling_get(url.clone(), client.clone(), engine_tx, child_token.clone());
 
-    let post_fut = polling_post(url, http_client, transport_rx, child_token.clone());
+    let post_fut = polling_post(url, client, transport_rx, child_token.clone());
 
     if do_upgrade {
         let stream = websocket_connect(base_url, Some(sid), connector).await?;
@@ -222,7 +219,7 @@ where
         tracing::debug!("paused polling transport");
         child_token.cancel();
 
-        let (get_result, post_result) = tokio::join!(get_fut, post_fut,);
+        let (get_result, post_result) = tokio::join!(get_fut, post_fut);
 
         let engine_tx = get_result?;
         let transport_rx = post_result?;

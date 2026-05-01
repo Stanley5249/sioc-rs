@@ -29,7 +29,7 @@ impl Stream for WebSocketStream {
                 None => None,
                 Some(Err(e)) => Some(Err(WebSocketError::Tungstenite(e))),
                 Some(Ok(WebSocketMessage::Text(text))) => Some(
-                    Packet::decode_bytes(bytestring_from_utf8_bytes(text))
+                    Packet::decode(bytestring_from_utf8_bytes(text))
                         .map(Frame::from)
                         .map_err(WebSocketError::Packet),
                 ),
@@ -51,7 +51,7 @@ impl Sink<Frame> for WebSocketStream {
 
     fn start_send(mut self: Pin<&mut Self>, frame: Frame) -> Result<(), Self::Error> {
         let msg = match frame {
-            Frame::Packet(packet) => WebSocketMessage::text(packet.encode_string()),
+            Frame::Packet(packet) => WebSocketMessage::text(packet.encode()),
             Frame::Binary(bytes) => WebSocketMessage::binary(bytes),
         };
         self.0
@@ -103,23 +103,22 @@ impl WebSocketConnector for () {
     }
 }
 
+/// Builds the WebSocket URL by converting the scheme and appending EIO/transport/sid parameters.
 fn websocket_url(mut url: Url, sid: Option<&str>) -> Url {
-    if sid.is_some() {
-        let scheme = match url.scheme() {
-            "http" => Some("ws"),
-            "https" => Some("wss"),
-            _ => None,
-        };
-        if let Some(scheme) = scheme {
-            let _ = url.set_scheme(scheme);
-        }
+    let scheme = match url.scheme() {
+        "http" => Some("ws"),
+        "https" => Some("wss"),
+        _ => None,
+    };
+    if let Some(scheme) = scheme {
+        let _ = url.set_scheme(scheme);
     }
 
     {
         let mut query = url.query_pairs_mut();
 
         query
-            .append_pair("EIO", &ENGINE_IO_VERSION.to_string())
+            .append_pair("EIO", ENGINE_IO_VERSION)
             .append_pair("transport", "websocket");
 
         if let Some(sid) = sid {
@@ -130,6 +129,7 @@ fn websocket_url(mut url: Url, sid: Option<&str>) -> Url {
     url
 }
 
+/// Sends a probe `Ping` and expects a matching `Pong`, confirming the WebSocket path is live.
 async fn websocket_probe(stream: &mut WebSocketStream) -> Result<(), TransportError> {
     tracing::debug!("sending probe PING");
 
@@ -150,6 +150,7 @@ async fn websocket_probe(stream: &mut WebSocketStream) -> Result<(), TransportEr
     Ok(())
 }
 
+/// Opens a [`WebSocketStream`], running the upgrade probe when `sid` is present.
 pub async fn websocket_connect<C>(
     base_url: Url,
     sid: Option<ByteString>,
@@ -174,6 +175,11 @@ where
     Ok(stream)
 }
 
+/// Drives the WebSocket I/O loop until cancelled, the stream closes, or a channel closes.
+///
+/// When `handshake_tx` is `Some`, reads the first `Open` frame and forwards the handshake
+/// (direct WebSocket transport). When `None`, sends `Upgrade` immediately (polling upgrade path).
+/// Drains any queued outbound frames before closing the stream.
 #[tracing::instrument(skip_all, err)]
 pub async fn websocket_loop(
     mut stream: WebSocketStream,

@@ -102,11 +102,6 @@ pub enum TransportError {
     #[diagnostic(transparent)]
     Polling(#[from] PollingError),
 
-    /// A packet decoding error within a WebSocket frame.
-    #[error(transparent)]
-    #[diagnostic(transparent)]
-    Packet(#[from] PacketError),
-
     /// Sending an action to the engine task failed because the channel is closed.
     #[error("engine action channel closed")]
     #[diagnostic(
@@ -129,11 +124,6 @@ pub enum TransportError {
     #[error("background transport task failed")]
     #[diagnostic(code(sioc_engine::transport::join))]
     Join(#[from] JoinError),
-
-    /// Received bytes were not valid UTF-8 when text was expected.
-    #[error("expected UTF-8, but got invalid bytes")]
-    #[diagnostic(code(sioc_engine::transport::utf8))]
-    Utf8(#[from] std::str::Utf8Error),
 
     /// A frame arrived that is not valid in the current protocol state.
     #[error("unexpected frame {frame:?}: {message}")]
@@ -200,6 +190,11 @@ pub enum PollingError {
         )
     )]
     Response(String),
+
+    /// A packet decoding error within a polling payload.
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Packet(#[from] PacketError),
 }
 
 /// Errors from decoding a raw Engine.IO packet.
@@ -222,6 +217,7 @@ pub enum PacketError {
 
     /// Unexpected payload for the packet type.
     #[error("unexpected payload for type id {id}")]
+    #[diagnostic(code(sioc_engine::packet::payload))]
     Payload { id: char, payload: ByteString },
 }
 

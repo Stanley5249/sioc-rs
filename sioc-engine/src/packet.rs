@@ -106,13 +106,6 @@ impl Handshake {
     }
 }
 
-fn encode_packet(prefix: u8, data: &str) -> ByteString {
-    let mut s = String::with_capacity(1 + data.len());
-    s.push(prefix as char);
-    s.push_str(data);
-    s.into()
-}
-
 /// A packet in the Engine.IO v4 protocol.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Packet {
@@ -133,69 +126,83 @@ pub enum Packet {
 }
 
 impl Packet {
-    /// Encodes this packet into a [`ByteString`].
-    pub fn encode_bytes(&self) -> ByteString {
+    /// Write this packet into a [`String`].
+    pub fn write(&self, buffer: &mut String) {
         match self {
             Self::Open(..) => panic!("client should never encode an Open packet"),
-            Self::Close => ByteString::from_static("1"),
-            Self::Ping(data) => encode_packet(b'2', data),
-            Self::Pong(data) => encode_packet(b'3', data),
-            Self::Message(data) => encode_packet(b'4', data),
-            Self::Upgrade => ByteString::from_static("5"),
+            Self::Close => buffer.push('1'),
+            Self::Ping(data) => {
+                buffer.reserve(1 + data.len());
+                buffer.push('2');
+                buffer.push_str(data);
+            }
+            Self::Pong(data) => {
+                buffer.reserve(1 + data.len());
+                buffer.push('3');
+                buffer.push_str(data);
+            }
+            Self::Message(data) => {
+                buffer.reserve(1 + data.len());
+                buffer.push('4');
+                buffer.push_str(data);
+            }
+            Self::Upgrade => buffer.push('5'),
             Self::Noop => panic!("client should never encode a Noop packet"),
         }
     }
 
     /// Encodes this packet into a [`String`].
-    pub fn encode_string(&self) -> String {
-        self.encode_bytes().into()
+    pub fn encode(&self) -> String {
+        let mut buffer = String::new();
+        self.write(&mut buffer);
+        buffer
     }
 
     /// Decodes a single packet from a text frame.
     ///
     /// The first character is the packet-type digit (`'0'`..=`'6'`).
-    pub fn decode_bytes(data: ByteString) -> Result<Self, PacketError> {
-        let mut chars = data.chars();
+    pub fn decode(bytes: ByteString) -> Result<Self, PacketError> {
+        let mut chars = bytes.chars();
 
         let id = match chars.next() {
             Some(c) => c,
             None => return Err(PacketError::Empty),
         };
 
-        let payload = chars.as_str();
+        let rest = chars.as_str();
 
         match id {
-            '0' => Ok(Packet::Open(serde_json::from_str(payload)?)),
+            '0' => Ok(Packet::Open(serde_json::from_str(rest)?)),
             '1' => {
-                if payload.is_empty() {
+                if rest.is_empty() {
                     Ok(Packet::Close)
                 } else {
                     Err(PacketError::Payload {
                         id: '1',
-                        payload: data.slice_ref(payload),
+                        payload: bytes.slice_ref(rest),
                     })
                 }
             }
-            '2' => Ok(Packet::Ping(data.slice_ref(payload))),
-            '3' => Ok(Packet::Pong(data.slice_ref(payload))),
-            '4' => Ok(Packet::Message(data.slice_ref(payload))),
+            '2' => Ok(Packet::Ping(bytes.slice_ref(rest))),
+            '3' => Ok(Packet::Pong(bytes.slice_ref(rest))),
+            '4' => Ok(Packet::Message(bytes.slice_ref(rest))),
             '5' => {
-                if payload.is_empty() {
+                if rest.is_empty() {
                     Ok(Packet::Upgrade)
                 } else {
                     Err(PacketError::Payload {
                         id: '5',
-                        payload: data.slice_ref(payload),
+                        payload: bytes.slice_ref(rest),
                     })
                 }
             }
             '6' => {
-                if payload.is_empty() {
+                if rest.is_empty() {
                     Ok(Packet::Noop)
                 } else {
                     Err(PacketError::Payload {
                         id: '6',
-                        payload: data.slice_ref(payload),
+                        payload: bytes.slice_ref(rest),
                     })
                 }
             }
@@ -235,7 +242,7 @@ mod tests {
             "pingTimeout": 20000
         });
         let bytes = ByteString::from(format!("0{}", json));
-        assert!(Packet::decode_bytes(bytes).is_err());
+        assert!(Packet::decode(bytes).is_err());
     }
 
     #[test]
@@ -250,7 +257,7 @@ mod tests {
     #[test]
     fn decode_invalid_packet_id() {
         assert!(matches!(
-            Packet::decode_bytes(ByteString::from_static("9")),
+            Packet::decode(ByteString::from_static("9")),
             Err(PacketError::InvalidId { id: '9' })
         ));
     }
@@ -258,91 +265,81 @@ mod tests {
     #[test]
     fn decode_empty_packet() {
         assert!(matches!(
-            Packet::decode_bytes(ByteString::new()),
+            Packet::decode(ByteString::new()),
             Err(PacketError::Empty)
         ));
     }
 
     #[test]
-    fn encode_decode_open_round_trip() {
+    fn decode_open() {
         let hs = test_handshake();
-        let Frame::Packet(packet) = Packet::Open(hs.clone()).into() else {
-            panic!("expected Packet frame");
-        };
-        let Packet::Open(decoded) = packet else {
-            panic!("expected Open");
-        };
-        assert_eq!(decoded, hs);
+        let json = r#"{"sid":"abc","upgrades":["websocket"],"pingInterval":25000,"pingTimeout":5000,"maxPayload":1000000}"#;
+        let bytes = ByteString::from(format!("0{json}"));
+        assert_eq!(Packet::decode(bytes).unwrap(), Packet::Open(hs));
     }
 
     #[test]
     fn encode_decode_close_round_trip() {
-        let Frame::Packet(packet) = Packet::Close.into() else {
-            panic!("expected Packet frame");
-        };
-        assert!(matches!(packet, Packet::Close));
+        let encoded = Packet::Close.encode();
+        assert_eq!(
+            Packet::decode(ByteString::from(encoded)).unwrap(),
+            Packet::Close
+        );
     }
 
     #[test]
     fn encode_decode_ping_round_trip() {
         let payload = ByteString::from_static("probe");
-        let Frame::Packet(packet) = Packet::Ping(payload.clone()).into() else {
-            panic!("expected Packet frame");
-        };
-        let Packet::Ping(decoded) = packet else {
-            panic!("expected Ping");
-        };
-        assert_eq!(decoded, payload);
+        let encoded = Packet::Ping(payload.clone()).encode();
+        assert_eq!(
+            Packet::decode(ByteString::from(encoded)).unwrap(),
+            Packet::Ping(payload)
+        );
+    }
+
+    #[test]
+    fn encode_decode_ping_empty_payload() {
+        let encoded = Packet::Ping(ByteString::new()).encode();
+        assert_eq!(
+            Packet::decode(ByteString::from(encoded)).unwrap(),
+            Packet::Ping(ByteString::new())
+        );
     }
 
     #[test]
     fn encode_decode_pong_round_trip() {
         let payload = ByteString::from_static("probe");
-        let Frame::Packet(packet) = Packet::Pong(payload.clone()).into() else {
-            panic!("expected Packet frame");
-        };
-        let Packet::Pong(decoded) = packet else {
-            panic!("expected Pong");
-        };
-        assert_eq!(decoded, payload);
+        let encoded = Packet::Pong(payload.clone()).encode();
+        assert_eq!(
+            Packet::decode(ByteString::from(encoded)).unwrap(),
+            Packet::Pong(payload)
+        );
     }
 
     #[test]
-    fn encode_decode_text_message_round_trip() {
+    fn encode_decode_message_round_trip() {
         let text = ByteString::from_static("hello world");
-        let Frame::Packet(packet) = Packet::Message(text.clone()).into() else {
-            panic!("expected Packet frame");
-        };
-        let Packet::Message(decoded) = packet else {
-            panic!("expected Message");
-        };
-        assert_eq!(decoded, text);
+        let encoded = Packet::Message(text.clone()).encode();
+        assert_eq!(
+            Packet::decode(ByteString::from(encoded)).unwrap(),
+            Packet::Message(text)
+        );
     }
 
     #[test]
     fn encode_decode_upgrade_round_trip() {
-        let Frame::Packet(packet) = Packet::Upgrade.into() else {
-            panic!("expected Packet frame");
-        };
-        assert!(matches!(packet, Packet::Upgrade));
+        let encoded = Packet::Upgrade.encode();
+        assert_eq!(
+            Packet::decode(ByteString::from(encoded)).unwrap(),
+            Packet::Upgrade
+        );
     }
 
     #[test]
-    fn encode_decode_noop_round_trip() {
-        let Frame::Packet(packet) = Packet::Noop.into() else {
-            panic!("expected Packet frame");
-        };
-        assert!(matches!(packet, Packet::Noop));
-    }
-
-    #[test]
-    fn encode_ping_empty_payload() {
-        let Frame::Packet(packet) = Packet::Ping(ByteString::new()).into() else {
-            panic!("expected Packet frame");
-        };
-        let Packet::Ping(decoded) = packet else {
-            panic!("expected Ping");
-        };
-        assert!(decoded.is_empty());
+    fn decode_noop() {
+        assert_eq!(
+            Packet::decode(ByteString::from_static("6")).unwrap(),
+            Packet::Noop
+        );
     }
 }
