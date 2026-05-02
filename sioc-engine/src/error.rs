@@ -69,24 +69,14 @@ pub enum EngineError {
     HeartbeatTimeout,
 
     /// An unexpected packet was received during the session.
-    #[error("unexpected packet {packet:?}: {message}")]
+    #[error("unexpected packet {0:?}")]
     #[diagnostic(
-        code(sioc_engine::engine::packet),
+        code(sioc_engine::engine::server),
         help(
             "the server sent a packet that violates the Engine.IO state machine; likely a server bug or version mismatch"
         )
     )]
-    Packet { packet: Packet, message: String },
-}
-
-impl EngineError {
-    /// Constructs an [`EngineError::Packet`] with a descriptive message.
-    pub fn packet(packet: Packet, message: impl Into<String>) -> Self {
-        Self::Packet {
-            packet,
-            message: message.into(),
-        }
-    }
+    Server(Packet),
 }
 
 /// Errors that occur during Engine.IO connection setup and transport coordination.
@@ -134,26 +124,6 @@ pub enum TransportError {
         )
     )]
     Open(Frame),
-
-    /// A frame arrived that is not valid in the current protocol state.
-    #[error("unexpected frame {frame:?}: {message}")]
-    #[diagnostic(
-        code(sioc_engine::transport::frame),
-        help(
-            "the server sent a frame that violates the Engine.IO state machine; likely a server bug or version mismatch"
-        )
-    )]
-    Frame { frame: Frame, message: String },
-}
-
-impl TransportError {
-    /// Constructs a [`TransportError::Frame`] with a descriptive message.
-    pub fn frame(frame: Frame, message: impl Into<String>) -> Self {
-        Self::Frame {
-            frame,
-            message: message.into(),
-        }
-    }
 }
 
 /// Errors specific to the WebSocket transport.

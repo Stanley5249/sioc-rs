@@ -6,9 +6,8 @@
 use crate::engine::EngineSender;
 use crate::error::TransportError;
 use crate::packet::{Frame, Handshake};
-use crate::polling::polling_transport;
-use crate::prelude::WebSocketStream;
-use crate::websocket::WebSocketConnector;
+use crate::polling::PollingClient;
+use crate::websocket::{WebSocketConnector, WebSocketStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -38,9 +37,8 @@ impl TransportStrategy {
         C: WebSocketConnector,
     {
         match self {
-            TransportStrategy::Polling => tokio::spawn(polling_transport(
+            TransportStrategy::Polling => tokio::spawn(PollingClient(http_client).transport(
                 base_url,
-                http_client,
                 connector,
                 handshake_tx,
                 engine_tx,

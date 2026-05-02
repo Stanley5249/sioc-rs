@@ -64,8 +64,18 @@ fn encode_frames(frames: &[Frame]) -> String {
     buffer
 }
 
+/// Builds the polling URL by appending the EIO version and transport parameters.
+fn polling_url(mut base_url: Url) -> Url {
+    base_url
+        .query_pairs_mut()
+        .append_pair("EIO", ENGINE_IO_VERSION)
+        .append_pair("transport", "polling");
+    base_url
+}
+
+/// Wraps a [`reqwest::Client`] with Engine.IO HTTP polling helpers.
 #[derive(Clone)]
-struct PollingClient(Client);
+pub struct PollingClient(pub Client);
 
 impl PollingClient {
     async fn get(&self, url: &Url) -> Result<Vec<Frame>, PollingError> {
@@ -80,6 +90,21 @@ impl PollingClient {
 
         tracing::trace!(len = response.len(), "received GET");
         decode_frames(response.into())
+    }
+
+    async fn get_one(&self, url: &Url) -> Result<Frame, PollingError> {
+        let response = self
+            .0
+            .get(url.as_str())
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+
+        tracing::trace!(len = response.len(), "received GET");
+
+        Frame::decode(response.into())
     }
 
     async fn post(&self, url: &Url, frames: &[Frame]) -> Result<(), PollingError> {
@@ -102,133 +127,148 @@ impl PollingClient {
 
         Ok(())
     }
-}
 
-/// Builds the polling URL by appending the EIO version and transport parameters.
-fn polling_url(mut base_url: Url) -> Url {
-    base_url
-        .query_pairs_mut()
-        .append_pair("EIO", ENGINE_IO_VERSION)
-        .append_pair("transport", "polling");
-    base_url
-}
+    /// Loops batched POST requests until `token` fires or `rx` closes.
+    ///
+    /// Returns `rx` on exit so the WebSocket phase can reuse it.
+    #[tracing::instrument(skip_all, err)]
+    async fn post_until_cancelled(
+        &self,
+        url: &Url,
+        mut rx: mpsc::Receiver<Frame>,
+        token: CancellationToken,
+    ) -> Result<mpsc::Receiver<Frame>, TransportError> {
+        let mut buffer = Vec::with_capacity(8);
 
-/// Loops batched POST requests, draining outbound frames from `transport_rx`.
-///
-/// Returns `transport_rx` on exit so the WebSocket phase can reuse it.
-/// Exits when `token` fires or `transport_rx` closes.
-#[tracing::instrument(skip_all, err)]
-async fn polling_post(
-    url: Url,
-    client: PollingClient,
-    mut transport_rx: mpsc::Receiver<Frame>,
-    token: CancellationToken,
-) -> Result<mpsc::Receiver<Frame>, TransportError> {
-    let mut buffer = Vec::with_capacity(8);
+        loop {
+            let count = tokio::select! {
+                _ = token.cancelled() => {
+                    tracing::debug!("cancelled polling POST");
+                    break;
+                },
+                count = rx.recv_many(&mut buffer, 8) => count,
+            };
 
-    loop {
-        let count = tokio::select! {
-            _ = token.cancelled() => {
-                tracing::debug!("cancelled polling POST");
+            if count == 0 {
                 break;
-            },
-            count = transport_rx.recv_many(&mut buffer, 8) => count,
+            }
+
+            self.post(url, &buffer).await?;
+            buffer.clear();
+        }
+
+        Ok(rx)
+    }
+
+    /// Drains all outbound frames from `rx` until the sender is dropped.
+    #[tracing::instrument(skip_all, err)]
+    async fn post_until_closed(
+        &self,
+        url: &Url,
+        mut rx: mpsc::Receiver<Frame>,
+    ) -> Result<(), TransportError> {
+        let mut buffer = Vec::with_capacity(8);
+
+        while rx.recv_many(&mut buffer, 8).await > 0 {
+            self.post(url, &buffer).await?;
+            buffer.clear();
+        }
+
+        Ok(())
+    }
+
+    /// Loops GET requests, decoding each response and forwarding frames to the engine.
+    ///
+    /// Exits when `token` fires, the engine channel closes, or an HTTP error occurs.
+    #[tracing::instrument(skip_all, err)]
+    async fn get_until_cancelled(
+        &self,
+        url: &Url,
+        engine_tx: EngineSender,
+        token: CancellationToken,
+    ) -> Result<EngineSender, TransportError> {
+        while !token.is_cancelled() {
+            for frame in self.get(url).await? {
+                engine_tx.send(frame).await?;
+            }
+        }
+
+        tracing::debug!("cancelled polling GET");
+
+        Ok(engine_tx)
+    }
+
+    /// Runs the full polling transport lifecycle: handshake, GET/POST loops, and optional WebSocket upgrade.
+    #[tracing::instrument(skip_all, err)]
+    pub async fn transport<C>(
+        self,
+        base_url: Url,
+        connector: C,
+        handshake_tx: oneshot::Sender<Handshake>,
+        engine_tx: EngineSender,
+        transport_rx: mpsc::Receiver<Frame>,
+        token: CancellationToken,
+    ) -> Result<(), TransportError>
+    where
+        C: WebSocketConnector,
+    {
+        let mut url = polling_url(base_url.clone());
+
+        tracing::debug!(%url, "connecting");
+
+        let handshake = match self.get_one(&url).await? {
+            Frame::Packet(Packet::Open(handshake)) => handshake,
+            frame => return Err(TransportError::Open(frame)),
         };
 
-        if count == 0 {
-            break;
+        tracing::debug!(%handshake.sid, "open");
+
+        url.query_pairs_mut().append_pair("sid", &handshake.sid);
+        let do_upgrade = handshake.can_upgrade_to_websocket();
+        let sid = handshake.sid.clone();
+
+        handshake_tx
+            .send(handshake)
+            .map_err(TransportError::SendHandshake)?;
+
+        let _guard = token.clone().drop_guard();
+
+        let child_token = token.child_token();
+
+        let get_fut = self.get_until_cancelled(&url, engine_tx, child_token.clone());
+
+        if do_upgrade {
+            let post_fut = self.post_until_cancelled(&url, transport_rx, child_token.clone());
+
+            let stream_fut = async {
+                let _guard = child_token.drop_guard();
+
+                let stream = WebSocketStream::connect(base_url, Some(&sid), connector).await?;
+
+                tracing::debug!("paused polling transport");
+
+                Ok::<_, TransportError>(stream)
+            };
+
+            let (get_result, post_result, stream_result) =
+                tokio::join!(get_fut, post_fut, stream_fut);
+
+            let engine_tx = get_result?;
+            let transport_rx = post_result?;
+            let stream = stream_result?;
+
+            stream
+                .transport(None, engine_tx, transport_rx, token)
+                .await?;
+        } else {
+            let post_fut = self.post_until_closed(&url, transport_rx);
+
+            let (get_result, post_result) = tokio::join!(get_fut, post_fut);
+
+            get_result?;
+            post_result?;
         }
 
-        client.post(&url, &buffer).await?;
-        buffer.clear();
+        Ok(())
     }
-
-    Ok(transport_rx)
-}
-
-/// Loops GET requests, decoding each response and forwarding frames to the engine.
-///
-/// Exits when `token` fires, the engine channel closes, or an HTTP error occurs.
-#[tracing::instrument(skip_all, err)]
-async fn polling_get(
-    url: Url,
-    client: PollingClient,
-    engine_tx: EngineSender,
-    token: CancellationToken,
-) -> Result<EngineSender, TransportError> {
-    while !token.is_cancelled() {
-        for frame in client.get(&url).await? {
-            engine_tx.send(frame).await?;
-        }
-    }
-
-    tracing::debug!("cancelled polling GET");
-
-    Ok(engine_tx)
-}
-
-#[tracing::instrument(skip_all, err)]
-pub async fn polling_transport<C>(
-    base_url: Url,
-    http_client: reqwest::Client,
-    connector: C,
-    handshake_tx: oneshot::Sender<Handshake>,
-    engine_tx: EngineSender,
-    transport_rx: mpsc::Receiver<Frame>,
-    token: CancellationToken,
-) -> Result<(), TransportError>
-where
-    C: WebSocketConnector,
-{
-    let client = PollingClient(http_client);
-
-    let mut url = polling_url(base_url.clone());
-
-    tracing::debug!(%url, "connecting");
-
-    let handshake = match client.get(&url).await?.remove(0) {
-        Frame::Packet(Packet::Open(handshake)) => handshake,
-        frame => return Err(TransportError::Open(frame)),
-    };
-
-    tracing::debug!(sid = %handshake.sid, "received OPEN");
-
-    url.query_pairs_mut().append_pair("sid", &handshake.sid);
-    let do_upgrade = handshake.can_upgrade_to_websocket();
-    let sid = handshake.sid.clone();
-
-    handshake_tx
-        .send(handshake)
-        .map_err(TransportError::SendHandshake)?;
-
-    let _guard = token.clone().drop_guard();
-
-    let child_token = token.child_token();
-
-    let get_fut = polling_get(url.clone(), client.clone(), engine_tx, child_token.clone());
-
-    let post_fut = polling_post(url, client, transport_rx, child_token.clone());
-
-    if do_upgrade {
-        let stream = WebSocketStream::connect(base_url, Some(&sid), connector).await?;
-
-        tracing::debug!("paused polling transport");
-        child_token.cancel();
-
-        let (get_result, post_result) = tokio::join!(get_fut, post_fut);
-
-        let engine_tx = get_result?;
-        let transport_rx = post_result?;
-
-        stream
-            .transport(None, engine_tx, transport_rx, token)
-            .await?;
-    } else {
-        let (get_result, post_result) = tokio::join!(get_fut, post_fut);
-
-        let _ = get_result?;
-        let _ = post_result?;
-    }
-
-    Ok(())
 }

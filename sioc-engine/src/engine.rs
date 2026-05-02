@@ -152,17 +152,17 @@ where
     let _guard = token.drop_guard();
 
     let handshake = handshake_rx.await?;
-    tracing::debug!(%handshake.sid, "received handshake");
+    tracing::debug!(%handshake.sid, "open");
 
     let mut heartbeat = Heartbeat::new(handshake.ping_window());
 
     loop {
-        let item = tokio::select! {
+        let option = tokio::select! {
             _ = &mut heartbeat.timer => return Err(EngineError::HeartbeatTimeout),
-            item = engine_rx.recv() => item,
+            option = engine_rx.recv() => option,
         };
 
-        let Some(action) = item else {
+        let Some(action) = option else {
             tracing::debug!("engine channel closed");
             break;
         };
@@ -178,7 +178,7 @@ where
                             break;
                         }
                         Packet::Ping(payload) => {
-                            tracing::trace!("sending PONG");
+                            tracing::trace!("pong");
                             transport_tx.send(Packet::Pong(payload).into()).await?;
                             heartbeat.reset();
                         }
@@ -188,13 +188,7 @@ where
                                 .map_err(EngineError::SendSink)?;
                         }
                         Packet::Noop => {}
-
-                        other => {
-                            return Err(EngineError::packet(
-                                other,
-                                "engine did not expect this packet",
-                            ));
-                        }
+                        packet => return Err(EngineError::Server(packet)),
                     }
                 }
                 Frame::Binary(payload) => {

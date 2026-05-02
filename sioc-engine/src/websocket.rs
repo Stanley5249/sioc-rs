@@ -68,7 +68,7 @@ impl Stream for WebSocketStream {
                 Some(Err(e)) => Some(Err(e.into())),
 
                 Some(Ok(WebSocketMessage::Text(text))) => {
-                    tracing::trace!(len = text.len(), "received TEXT");
+                    tracing::trace!(len = text.len(), "received TEXT frame");
 
                     let frame = match Packet::decode(bytestring_from_utf8_bytes(text)) {
                         Ok(packet) => Ok(Frame::Packet(packet)),
@@ -79,7 +79,7 @@ impl Stream for WebSocketStream {
                 }
 
                 Some(Ok(WebSocketMessage::Binary(bytes))) => {
-                    tracing::trace!(len = bytes.len(), "received BINARY");
+                    tracing::trace!(len = bytes.len(), "received BINARY frame");
                     Some(Ok(Frame::Binary(bytes)))
                 }
 
@@ -162,6 +162,7 @@ impl WebSocketStream {
         let url = websocket_url(base_url, sid);
 
         tracing::debug!(%url, "connecting");
+
         let mut stream = connector.connect(url).await?;
 
         if sid.is_some() {
@@ -178,12 +179,14 @@ impl WebSocketStream {
 
     /// Sends a probe `Ping` and expects a matching `Pong`, confirming the WebSocket path is live.
     async fn probe(&mut self) -> Result<(), WebSocketError> {
-        tracing::debug!("ping");
+        tracing::debug!("ping probe");
 
         self.send(Packet::Ping(PROBE).into()).await?;
 
         match self.required_next().await? {
-            Frame::Packet(Packet::Pong(payload)) if payload == PROBE => tracing::debug!("pong"),
+            Frame::Packet(Packet::Pong(payload)) if payload == PROBE => {
+                tracing::debug!("pong probe")
+            }
 
             frame => return Err(WebSocketError::Probe(frame)),
         }
@@ -201,7 +204,7 @@ impl WebSocketStream {
         mut self,
         handshake_tx: Option<oneshot::Sender<Handshake>>,
         engine_tx: EngineSender,
-        mut rx: mpsc::Receiver<Frame>,
+        mut transport_rx: mpsc::Receiver<Frame>,
         token: CancellationToken,
     ) -> Result<(), TransportError> {
         match handshake_tx {
@@ -240,7 +243,7 @@ impl WebSocketStream {
                     engine_tx.send(frame).await?;
                 }
 
-                option = rx.recv() => {
+                option = transport_rx.recv() => {
                     let Some(frame) = option else {
                         tracing::debug!("transport channel closed");
                         break;
@@ -253,7 +256,7 @@ impl WebSocketStream {
 
         // Drain frames queued before the engine exited so the disconnect
         // packet is not silently dropped by a concurrent cancellation.
-        while let Some(frame) = rx.recv().await {
+        while let Some(frame) = transport_rx.recv().await {
             self.send(frame).await?;
         }
 
