@@ -24,8 +24,8 @@ impl TryFrom<ByteString> for Ns<Packet> {
 
         let packet = match id {
             '0' => {
-                let (ns, data) = split_namespace(bytes)?;
-                Ns(ns, Packet::Connect(data))
+                let (ns, payload) = split_namespace(bytes)?;
+                Ns(ns, Packet::Connect(payload))
             }
             '1' => {
                 let (ns, _) = split_namespace(bytes)?;
@@ -37,33 +37,33 @@ impl TryFrom<ByteString> for Ns<Packet> {
                     return Err(PacketError::UnexpectedAttachments { count });
                 }
                 let (ns, bytes) = split_namespace(bytes)?;
-                let (id, data) = split_id(bytes)?;
-                Ns(ns, Packet::Event { data, id })
+                let (id, payload) = split_id(bytes)?;
+                Ns(ns, Packet::Event { payload, id })
             }
             '3' => {
                 let (ns, bytes) = split_namespace(bytes)?;
-                let (id, data) = split_id(bytes)?;
+                let (id, payload) = split_id(bytes)?;
                 let id = id.ok_or(PacketError::MissingAckId)?;
-                Ns(ns, Packet::Ack { data, id })
+                Ns(ns, Packet::Ack { payload, id })
             }
             '4' => {
-                let (ns, data) = split_namespace(bytes)?;
-                Ns(ns, Packet::ConnectError(data))
+                let (ns, payload) = split_namespace(bytes)?;
+                Ns(ns, Packet::ConnectError(payload))
             }
             '5' => {
                 let (count, bytes) = split_attachments(bytes)?;
                 let count = count.ok_or(PacketError::MissingAttachmentCount)?;
                 let (ns, bytes) = split_namespace(bytes)?;
-                let (id, data) = split_id(bytes)?;
-                Ns(ns, Packet::BinaryEvent { data, id, count })
+                let (id, payload) = split_id(bytes)?;
+                Ns(ns, Packet::BinaryEvent { payload, id, count })
             }
             '6' => {
                 let (count, bytes) = split_attachments(bytes)?;
                 let count = count.ok_or(PacketError::MissingAttachmentCount)?;
                 let (ns, bytes) = split_namespace(bytes)?;
-                let (id, data) = split_id(bytes)?;
+                let (id, payload) = split_id(bytes)?;
                 let id = id.ok_or(PacketError::MissingAckId)?;
-                Ns(ns, Packet::BinaryAck { data, id, count })
+                Ns(ns, Packet::BinaryAck { payload, id, count })
             }
             id => return Err(PacketError::InvalidId { id }),
         };
@@ -87,7 +87,7 @@ fn namespace_size(ns: &str) -> usize {
     if ns == "/" { 0 } else { ns.len() + 1 }
 }
 
-pub fn hint_packet_size(ns: &str, binary: bool, ack: bool, data: Option<&str>) -> usize {
+pub fn hint_packet_size(ns: &str, binary: bool, ack: bool, payload: Option<&str>) -> usize {
     let mut n = 1 + namespace_size(ns);
     if ack {
         n += ack_size_hint();
@@ -95,8 +95,8 @@ pub fn hint_packet_size(ns: &str, binary: bool, ack: bool, data: Option<&str>) -
     if binary {
         n += binary_size_hint();
     }
-    if let Some(data) = data {
-        n += data.len();
+    if let Some(payload) = payload {
+        n += payload.len();
     }
     n
 }
@@ -120,8 +120,8 @@ fn write_id(buffer: &mut String, id: u64) {
     buffer.push_str(&id.to_string());
 }
 
-fn write_data(buffer: &mut String, data: &str) {
-    buffer.push_str(data);
+fn write_payload(buffer: &mut String, payload: &str) {
+    buffer.push_str(payload);
 }
 
 pub fn write_packet(
@@ -130,7 +130,7 @@ pub fn write_packet(
     count: Option<usize>,
     ns: &str,
     id: Option<u64>,
-    data: Option<&str>,
+    payload: Option<&str>,
 ) {
     buffer.push(type_id as char);
     if let Some(count) = count {
@@ -140,8 +140,8 @@ pub fn write_packet(
     if let Some(id) = id {
         write_id(buffer, id);
     }
-    if let Some(data) = data {
-        write_data(buffer, data);
+    if let Some(payload) = payload {
+        write_payload(buffer, payload);
     }
 }
 
@@ -176,7 +176,7 @@ pub fn split_attachments(bytes: ByteString) -> Result<(Option<usize>, ByteString
 pub fn split_namespace(bytes: ByteString) -> Result<(ByteString, ByteString), PacketError> {
     match bytes.chars().next() {
         Some('/') => match bytes.split_once(',') {
-            Some((ns, data)) => Ok((bytes.slice_ref(ns), bytes.slice_ref(data))),
+            Some((ns, payload)) => Ok((bytes.slice_ref(ns), bytes.slice_ref(payload))),
             None => Err(PacketError::MissingNamespaceDelimiter),
         },
         _ => Ok((ByteString::from_static("/"), bytes)),
@@ -340,12 +340,12 @@ mod tests {
 
     #[test]
     fn parse_event_packet() {
-        let data = ByteString::from_static("2[\"hello\",\"world\"]");
-        let ns_packet: Ns<Packet> = data.try_into().unwrap();
+        let bytes = ByteString::from_static("2[\"hello\",\"world\"]");
+        let ns_packet: Ns<Packet> = bytes.try_into().unwrap();
         assert_eq!(ns_packet.0, "/");
         match ns_packet.1 {
-            Packet::Event { data, id } => {
-                assert_eq!(data, "[\"hello\",\"world\"]");
+            Packet::Event { payload, id } => {
+                assert_eq!(payload, "[\"hello\",\"world\"]");
                 assert!(id.is_none());
             }
             _ => panic!("expected Event"),
@@ -366,12 +366,12 @@ mod tests {
 
     #[test]
     fn parse_ack_packet() {
-        let data = ByteString::from_static("37[\"ok\"]");
-        let ns_packet: Ns<Packet> = data.try_into().unwrap();
+        let bytes = ByteString::from_static("37[\"ok\"]");
+        let ns_packet: Ns<Packet> = bytes.try_into().unwrap();
         match ns_packet.1 {
-            Packet::Ack { id, data } => {
+            Packet::Ack { id, payload } => {
                 assert_eq!(id, 7);
-                assert_eq!(data, "[\"ok\"]");
+                assert_eq!(payload, "[\"ok\"]");
             }
             _ => panic!("expected Ack"),
         }
@@ -473,12 +473,12 @@ mod tests {
 
     #[test]
     fn parse_event_with_hyphenated_namespace() {
-        let data = ByteString::from_static("2/admin-ns,[\"msg\"]");
-        let ns_packet: Ns<Packet> = data.try_into().unwrap();
+        let bytes = ByteString::from_static("2/admin-ns,[\"msg\"]");
+        let ns_packet: Ns<Packet> = bytes.try_into().unwrap();
         assert_eq!(ns_packet.0, "/admin-ns");
         match ns_packet.1 {
-            Packet::Event { data, id } => {
-                assert_eq!(data, "[\"msg\"]");
+            Packet::Event { payload, id } => {
+                assert_eq!(payload, "[\"msg\"]");
                 assert!(id.is_none());
             }
             _ => panic!("expected Event"),
@@ -551,9 +551,9 @@ mod tests {
     }
 
     #[test]
-    fn write_data_appends_bytes() {
+    fn write_payload_appends_bytes() {
         let mut buffer = String::new();
-        write_data(&mut buffer, "[\"hello\"]");
+        write_payload(&mut buffer, "[\"hello\"]");
         assert_eq!(buffer, "[\"hello\"]");
     }
 

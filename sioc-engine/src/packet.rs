@@ -8,7 +8,7 @@ use serde::Deserialize;
 pub const PROBE: ByteString = ByteString::from_static("probe");
 
 /// Content exchanged between the Socket.IO and Engine.IO layers.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     /// A UTF-8 text payload.
     Text(ByteString),
@@ -18,12 +18,12 @@ pub enum Message {
     Close,
 }
 
-impl std::fmt::Debug for Message {
+impl std::fmt::Display for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Text(bytes) => f.debug_tuple("Text").field(bytes).finish(),
-            Self::Binary(bytes) => f.debug_struct("Binary").field("len", &bytes.len()).finish(),
-            Self::Close => write!(f, "Close"),
+            Self::Text(s) => f.debug_tuple("Text").field(&format_args!("{}", s)).finish(),
+            Self::Binary(b) => f.debug_struct("Binary").field("len", &b.len()).finish(),
+            Self::Close => f.write_str("Close"),
         }
     }
 }
@@ -32,7 +32,7 @@ impl std::fmt::Debug for Message {
 ///
 /// [`Frame::Packet`] carries a fully-encoded Engine.IO text packet (e.g. `"4hello"`).
 /// [`Frame::Binary`] carries a raw binary payload with no packet-type prefix.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frame {
     /// A UTF-8 text frame (contains a complete Engine.IO packet).
     Packet(Packet),
@@ -49,15 +49,6 @@ impl From<Packet> for Frame {
 impl From<Bytes> for Frame {
     fn from(bytes: Bytes) -> Self {
         Frame::Binary(bytes)
-    }
-}
-
-impl std::fmt::Debug for Frame {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Packet(packet) => f.debug_tuple("Packet").field(packet).finish(),
-            Self::Binary(bytes) => f.debug_struct("Binary").field("len", &bytes.len()).finish(),
-        }
     }
 }
 
@@ -131,20 +122,20 @@ impl Packet {
         match self {
             Self::Open(..) => panic!("client should never encode an Open packet"),
             Self::Close => buffer.push('1'),
-            Self::Ping(data) => {
-                buffer.reserve(1 + data.len());
+            Self::Ping(payload) => {
+                buffer.reserve(1 + payload.len());
                 buffer.push('2');
-                buffer.push_str(data);
+                buffer.push_str(payload);
             }
-            Self::Pong(data) => {
-                buffer.reserve(1 + data.len());
+            Self::Pong(payload) => {
+                buffer.reserve(1 + payload.len());
                 buffer.push('3');
-                buffer.push_str(data);
+                buffer.push_str(payload);
             }
-            Self::Message(data) => {
-                buffer.reserve(1 + data.len());
+            Self::Message(payload) => {
+                buffer.reserve(1 + payload.len());
                 buffer.push('4');
-                buffer.push_str(data);
+                buffer.push_str(payload);
             }
             Self::Upgrade => buffer.push('5'),
             Self::Noop => panic!("client should never encode a Noop packet"),
@@ -211,12 +202,24 @@ impl Packet {
     }
 }
 
-/// Converts an inbound WebSocket text frame into a [`ByteString`] without copying.
-pub(crate) fn bytestring_from_utf8_bytes(
-    utf8: tokio_tungstenite::tungstenite::Utf8Bytes,
-) -> ByteString {
-    // SAFETY: `tungstenite::Utf8Bytes` guarantees the inner `Bytes` is valid UTF-8.
-    unsafe { ByteString::from_bytes_unchecked(utf8.into()) }
+impl std::fmt::Display for Packet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Open(h) => f
+                .debug_tuple("Open")
+                .field(&format_args!("{}", h.sid))
+                .finish(),
+            Self::Close => f.write_str("Close"),
+            Self::Ping(s) => f.debug_tuple("Ping").field(&format_args!("{}", s)).finish(),
+            Self::Pong(s) => f.debug_tuple("Pong").field(&format_args!("{}", s)).finish(),
+            Self::Message(s) => f
+                .debug_tuple("Message")
+                .field(&format_args!("{}", s))
+                .finish(),
+            Self::Upgrade => f.write_str("Upgrade"),
+            Self::Noop => f.write_str("Noop"),
+        }
+    }
 }
 
 #[cfg(test)]

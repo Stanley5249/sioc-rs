@@ -66,13 +66,13 @@ where
 
 impl<E> std::fmt::Debug for Event<E>
 where
-    E: EventType + std::fmt::Debug,
+    E: std::fmt::Debug + EventType,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut map = f.debug_map();
         map.entry(&"payload", &self.payload);
-        E::Ack::fmt_entry(&self.id, &mut map);
-        E::Binary::fmt_entry(&self.attachments, &mut map);
+        E::Ack::format(&self.id, &mut map);
+        E::Binary::format(&self.attachments, &mut map);
         map.finish()
     }
 }
@@ -133,11 +133,11 @@ where
     type Output = ();
 
     fn prepare(self) -> Result<(Directive, ()), PayloadError> {
-        let data = event_to_json(&self)?;
+        let payload = event_to_json(&self)?;
 
         Ok((
             Directive::Event {
-                data: data.into(),
+                payload: payload.into(),
                 tx: None,
                 attachments: None,
             },
@@ -155,10 +155,10 @@ where
 
     fn prepare(self) -> Result<(Directive, AckHandle<A>), PayloadError> {
         let (tx, rx) = oneshot::channel();
-        let data = event_to_json(&self)?.into();
+        let payload = event_to_json(&self)?.into();
         Ok((
             Directive::Event {
-                data,
+                payload,
                 tx: Some(tx),
                 attachments: None,
             },
@@ -176,10 +176,10 @@ where
 
     fn prepare(self) -> Result<(Directive, ()), PayloadError> {
         let mut builder = AttachmentsBuilder::new();
-        let data = event_to_json(&self(&mut builder))?.into();
+        let payload = event_to_json(&self(&mut builder))?.into();
         Ok((
             Directive::Event {
-                data,
+                payload,
                 tx: None,
                 attachments: Some(builder.finish()),
             },
@@ -199,10 +199,10 @@ where
     fn prepare(self) -> Result<(Directive, AckHandle<A>), PayloadError> {
         let (tx, rx) = oneshot::channel();
         let mut builder = AttachmentsBuilder::new();
-        let data = event_to_json(&self(&mut builder))?.into();
+        let payload = event_to_json(&self(&mut builder))?.into();
         Ok((
             Directive::Event {
-                data,
+                payload,
                 tx: Some(tx),
                 attachments: Some(builder.finish()),
             },

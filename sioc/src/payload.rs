@@ -21,11 +21,11 @@ where
 }
 
 /// Deserializes a JSON string slice into `T`.
-pub fn from_json<'de, T>(data: &'de str) -> Result<T, PayloadError>
+pub fn from_json<'de, T>(payload: &'de str) -> Result<T, PayloadError>
 where
     T: serde::Deserialize<'de>,
 {
-    let mut de = serde_json::Deserializer::from_str(data);
+    let mut de = serde_json::Deserializer::from_str(payload);
     match serde_path_to_error::deserialize(&mut de) {
         Ok(payload) => Ok(payload),
         Err(e) => Err(PayloadError::new::<T>(e)),
@@ -41,11 +41,11 @@ where
 }
 
 /// Deserializes a wire-format string into a typed [`EventType`] + [`DeserializePayload`] value.
-pub fn event_from_json<E>(data: &str) -> Result<E, PayloadError>
+pub fn event_from_json<E>(payload: &str) -> Result<E, PayloadError>
 where
     E: EventType + DeserializePayload,
 {
-    let EventPayload(event) = from_json(data)?;
+    let EventPayload(event) = from_json(payload)?;
     Ok(event)
 }
 
@@ -58,11 +58,11 @@ where
 }
 
 /// Deserializes a wire-format string into a typed [`AckType`] + [`DeserializePayload`] value.
-pub fn ack_from_json<A>(data: &str) -> Result<A, PayloadError>
+pub fn ack_from_json<A>(payload: &str) -> Result<A, PayloadError>
 where
     A: AckType + DeserializePayload,
 {
-    let AckPayload(ack) = from_json(data)?;
+    let AckPayload(ack) = from_json(payload)?;
     Ok(ack)
 }
 

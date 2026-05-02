@@ -31,24 +31,24 @@ pub struct ConnectError {
 }
 
 /// Type-erased inbound event after binary reassembly.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct DynEvent {
     pub payload: ByteString,
     pub id: Option<u64>,
     pub attachments: Option<Vec<Bytes>>,
 }
 
-impl std::fmt::Debug for DynEvent {
+impl std::fmt::Display for DynEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut debug = f.debug_struct("DynEvent");
-        debug.field("payload", &self.payload);
+        let mut map = f.debug_map();
+        map.entry(&"payload", &format_args!("{}", self.payload));
         if let Some(id) = self.id {
-            debug.field("id", &id);
+            map.entry(&"id", &id);
         }
         if let Some(attachments) = &self.attachments {
-            debug.field("count", &attachments.len());
+            map.entry(&"count", &attachments.len());
         }
-        debug.finish()
+        map.finish()
     }
 }
 
@@ -73,30 +73,30 @@ impl DynEvent {
 /// Type-erased inbound acknowledgement after binary reassembly.
 ///
 /// Convert to a typed `sioc::Ack` via `TryFrom<DynAck>`.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct DynAck {
-    pub data: ByteString,
+    pub payload: ByteString,
     pub attachments: Option<Vec<Bytes>>,
 }
 
-impl std::fmt::Debug for DynAck {
+impl std::fmt::Display for DynAck {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut debug = f.debug_struct("DynAck");
-        debug.field("data", &self.data);
+        let mut map = f.debug_map();
+        map.entry(&"payload", &format_args!("{}", self.payload));
         if let Some(attachments) = &self.attachments {
-            debug.field("count", &attachments.len());
+            map.entry(&"count", &attachments.len());
         }
-        debug.finish()
+        map.finish()
     }
 }
 
 impl DynAck {
-    pub fn new<T>(data: T) -> Self
+    pub fn new<T>(payload: T) -> Self
     where
         T: Into<ByteString>,
     {
         Self {
-            data: data.into(),
+            payload: payload.into(),
             attachments: None,
         }
     }
@@ -144,19 +144,19 @@ pub enum Directive {
     /// Opens a namespace; `data` is an optional authentication payload.
     Connect {
         tx: mpsc::Sender<Signal>,
-        data: ByteString,
+        payload: ByteString,
     },
     /// Closes the namespace.
     Disconnect,
     /// Emits an event; if `tx` is set, an ack ID is assigned and the response routed to it.
     Event {
-        data: ByteString,
+        payload: ByteString,
         tx: Option<oneshot::Sender<DynAck>>,
         attachments: Option<Vec<Bytes>>,
     },
     /// Acknowledges a previously received event.
     Ack {
-        data: ByteString,
+        payload: ByteString,
         id: u64,
         attachments: Option<Vec<Bytes>>,
     },
@@ -173,22 +173,25 @@ pub enum Packet {
     /// Type `1` — namespace disconnection.
     Disconnect,
     /// Type `2` — event (text or binary).
-    Event { data: ByteString, id: Option<u64> },
+    Event {
+        payload: ByteString,
+        id: Option<u64>,
+    },
     /// Type `3` — acknowledgement (text or binary).
-    Ack { data: ByteString, id: u64 },
+    Ack { payload: ByteString, id: u64 },
     /// Type `4` — namespace connection rejected.
     ConnectError(ByteString),
 
     /// Type `5` — binary event with `count` follow-up binary frames.
     BinaryEvent {
-        data: ByteString,
+        payload: ByteString,
         id: Option<u64>,
         count: usize,
     },
 
     /// Type `6` — binary acknowledgement with `count` follow-up binary frames.
     BinaryAck {
-        data: ByteString,
+        payload: ByteString,
         id: u64,
         count: usize,
     },
@@ -198,15 +201,15 @@ impl Packet {
     /// Returns a conservative upper bound on the serialised text-frame byte length.
     pub fn size_hint(&self, ns: &str) -> usize {
         match self {
-            Self::Connect(data) => hint_packet_size(ns, false, false, Some(data)),
+            Self::Connect(payload) => hint_packet_size(ns, false, false, Some(payload)),
             Self::Disconnect => hint_packet_size(ns, false, false, None),
-            Self::Event { data, id } => hint_packet_size(ns, false, id.is_some(), Some(data)),
-            Self::Ack { data, .. } => hint_packet_size(ns, false, true, Some(data)),
-            Self::ConnectError(data) => hint_packet_size(ns, false, false, Some(data)),
-            Self::BinaryEvent { data, id, .. } => {
-                hint_packet_size(ns, true, id.is_some(), Some(data))
+            Self::Event { payload, id } => hint_packet_size(ns, false, id.is_some(), Some(payload)),
+            Self::Ack { payload, .. } => hint_packet_size(ns, false, true, Some(payload)),
+            Self::ConnectError(payload) => hint_packet_size(ns, false, false, Some(payload)),
+            Self::BinaryEvent { payload, id, .. } => {
+                hint_packet_size(ns, true, id.is_some(), Some(payload))
             }
-            Self::BinaryAck { data, .. } => hint_packet_size(ns, true, true, Some(data)),
+            Self::BinaryAck { payload, .. } => hint_packet_size(ns, true, true, Some(payload)),
         }
     }
 
@@ -217,20 +220,93 @@ impl Packet {
             Self::Connect(bytes) => write_packet(&mut buffer, b'0', None, ns, None, Some(bytes)),
 
             Self::Disconnect => write_packet(&mut buffer, b'1', None, ns, None, None),
-            Self::Event { data, id } => write_packet(&mut buffer, b'2', None, ns, *id, Some(data)),
-            Self::Ack { data, id } => {
-                write_packet(&mut buffer, b'3', None, ns, Some(*id), Some(data))
+            Self::Event { payload, id } => {
+                write_packet(&mut buffer, b'2', None, ns, *id, Some(payload))
             }
-            Self::ConnectError(data) => write_packet(&mut buffer, b'4', None, ns, None, Some(data)),
-            Self::BinaryEvent { data, id, count } => {
-                write_packet(&mut buffer, b'5', Some(*count), ns, *id, Some(data))
+            Self::Ack { payload, id } => {
+                write_packet(&mut buffer, b'3', None, ns, Some(*id), Some(payload))
             }
-            Self::BinaryAck { data, id, count } => {
-                write_packet(&mut buffer, b'6', Some(*count), ns, Some(*id), Some(data))
+            Self::ConnectError(payload) => {
+                write_packet(&mut buffer, b'4', None, ns, None, Some(payload))
             }
+            Self::BinaryEvent { payload, id, count } => {
+                write_packet(&mut buffer, b'5', Some(*count), ns, *id, Some(payload))
+            }
+            Self::BinaryAck { payload, id, count } => write_packet(
+                &mut buffer,
+                b'6',
+                Some(*count),
+                ns,
+                Some(*id),
+                Some(payload),
+            ),
         }
 
         buffer
+    }
+}
+
+impl std::fmt::Display for Packet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Connect(payload) => f
+                .debug_tuple("Connect")
+                .field(&format_args!("{}", payload))
+                .finish(),
+            Self::Disconnect => f.write_str("Disconnect"),
+            Self::Event { payload, id } => {
+                let mut s = f.debug_struct("Event");
+                s.field("payload", &format_args!("{}", payload));
+                if let Some(id) = id {
+                    s.field("id", id);
+                }
+                s.finish()
+            }
+            Self::Ack { payload, id } => f
+                .debug_struct("Ack")
+                .field("payload", &format_args!("{}", payload))
+                .field("id", id)
+                .finish(),
+            Self::ConnectError(payload) => f
+                .debug_tuple("ConnectError")
+                .field(&format_args!("{}", payload))
+                .finish(),
+            Self::BinaryEvent { payload, id, count } => {
+                let mut s = f.debug_struct("BinaryEvent");
+                s.field("payload", &format_args!("{}", payload));
+                if let Some(id) = id {
+                    s.field("id", id);
+                }
+                s.field("count", count);
+                s.finish()
+            }
+            Self::BinaryAck { payload, id, count } => f
+                .debug_struct("BinaryAck")
+                .field("payload", &format_args!("{}", payload))
+                .field("id", id)
+                .field("count", count)
+                .finish(),
+        }
+    }
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for Signal<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Connect(c) => f
+                .debug_tuple("Connect")
+                .field(&format_args!("{}", c.sid))
+                .finish(),
+            Self::Disconnect => f.write_str("Disconnect"),
+            Self::ConnectError(e) => f
+                .debug_tuple("ConnectError")
+                .field(&format_args!("{}", e))
+                .finish(),
+            Self::Event(e) => f
+                .debug_tuple("Event")
+                .field(&format_args!("{}", e))
+                .finish(),
+        }
     }
 }
 

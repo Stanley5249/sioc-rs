@@ -170,20 +170,20 @@ where
         match action {
             EngineAction::Transport(frame) => match frame {
                 Frame::Packet(packet) => {
-                    tracing::trace!(?packet, "received packet");
+                    tracing::trace!(%packet, "received packet");
 
                     match packet {
                         Packet::Close => {
                             tracing::debug!("server closed");
                             break;
                         }
-                        Packet::Ping(data) => {
+                        Packet::Ping(payload) => {
                             tracing::trace!("sending PONG");
-                            transport_tx.send(Packet::Pong(data).into()).await?;
+                            transport_tx.send(Packet::Pong(payload).into()).await?;
                             heartbeat.reset();
                         }
-                        Packet::Message(data) => {
-                            sink.send(Message::Text(data))
+                        Packet::Message(payload) => {
+                            sink.send(Message::Text(payload))
                                 .await
                                 .map_err(EngineError::SendSink)?;
                         }
@@ -197,10 +197,10 @@ where
                         }
                     }
                 }
-                Frame::Binary(data) => {
-                    tracing::trace!(len = data.len(), "received binary");
+                Frame::Binary(payload) => {
+                    tracing::trace!(len = payload.len(), "received binary");
 
-                    sink.send(Message::Binary(data))
+                    sink.send(Message::Binary(payload))
                         .await
                         .map_err(EngineError::SendSink)?;
                 }
@@ -208,7 +208,7 @@ where
             EngineAction::Sink(message) => match message {
                 Message::Text(bytes) => {
                     let packet = Packet::Message(bytes);
-                    tracing::trace!(?packet, "sending packet");
+                    tracing::trace!(%packet, "sending packet");
                     transport_tx.send(packet.into()).await?;
                 }
                 Message::Binary(bytes) => {

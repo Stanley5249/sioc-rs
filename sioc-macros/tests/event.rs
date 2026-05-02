@@ -1,5 +1,4 @@
 use sioc::prelude::*;
-use std::fmt::Debug;
 
 #[derive(Debug, PartialEq, EventType, SerializePayload, DeserializePayload)]
 struct Ping;
@@ -37,7 +36,7 @@ struct Stream {
 
 fn roundtrip<E>(val: E)
 where
-    E: Debug + PartialEq + EventType + SerializePayload + DeserializePayload,
+    E: std::fmt::Debug + PartialEq + EventType + SerializePayload + DeserializePayload,
 {
     let bytes = event_to_json(&val).unwrap();
     assert_eq!(event_from_json::<E>(&bytes).unwrap(), val);

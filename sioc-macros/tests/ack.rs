@@ -1,5 +1,4 @@
 use sioc::prelude::*;
-use std::fmt::Debug;
 
 #[derive(Debug, PartialEq, AckType, SerializePayload, DeserializePayload)]
 struct Empty;
@@ -28,7 +27,7 @@ struct Flex {
 
 fn roundtrip<A>(val: A)
 where
-    A: Debug + PartialEq + AckType + SerializePayload + DeserializePayload,
+    A: std::fmt::Debug + PartialEq + AckType + SerializePayload + DeserializePayload,
 {
     let bytes = ack_to_json(&val).unwrap();
     assert_eq!(ack_from_json::<A>(&bytes).unwrap(), val);

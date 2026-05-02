@@ -62,7 +62,6 @@ impl AckType for () {
 ///
 /// Construct via [`TryFrom<DynAck>`] after receiving a [`DynAck`]
 /// from an ack oneshot channel. The binary policy is determined by `A::Binary`.
-#[derive(Debug)]
 pub struct Ack<A>
 where
     A: AckType,
@@ -73,6 +72,18 @@ where
     pub attachments: <A::Binary as BinaryMarker>::Attachments,
 }
 
+impl<A> std::fmt::Debug for Ack<A>
+where
+    A: std::fmt::Debug + AckType,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut map = f.debug_map();
+        map.entry(&"payload", &self.payload);
+        A::Binary::format(&self.attachments, &mut map);
+        map.finish()
+    }
+}
+
 impl<A> TryFrom<DynAck> for Ack<A>
 where
     A: AckType + DeserializePayload,
@@ -80,7 +91,7 @@ where
     type Error = AckError;
 
     fn try_from(value: DynAck) -> Result<Self, AckError> {
-        let payload = ack_from_json(&value.data)?;
+        let payload = ack_from_json(&value.payload)?;
         let attachments = A::Binary::parse(value.attachments)?;
         Ok(Self {
             payload,
@@ -94,9 +105,9 @@ where
     A: AckType<Binary = NoBinary> + SerializePayload,
 {
     fn into_directive(self, id: u64) -> Result<Directive, PayloadError> {
-        let data = ack_to_json(&self)?.into();
+        let payload = ack_to_json(&self)?.into();
         Ok(Directive::Ack {
-            data,
+            payload,
             id,
             attachments: None,
         })
@@ -110,9 +121,9 @@ where
 {
     fn into_directive(self, id: u64) -> Result<Directive, PayloadError> {
         let mut builder = AttachmentsBuilder::new();
-        let data = ack_to_json(&self(&mut builder))?.into();
+        let payload = ack_to_json(&self(&mut builder))?.into();
         Ok(Directive::Ack {
-            data,
+            payload,
             id,
             attachments: Some(builder.finish()),
         })
@@ -227,7 +238,7 @@ mod tests {
     fn from_ack_with_binary() {
         let attachment = Bytes::from_static(b"\xDE\xAD");
         let ack = DynAck {
-            data: ByteString::from_static("[true]"),
+            payload: ByteString::from_static("[true]"),
             attachments: Some(vec![attachment.clone()]),
         };
         let ack: Ack<BinaryBoolAck> = ack.try_into().unwrap();
@@ -239,7 +250,7 @@ mod tests {
     #[test]
     fn from_ack_missing_binary_fails() {
         let ack = DynAck {
-            data: ByteString::from_static("[]"),
+            payload: ByteString::from_static("[]"),
             attachments: None,
         };
         let result: Result<Ack<BinaryUnitAck>, _> = ack.try_into();
@@ -249,7 +260,7 @@ mod tests {
     #[test]
     fn from_ack_unexpected_binary_fails() {
         let ack = DynAck {
-            data: ByteString::from_static("[]"),
+            payload: ByteString::from_static("[]"),
             attachments: Some(vec![Bytes::from_static(b"x")]),
         };
         let result: Result<Ack<()>, _> = ack.try_into();
@@ -268,11 +279,11 @@ mod tests {
         .unwrap();
         match directive {
             Directive::Ack {
-                data,
+                payload,
                 id,
                 attachments,
             } => {
-                assert_eq!(&data[..], "[true]");
+                assert_eq!(&payload[..], "[true]");
                 assert_eq!(id, 3);
                 let att = attachments.expect("expected attachments");
                 assert_eq!(att.len(), 1);

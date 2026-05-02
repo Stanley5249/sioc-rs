@@ -188,7 +188,7 @@ impl Client {
     pub async fn connect_with<S, B>(
         &self,
         ns: S,
-        data: B,
+        payload: B,
     ) -> Result<(SocketSender, SocketReceiver), SocketError>
     where
         S: Into<ByteString>,
@@ -202,7 +202,7 @@ impl Client {
 
         let directive = Directive::Connect {
             tx,
-            data: data.into(),
+            payload: payload.into(),
         };
         socket_tx.send(directive).await?;
 
@@ -260,13 +260,13 @@ impl SocketSender {
     }
 
     /// Acknowledges a received event.
-    pub async fn acknowledge<T, A, B>(&self, id: AckId<A>, data: T) -> Result<(), SocketError>
+    pub async fn acknowledge<T, A, B>(&self, id: AckId<A>, payload: T) -> Result<(), SocketError>
     where
         T: Acknowledge<A, B>,
         A: AckType,
         B: BinaryMarker,
     {
-        let directive = data.into_directive(id.get())?;
+        let directive = payload.into_directive(id.get())?;
         self.send(directive).await
     }
 

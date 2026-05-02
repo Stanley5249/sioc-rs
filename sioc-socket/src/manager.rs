@@ -135,22 +135,23 @@ impl Socket {
     ) -> Result<ByteString, ManagerError> {
         match packet {
             BinaryPacket::Event {
-                data,
+                payload,
                 id,
                 attachments,
                 ..
             } => {
-                let packet = Signal::Event(DynEvent::new(data, id).with_attachments(attachments));
+                let packet =
+                    Signal::Event(DynEvent::new(payload, id).with_attachments(attachments));
 
                 self.send_packet(ns, packet).await
             }
             BinaryPacket::Ack {
-                data,
+                payload,
                 id,
                 attachments,
                 ..
             } => {
-                let ack = DynAck::new(data).with_attachments(attachments);
+                let ack = DynAck::new(payload).with_attachments(attachments);
 
                 self.send_ack(ns, id, ack)
             }
@@ -210,13 +211,13 @@ impl SocketsMap {
 
 enum BinaryPacket {
     Event {
-        data: ByteString,
+        payload: ByteString,
         id: Option<u64>,
         attachments: Vec<Bytes>,
         count: usize,
     },
     Ack {
-        data: ByteString,
+        payload: ByteString,
         id: u64,
         attachments: Vec<Bytes>,
         count: usize,
@@ -224,18 +225,18 @@ enum BinaryPacket {
 }
 
 impl BinaryPacket {
-    fn event(data: ByteString, id: Option<u64>, count: usize) -> Self {
+    fn event(payload: ByteString, id: Option<u64>, count: usize) -> Self {
         Self::Event {
-            data,
+            payload,
             id,
             attachments: Vec::new(),
             count,
         }
     }
 
-    fn ack(data: ByteString, id: u64, count: usize) -> Self {
+    fn ack(payload: ByteString, id: u64, count: usize) -> Self {
         Self::Ack {
-            data,
+            payload,
             id,
             attachments: Vec::new(),
             count,
@@ -356,11 +357,11 @@ impl Manager {
         let mut socket_buffer = None;
 
         let (ns, packet, attachments) = match directive {
-            Directive::Connect { tx, data } => {
+            Directive::Connect { tx, payload } => {
                 let socket = Socket::new(tx);
                 let Ns(ns, _) = self.sockets.connect(ns, socket)?;
 
-                (ns, Packet::Connect(data), None)
+                (ns, Packet::Connect(payload), None)
             }
             Directive::Disconnect => {
                 let Ns(ns, _) = self.sockets.disconnect(ns)?;
@@ -368,7 +369,7 @@ impl Manager {
                 (ns, Packet::Disconnect, None)
             }
             Directive::Event {
-                data,
+                payload,
                 tx,
                 attachments,
             } => {
@@ -381,9 +382,9 @@ impl Manager {
                 }
 
                 let packet = match &attachments {
-                    None => Packet::Event { data, id },
+                    None => Packet::Event { payload, id },
                     Some(attachments) => Packet::BinaryEvent {
-                        data,
+                        payload,
                         id,
                         count: attachments.len(),
                     },
@@ -392,16 +393,16 @@ impl Manager {
                 (ns, packet, attachments)
             }
             Directive::Ack {
-                data,
+                payload,
                 id,
                 attachments,
             } => {
                 let ns = self.sockets.require(ns)?;
 
                 let packet = match &attachments {
-                    None => Packet::Ack { data, id },
+                    None => Packet::Ack { payload, id },
                     Some(attachments) => Packet::BinaryAck {
-                        data,
+                        payload,
                         id,
                         count: attachments.len(),
                     },
@@ -411,7 +412,7 @@ impl Manager {
             }
         };
 
-        tracing::trace!(%ns, ?packet, "sending packet");
+        tracing::trace!(%ns, %packet, "sending packet");
 
         let text = Message::Text(packet.encode(&ns).into());
         let binaries = attachments.into_iter().flatten().map(Message::Binary);
@@ -466,10 +467,10 @@ impl Manager {
 
         let Ns(ns, packet) = text.try_into()?;
 
-        tracing::trace!(%ns, ?packet, "received packet");
+        tracing::trace!(%ns, %packet, "received packet");
 
         match packet {
-            Packet::Connect(data) => {
+            Packet::Connect(payload) => {
                 let Ns(ns, socket) = self.sockets.get_mut(ns)?;
 
                 socket.connected = true;
@@ -484,7 +485,7 @@ impl Manager {
                     }
                 }
 
-                let connect: Connect = serde_json::from_str(&data).map_err(PacketError::Json)?;
+                let connect: Connect = serde_json::from_str(&payload).map_err(PacketError::Json)?;
 
                 socket.send_packet(ns, Signal::Connect(connect)).await?;
             }
@@ -493,36 +494,37 @@ impl Manager {
 
                 socket.send_packet(ns, Signal::Disconnect).await?;
             }
-            Packet::Event { data, id } => {
+            Packet::Event { payload, id } => {
                 let Ns(ns, socket) = self.sockets.get_mut(ns)?;
 
                 socket
-                    .send_packet(ns, Signal::Event(DynEvent::new(data, id)))
+                    .send_packet(ns, Signal::Event(DynEvent::new(payload, id)))
                     .await?;
             }
-            Packet::Ack { data, id } => {
+            Packet::Ack { payload, id } => {
                 let Ns(ns, socket) = self.sockets.get_mut(ns)?;
 
-                socket.send_ack(ns, id, DynAck::new(data))?;
+                socket.send_ack(ns, id, DynAck::new(payload))?;
             }
-            Packet::ConnectError(data) => {
+            Packet::ConnectError(payload) => {
                 let Ns(ns, socket) = self.sockets.get_mut(ns)?;
 
-                let error: ConnectError = serde_json::from_str(&data).map_err(PacketError::Json)?;
+                let error: ConnectError =
+                    serde_json::from_str(&payload).map_err(PacketError::Json)?;
 
                 socket.send_packet(ns, Signal::ConnectError(error)).await?;
             }
-            Packet::BinaryEvent { data, id, count } => {
+            Packet::BinaryEvent { payload, id, count } => {
                 let ns = self.sockets.require(ns)?;
 
                 self.reconstructor
-                    .insert(ns, BinaryPacket::event(data, id, count));
+                    .insert(ns, BinaryPacket::event(payload, id, count));
             }
-            Packet::BinaryAck { data, id, count } => {
+            Packet::BinaryAck { payload, id, count } => {
                 let ns = self.sockets.require(ns)?;
 
                 self.reconstructor
-                    .insert(ns, BinaryPacket::ack(data, id, count));
+                    .insert(ns, BinaryPacket::ack(payload, id, count));
             }
         };
 
@@ -586,7 +588,7 @@ mod tests {
                 ns.into(),
                 Directive::Connect {
                     tx,
-                    data: ByteString::new(),
+                    payload: ByteString::new(),
                 },
             )))
             .await
@@ -615,7 +617,7 @@ mod tests {
             .send(ManagerAction::Socket(Ns(
                 "/".into(),
                 Directive::Event {
-                    data: ByteString::from_static("[\"ping\"]"),
+                    payload: ByteString::from_static("[\"ping\"]"),
                     tx: None,
                     attachments: None,
                 },
@@ -638,13 +640,13 @@ mod tests {
         engine_rx.recv().await.unwrap();
 
         for c in 'a'..='c' {
-            let data = format!("[\"{}\"]", c);
+            let payload = format!("[\"{}\"]", c);
 
             manager_tx
                 .send(ManagerAction::Socket(Ns(
                     "/".into(),
                     Directive::Event {
-                        data: ByteString::from(data),
+                        payload: ByteString::from(payload),
                         tx: None,
                         attachments: None,
                     },
@@ -705,7 +707,7 @@ mod tests {
             .send(ManagerAction::Socket(Ns(
                 "/no-such-ns".into(),
                 Directive::Event {
-                    data: ByteString::from_static("[\"x\"]"),
+                    payload: ByteString::from_static("[\"x\"]"),
                     tx: None,
                     attachments: None,
                 },
@@ -774,7 +776,7 @@ mod tests {
             .send(ManagerAction::Socket(Ns(
                 "/".into(),
                 Directive::Event {
-                    data: ByteString::from_static("[\"greet\",\"hello\"]"),
+                    payload: ByteString::from_static("[\"greet\",\"hello\"]"),
                     tx: Some(ack_tx),
                     attachments: None,
                 },
@@ -793,7 +795,7 @@ mod tests {
 
         tokio::task::yield_now().await;
         let ack = ack_rx.try_recv().unwrap();
-        assert_eq!(ack.data, "[\"world\"]");
+        assert_eq!(ack.payload, "[\"world\"]");
     }
 
     /// A binary event is held until all attachment frames arrive, then delivered as a complete packet.

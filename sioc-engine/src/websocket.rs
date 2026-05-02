@@ -3,7 +3,7 @@
 use crate::ENGINE_IO_VERSION;
 use crate::engine::EngineSender;
 use crate::error::{TransportError, WebSocketError};
-use crate::packet::{Frame, Handshake, PROBE, Packet, bytestring_from_utf8_bytes};
+use crate::packet::{Frame, Handshake, PROBE, Packet};
 use bytestring::ByteString;
 use futures_util::{Sink, SinkExt, Stream, StreamExt, TryStreamExt};
 use std::future::Future;
@@ -17,6 +17,12 @@ use tokio_tungstenite::{MaybeTlsStream, connect_async};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+/// Converts an inbound WebSocket text frame into a [`ByteString`] without copying.
+fn bytestring_from_utf8_bytes(utf8: tokio_tungstenite::tungstenite::Utf8Bytes) -> ByteString {
+    // SAFETY: `tungstenite::Utf8Bytes` guarantees the inner `Bytes` is valid UTF-8.
+    unsafe { ByteString::from_bytes_unchecked(utf8.into()) }
+}
+
 /// Framed WebSocket stream that speaks [`Frame`] instead of raw [`WebSocketMessage`].
 pub struct WebSocketStream(pub tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>);
 
@@ -28,12 +34,18 @@ impl Stream for WebSocketStream {
             return Poll::Ready(match ready!(self.0.poll_next_unpin(cx)) {
                 None => None,
                 Some(Err(e)) => Some(Err(WebSocketError::Tungstenite(e))),
-                Some(Ok(WebSocketMessage::Text(text))) => Some(
-                    Packet::decode(bytestring_from_utf8_bytes(text))
-                        .map(Frame::from)
-                        .map_err(WebSocketError::Packet),
-                ),
-                Some(Ok(WebSocketMessage::Binary(bytes))) => Some(Ok(Frame::Binary(bytes))),
+                Some(Ok(WebSocketMessage::Text(text))) => {
+                    tracing::trace!(len = text.len(), "received TEXT frame");
+                    Some(
+                        Packet::decode(bytestring_from_utf8_bytes(text))
+                            .map(Frame::from)
+                            .map_err(WebSocketError::Packet),
+                    )
+                }
+                Some(Ok(WebSocketMessage::Binary(bytes))) => {
+                    tracing::trace!(len = bytes.len(), "received BINARY frame");
+                    Some(Ok(Frame::Binary(bytes)))
+                }
                 Some(Ok(_)) => continue,
             });
         }
@@ -50,12 +62,13 @@ impl Sink<Frame> for WebSocketStream {
     }
 
     fn start_send(mut self: Pin<&mut Self>, frame: Frame) -> Result<(), Self::Error> {
-        let msg = match frame {
+        let message = match frame {
             Frame::Packet(packet) => WebSocketMessage::text(packet.encode()),
             Frame::Binary(bytes) => WebSocketMessage::binary(bytes),
         };
+        tracing::trace!(len = message.len(), "sending frame");
         self.0
-            .start_send_unpin(msg)
+            .start_send_unpin(message)
             .map_err(WebSocketError::Tungstenite)
     }
 
@@ -131,13 +144,13 @@ fn websocket_url(mut url: Url, sid: Option<&str>) -> Url {
 
 /// Sends a probe `Ping` and expects a matching `Pong`, confirming the WebSocket path is live.
 async fn websocket_probe(stream: &mut WebSocketStream) -> Result<(), TransportError> {
-    tracing::debug!("sending probe PING");
+    tracing::debug!("ping");
 
     stream.send(Packet::Ping(PROBE).into()).await?;
 
     match stream.try_next().await?.ok_or(WebSocketError::Closed)? {
         Frame::Packet(Packet::Pong(bytes)) if bytes == PROBE => {
-            tracing::debug!("received probe PONG");
+            tracing::debug!("pong");
         }
         other => {
             return Err(TransportError::frame(
@@ -226,8 +239,6 @@ pub async fn websocket_loop(
                     break;
                 };
 
-                tracing::trace!(?frame, "received frame");
-
                 engine_tx.send(frame).await?;
             }
 
@@ -237,8 +248,6 @@ pub async fn websocket_loop(
                     break;
                 };
 
-                tracing::trace!(?frame, "sending frame");
-
                 stream.send(frame).await?;
             }
         };
@@ -247,8 +256,6 @@ pub async fn websocket_loop(
     // Drain frames queued before the engine exited so the disconnect
     // packet is not silently dropped by a concurrent cancellation.
     while let Some(frame) = transport_rx.recv().await {
-        tracing::trace!(?frame, "drained frame");
-
         stream.send(frame).await?;
     }
 
