@@ -76,7 +76,7 @@ impl TryFrom<DynEvent> for MyEvent {
     type Error = EventError;
 
     fn try_from(event: DynEvent) -> Result<Self, EventError> {
-        let payload = sioc::payload::deserialize(&event.payload)?;
+        let payload = sioc::payload::from_json(&event.payload)?;
 
         match payload {
             MyEventPayload::A(args) => {

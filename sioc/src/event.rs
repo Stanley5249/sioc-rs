@@ -26,9 +26,7 @@ use crate::binary::AttachmentsBuilder;
 use crate::client::Emit;
 use crate::error::{EventError, PayloadError};
 use crate::marker::{AckMarker, BinaryMarker, HasAck, HasBinary, NoAck, NoBinary};
-use crate::payload::{
-    DeserializePayload, EventPayload, SerializePayload, deserialize_event, serialize_event,
-};
+use crate::payload::{DeserializePayload, SerializePayload, event_from_json, event_to_json};
 use bytes::Bytes;
 use sioc_socket::packet::{Directive, DynEvent};
 use tokio::sync::oneshot;
@@ -86,7 +84,7 @@ where
     type Error = EventError;
 
     fn try_from(value: DynEvent) -> Result<Self, EventError> {
-        let payload = deserialize_event(&value.payload)?;
+        let payload = event_from_json(&value.payload)?;
         let id = E::Ack::parse(value.id)?;
         let attachments = E::Binary::parse(value.attachments)?;
         Ok(Self {
@@ -135,7 +133,8 @@ where
     type Output = ();
 
     fn prepare(self) -> Result<(Directive, ()), PayloadError> {
-        let data = crate::payload::serialize(&EventPayload(&self))?;
+        let data = event_to_json(&self)?;
+
         Ok((
             Directive::Event {
                 data: data.into(),
@@ -156,7 +155,7 @@ where
 
     fn prepare(self) -> Result<(Directive, AckHandle<A>), PayloadError> {
         let (tx, rx) = oneshot::channel();
-        let data = serialize_event(&self)?.into();
+        let data = event_to_json(&self)?.into();
         Ok((
             Directive::Event {
                 data,
@@ -177,7 +176,7 @@ where
 
     fn prepare(self) -> Result<(Directive, ()), PayloadError> {
         let mut builder = AttachmentsBuilder::new();
-        let data = serialize_event(&self(&mut builder))?.into();
+        let data = event_to_json(&self(&mut builder))?.into();
         Ok((
             Directive::Event {
                 data,
@@ -200,7 +199,7 @@ where
     fn prepare(self) -> Result<(Directive, AckHandle<A>), PayloadError> {
         let (tx, rx) = oneshot::channel();
         let mut builder = AttachmentsBuilder::new();
-        let data = serialize_event(&self(&mut builder))?.into();
+        let data = event_to_json(&self(&mut builder))?.into();
         Ok((
             Directive::Event {
                 data,

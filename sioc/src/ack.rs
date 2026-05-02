@@ -17,7 +17,7 @@ use crate::binary::AttachmentsBuilder;
 use crate::client::Acknowledge;
 use crate::error::{AckError, PayloadError};
 use crate::marker::{BinaryMarker, HasBinary, NoBinary};
-use crate::payload::{DeserializePayload, SerializePayload, deserialize_ack, serialize_ack};
+use crate::payload::{DeserializePayload, SerializePayload, ack_from_json, ack_to_json};
 use pin_project::pin_project;
 use sioc_socket::packet::Directive;
 use sioc_socket::packet::DynAck;
@@ -45,8 +45,8 @@ use tokio::sync::oneshot;
 /// struct SaveAck { ok: bool, id: u64 }
 ///
 /// fn main() {
-///     assert_eq!(serialize_ack(&()).unwrap(), "[]");
-///     assert_eq!(serialize_ack(&SaveAck { ok: true, id: 7 }).unwrap(), "[true,7]");
+///     assert_eq!(ack_to_json(&()).unwrap(), "[]");
+///     assert_eq!(ack_to_json(&SaveAck { ok: true, id: 7 }).unwrap(), "[true,7]");
 /// }
 /// ```
 pub trait AckType: Sized {
@@ -80,7 +80,7 @@ where
     type Error = AckError;
 
     fn try_from(value: DynAck) -> Result<Self, AckError> {
-        let payload = deserialize_ack(&value.data)?;
+        let payload = ack_from_json(&value.data)?;
         let attachments = A::Binary::parse(value.attachments)?;
         Ok(Self {
             payload,
@@ -94,7 +94,7 @@ where
     A: AckType<Binary = NoBinary> + SerializePayload,
 {
     fn into_directive(self, id: u64) -> Result<Directive, PayloadError> {
-        let data = serialize_ack(&self)?.into();
+        let data = ack_to_json(&self)?.into();
         Ok(Directive::Ack {
             data,
             id,
@@ -110,7 +110,7 @@ where
 {
     fn into_directive(self, id: u64) -> Result<Directive, PayloadError> {
         let mut builder = AttachmentsBuilder::new();
-        let data = serialize_ack(&self(&mut builder))?.into();
+        let data = ack_to_json(&self(&mut builder))?.into();
         Ok(Directive::Ack {
             data,
             id,
@@ -215,12 +215,12 @@ mod tests {
 
     #[test]
     fn serialize_unit_ack() {
-        assert_eq!(serialize_ack(&()).unwrap(), "[]");
+        assert_eq!(ack_to_json(&()).unwrap(), "[]");
     }
 
     #[test]
     fn deserialize_unit_ack() {
-        assert_eq!(deserialize_ack::<()>("[]").unwrap(), ());
+        assert_eq!(ack_from_json::<()>("[]").unwrap(), ());
     }
 
     #[test]

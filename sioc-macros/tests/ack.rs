@@ -30,26 +30,23 @@ fn roundtrip<A>(val: A)
 where
     A: Debug + PartialEq + AckType + SerializePayload + DeserializePayload,
 {
-    let bytes = serialize_ack(&val).unwrap();
-    assert_eq!(deserialize_ack::<A>(&bytes).unwrap(), val);
+    let bytes = ack_to_json(&val).unwrap();
+    assert_eq!(ack_from_json::<A>(&bytes).unwrap(), val);
 }
 
 #[test]
 fn wire_unit() {
-    assert_eq!(serialize_ack(&Empty).unwrap(), "[]");
+    assert_eq!(ack_to_json(&Empty).unwrap(), "[]");
 }
 
 #[test]
 fn wire_tuple() {
-    assert_eq!(serialize_ack(&Status(true, 200)).unwrap(), "[true,200]");
+    assert_eq!(ack_to_json(&Status(true, 200)).unwrap(), "[true,200]");
 }
 
 #[test]
 fn wire_named() {
-    assert_eq!(
-        serialize_ack(&Save { ok: true, id: 7 }).unwrap(),
-        "[true,7]"
-    );
+    assert_eq!(ack_to_json(&Save { ok: true, id: 7 }).unwrap(), "[true,7]");
 }
 
 #[test]
@@ -69,17 +66,17 @@ fn roundtrip_named() {
 
 #[test]
 fn strict_rejects_trailing() {
-    assert!(deserialize_ack::<Strict>("[true,\"extra\"]").is_err());
+    assert!(ack_from_json::<Strict>("[true,\"extra\"]").is_err());
 }
 
 #[test]
 fn flexible_discards_trailing() {
-    assert_eq!(deserialize_ack::<Empty>("[null]").unwrap(), Empty);
+    assert_eq!(ack_from_json::<Empty>("[null]").unwrap(), Empty);
 }
 
 #[test]
 fn flatten_collects() {
-    let ack = deserialize_ack::<Flex>("[true,1,\"x\"]").unwrap();
+    let ack = ack_from_json::<Flex>("[true,1,\"x\"]").unwrap();
     assert!(ack.ok);
     assert_eq!(ack.extras.len(), 2);
 }

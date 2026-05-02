@@ -5,23 +5,23 @@ use serde::ser::SerializeSeq;
 use std::marker::PhantomData;
 
 /// Serializes `payload` to JSON, returning the encoded string.
-pub(crate) fn serialize<T>(payload: &T) -> Result<String, PayloadError>
+pub fn to_json<T>(payload: &T) -> Result<String, PayloadError>
 where
     T: serde::Serialize,
 {
-    let mut buffer = Vec::new();
-    let mut ser = serde_json::Serializer::new(&mut buffer);
+    let mut buffer = String::new();
+
+    // SAFETY: serde_json always produces valid UTF-8.
+    let mut ser = serde_json::Serializer::new(unsafe { buffer.as_mut_vec() });
+
     match serde_path_to_error::serialize(payload, &mut ser) {
-        Ok(()) => {
-            // SAFETY: serde_json always produces valid UTF-8.
-            Ok(unsafe { String::from_utf8_unchecked(buffer) })
-        }
+        Ok(()) => Ok(buffer),
         Err(e) => Err(PayloadError::new::<T>(e)),
     }
 }
 
 /// Deserializes a JSON string slice into `T`.
-pub(crate) fn deserialize<'de, T>(data: &'de str) -> Result<T, PayloadError>
+pub fn from_json<'de, T>(data: &'de str) -> Result<T, PayloadError>
 where
     T: serde::Deserialize<'de>,
 {
@@ -30,6 +30,40 @@ where
         Ok(payload) => Ok(payload),
         Err(e) => Err(PayloadError::new::<T>(e)),
     }
+}
+
+/// Serializes an [`EventType`] + [`SerializePayload`] value into its wire-format string representation.
+pub fn event_to_json<E>(event: &E) -> Result<String, PayloadError>
+where
+    E: EventType + SerializePayload,
+{
+    to_json(&EventPayload(event))
+}
+
+/// Deserializes a wire-format string into a typed [`EventType`] + [`DeserializePayload`] value.
+pub fn event_from_json<E>(data: &str) -> Result<E, PayloadError>
+where
+    E: EventType + DeserializePayload,
+{
+    let EventPayload(event) = from_json(data)?;
+    Ok(event)
+}
+
+/// Serializes an [`AckType`] + [`SerializePayload`] value into its wire-format string representation.
+pub fn ack_to_json<A>(payload: &A) -> Result<String, PayloadError>
+where
+    A: AckType + SerializePayload,
+{
+    to_json(&AckPayload(payload))
+}
+
+/// Deserializes a wire-format string into a typed [`AckType`] + [`DeserializePayload`] value.
+pub fn ack_from_json<A>(data: &str) -> Result<A, PayloadError>
+where
+    A: AckType + DeserializePayload,
+{
+    let AckPayload(ack) = from_json(data)?;
+    Ok(ack)
 }
 
 /// Serializes a struct's fields as sequential elements of a JSON array.
@@ -65,7 +99,7 @@ impl DeserializePayload for () {
     }
 }
 
-pub struct EventPayload<T>(pub T);
+struct EventPayload<T>(pub T);
 
 impl<E> serde::Serialize for EventPayload<&E>
 where
@@ -92,23 +126,6 @@ where
     {
         deserializer.deserialize_seq(EventVisitor(PhantomData))
     }
-}
-
-/// Serializes an [`EventType`] + [`SerializePayload`] value into its wire-format string representation.
-pub fn serialize_event<E>(payload: &E) -> Result<String, PayloadError>
-where
-    E: EventType + SerializePayload,
-{
-    serialize(&EventPayload(payload))
-}
-
-/// Deserializes a wire-format string into a typed [`EventType`] + [`DeserializePayload`] value.
-pub fn deserialize_event<E>(data: &str) -> Result<E, PayloadError>
-where
-    E: EventType + DeserializePayload,
-{
-    let EventPayload(event) = deserialize(data)?;
-    Ok(event)
 }
 
 struct EventVisitor<E>(PhantomData<E>);
@@ -142,7 +159,7 @@ where
     }
 }
 
-pub struct AckPayload<T>(pub T);
+struct AckPayload<T>(pub T);
 
 impl<A> serde::Serialize for AckPayload<&A>
 where
@@ -188,21 +205,4 @@ where
     {
         A::deserialize_payload(&mut seq).map(AckPayload)
     }
-}
-
-/// Serializes an [`AckType`] + [`SerializePayload`] value into its wire-format string representation.
-pub fn serialize_ack<A>(payload: &A) -> Result<String, PayloadError>
-where
-    A: AckType + SerializePayload,
-{
-    serialize(&AckPayload(payload))
-}
-
-/// Deserializes a wire-format string into a typed [`AckType`] + [`DeserializePayload`] value.
-pub fn deserialize_ack<A>(data: &str) -> Result<A, PayloadError>
-where
-    A: AckType + DeserializePayload,
-{
-    let AckPayload(ack) = deserialize(data)?;
-    Ok(ack)
 }

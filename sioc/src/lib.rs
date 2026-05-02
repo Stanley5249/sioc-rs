@@ -108,8 +108,8 @@ pub mod prelude {
     pub use crate::event::{Event, EventHandler, EventType};
     pub use crate::marker::{AckId, AckMarker, BinaryMarker, HasAck, HasBinary, NoAck, NoBinary};
     pub use crate::payload::{
-        DeserializePayload, SerializePayload, deserialize_ack, deserialize_event, serialize_ack,
-        serialize_event,
+        DeserializePayload, SerializePayload, ack_from_json, ack_to_json, event_from_json,
+        event_to_json,
     };
 
     pub use sioc_socket::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Signal};

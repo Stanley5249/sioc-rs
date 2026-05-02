@@ -39,8 +39,8 @@ fn roundtrip<E>(val: E)
 where
     E: Debug + PartialEq + EventType + SerializePayload + DeserializePayload,
 {
-    let bytes = serialize_event(&val).unwrap();
-    assert_eq!(deserialize_event::<E>(&bytes).unwrap(), val);
+    let bytes = event_to_json(&val).unwrap();
+    assert_eq!(event_from_json::<E>(&bytes).unwrap(), val);
 }
 
 #[test]
@@ -57,18 +57,18 @@ fn name_implicit() {
 
 #[test]
 fn wire_unit() {
-    assert_eq!(serialize_event(&Ping).unwrap(), "[\"ping\"]");
+    assert_eq!(event_to_json(&Ping).unwrap(), "[\"ping\"]");
 }
 
 #[test]
 fn wire_tuple() {
-    assert_eq!(serialize_event(&Moved(3, -7)).unwrap(), "[\"moved\",3,-7]");
+    assert_eq!(event_to_json(&Moved(3, -7)).unwrap(), "[\"moved\",3,-7]");
 }
 
 #[test]
 fn wire_named() {
     assert_eq!(
-        serialize_event(&Join {
+        event_to_json(&Join {
             room: "lobby".into(),
             user: "alice".into()
         })
@@ -109,26 +109,23 @@ fn roundtrip_generic() {
 
 #[test]
 fn wrong_name_fails() {
-    assert!(deserialize_event::<Ping>("[\"pong\"]").is_err());
+    assert!(event_from_json::<Ping>("[\"pong\"]").is_err());
 }
 
 #[test]
 fn strict_rejects_trailing() {
-    assert!(deserialize_event::<Chat>("[\"chat\",\"hi\",null]").is_err());
+    assert!(event_from_json::<Chat>("[\"chat\",\"hi\",null]").is_err());
 }
 
 #[test]
 fn flexible_discards_trailing() {
-    assert_eq!(
-        deserialize_event::<Ping>("[\"ping\",null,42]").unwrap(),
-        Ping
-    );
+    assert_eq!(event_from_json::<Ping>("[\"ping\",null,42]").unwrap(), Ping);
 }
 
 #[test]
 fn flatten_collects() {
     use serde_json::json;
-    let evt = deserialize_event::<Stream>("[\"stream\",\"s1\",\"rock\",\"jazz\"]").unwrap();
+    let evt = event_from_json::<Stream>("[\"stream\",\"s1\",\"rock\",\"jazz\"]").unwrap();
     assert_eq!(
         evt,
         Stream {
