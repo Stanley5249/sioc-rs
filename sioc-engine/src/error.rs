@@ -125,6 +125,16 @@ pub enum TransportError {
     #[diagnostic(code(sioc_engine::transport::join))]
     Join(#[from] JoinError),
 
+    /// The first frame received was not an Open packet.
+    #[error("expected Open packet as first frame")]
+    #[diagnostic(
+        code(sioc_engine::transport::open),
+        help(
+            "the server did not send the expected Open packet; check the server implementation and Engine.IO version"
+        )
+    )]
+    Open(Frame),
+
     /// A frame arrived that is not valid in the current protocol state.
     #[error("unexpected frame {frame:?}: {message}")]
     #[diagnostic(
@@ -161,6 +171,16 @@ pub enum WebSocketError {
         help("the server closed the TCP connection without sending a WebSocket close frame")
     )]
     Closed,
+
+    /// The server did not respond to the probe Ping with a Pong.
+    #[error("probe Pong not received")]
+    #[diagnostic(
+        code(sioc_engine::transport::websocket::probe),
+        help(
+            "the server did not respond to the probe Ping with a Pong; check the server implementation and Engine.IO version"
+        )
+    )]
+    Probe(Frame),
 
     /// A packet decoding error within a WebSocket text frame.
     #[error(transparent)]

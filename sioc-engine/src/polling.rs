@@ -4,7 +4,8 @@ use crate::ENGINE_IO_VERSION;
 use crate::engine::EngineSender;
 use crate::error::{PollingError, TransportError};
 use crate::packet::{Frame, Handshake, Packet};
-use crate::websocket::{WebSocketConnector, websocket_connect, websocket_loop};
+use crate::prelude::WebSocketStream;
+use crate::websocket::WebSocketConnector;
 use base64::prelude::*;
 use bytes::Bytes;
 use bytestring::ByteString;
@@ -187,12 +188,7 @@ where
 
     let handshake = match client.get(&url).await?.remove(0) {
         Frame::Packet(Packet::Open(handshake)) => handshake,
-        other => {
-            return Err(TransportError::frame(
-                other,
-                "expected Open packet as first frame",
-            ));
-        }
+        frame => return Err(TransportError::Open(frame)),
     };
 
     tracing::debug!(sid = %handshake.sid, "received OPEN");
@@ -214,7 +210,7 @@ where
     let post_fut = polling_post(url, client, transport_rx, child_token.clone());
 
     if do_upgrade {
-        let stream = websocket_connect(base_url, Some(sid), connector).await?;
+        let stream = WebSocketStream::connect(base_url, Some(&sid), connector).await?;
 
         tracing::debug!("paused polling transport");
         child_token.cancel();
@@ -224,7 +220,9 @@ where
         let engine_tx = get_result?;
         let transport_rx = post_result?;
 
-        websocket_loop(stream, None, engine_tx, transport_rx, token).await?;
+        stream
+            .transport(None, engine_tx, transport_rx, token)
+            .await?;
     } else {
         let (get_result, post_result) = tokio::join!(get_fut, post_fut);
 

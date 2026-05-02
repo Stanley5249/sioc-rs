@@ -7,7 +7,8 @@ use crate::engine::EngineSender;
 use crate::error::TransportError;
 use crate::packet::{Frame, Handshake};
 use crate::polling::polling_transport;
-use crate::websocket::{WebSocketConnector, websocket_transport};
+use crate::prelude::WebSocketStream;
+use crate::websocket::WebSocketConnector;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -46,14 +47,17 @@ impl TransportStrategy {
                 transport_rx,
                 token,
             )),
-            TransportStrategy::WebSocket => tokio::spawn(websocket_transport(
-                base_url,
-                connector,
-                handshake_tx,
-                engine_tx,
-                transport_rx,
-                token,
-            )),
+            TransportStrategy::WebSocket => tokio::spawn({
+                async {
+                    let stream = WebSocketStream::connect(base_url, None, connector).await?;
+
+                    stream
+                        .transport(Some(handshake_tx), engine_tx, transport_rx, token)
+                        .await?;
+
+                    Ok(())
+                }
+            }),
         }
     }
 }
