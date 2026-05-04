@@ -12,6 +12,7 @@ use bytestring::ByteString;
 use reqwest::Client;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 use url::Url;
 
 const SEPARATOR: char = '\x1e';
@@ -88,7 +89,7 @@ impl PollingClient {
             .text()
             .await?;
 
-        tracing::trace!(len = response.len(), "received GET");
+        tracing::trace!(bytes = response.len(), "<- GET");
         decode_frames(response.into())
     }
 
@@ -102,14 +103,14 @@ impl PollingClient {
             .text()
             .await?;
 
-        tracing::trace!(len = response.len(), "received GET");
+        tracing::trace!(bytes = response.len(), "<- GET");
 
         Frame::decode(response.into())
     }
 
     async fn post(&self, url: &Url, frames: &[Frame]) -> Result<(), PollingError> {
         let body = encode_frames(frames);
-        tracing::trace!(len = body.len(), "sending POST");
+        tracing::trace!(bytes = body.len(), "-> POST");
 
         let response = self
             .0
@@ -131,7 +132,7 @@ impl PollingClient {
     /// Loops batched POST requests until `token` fires or `rx` closes.
     ///
     /// Returns `rx` on exit so the WebSocket phase can reuse it.
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn post_until_cancelled(
         &self,
         url: &Url,
@@ -161,7 +162,7 @@ impl PollingClient {
     }
 
     /// Drains all outbound frames from `rx` until the sender is dropped.
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn post_until_closed(
         &self,
         url: &Url,
@@ -180,7 +181,7 @@ impl PollingClient {
     /// Loops GET requests, decoding each response and forwarding frames to the engine.
     ///
     /// Exits when `token` fires, the engine channel closes, or an HTTP error occurs.
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn get_until_cancelled(
         &self,
         url: &Url,
@@ -214,14 +215,12 @@ impl PollingClient {
     {
         let mut url = polling_url(base_url.clone());
 
-        tracing::debug!(%url, "connecting");
+        let span = tracing::debug_span!("connect", %url);
 
-        let handshake = match self.get_one(&url).await? {
+        let handshake = match self.get_one(&url).instrument(span).await? {
             Frame::Packet(Packet::Open(handshake)) => handshake,
             frame => return Err(TransportError::Open(frame)),
         };
-
-        tracing::debug!(%handshake.sid, "open");
 
         url.query_pairs_mut().append_pair("sid", &handshake.sid);
         let do_upgrade = handshake.can_upgrade_to_websocket();

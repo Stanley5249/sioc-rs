@@ -152,7 +152,7 @@ where
     let _guard = token.drop_guard();
 
     let handshake = handshake_rx.await?;
-    tracing::debug!(%handshake.sid, "open");
+    tracing::debug!(sid = %handshake.sid, "<- OPEN");
 
     let mut heartbeat = Heartbeat::new(handshake.ping_window());
 
@@ -170,16 +170,19 @@ where
         match action {
             EngineAction::Transport(frame) => match frame {
                 Frame::Packet(packet) => {
-                    tracing::trace!(%packet, "received packet");
+                    tracing::trace!(%packet, "<- packet");
 
                     match packet {
                         Packet::Close => {
                             tracing::debug!("server closed");
+
                             break;
                         }
                         Packet::Ping(payload) => {
-                            tracing::trace!("pong");
+                            tracing::trace!("-> PONG");
+
                             transport_tx.send(Packet::Pong(payload).into()).await?;
+
                             heartbeat.reset();
                         }
                         Packet::Message(payload) => {
@@ -188,11 +191,12 @@ where
                                 .map_err(EngineError::SendSink)?;
                         }
                         Packet::Noop => {}
+
                         packet => return Err(EngineError::Server(packet)),
                     }
                 }
                 Frame::Binary(payload) => {
-                    tracing::trace!(len = payload.len(), "received binary");
+                    tracing::trace!(bytes = payload.len(), "<- binary");
 
                     sink.send(Message::Binary(payload))
                         .await
@@ -202,15 +206,21 @@ where
             EngineAction::Sink(message) => match message {
                 Message::Text(bytes) => {
                     let packet = Packet::Message(bytes);
-                    tracing::trace!(%packet, "sending packet");
+
+                    tracing::trace!(%packet, "-> MESSAGE");
+
                     transport_tx.send(packet.into()).await?;
                 }
                 Message::Binary(bytes) => {
-                    tracing::trace!(len = bytes.len(), "sending binary");
+                    tracing::trace!(bytes = bytes.len(), "-> binary");
+
                     transport_tx.send(bytes.into()).await?;
                 }
                 Message::Close => {
                     tracing::debug!("client closed");
+                    tracing::trace!("-> CLOSE");
+
+                    transport_tx.send(Packet::Close.into()).await?;
                     break;
                 }
             },

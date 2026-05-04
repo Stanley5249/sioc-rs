@@ -15,6 +15,7 @@ use tokio_tungstenite::tungstenite::Error as TungsteniteError;
 use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
 use tokio_tungstenite::{MaybeTlsStream, connect_async};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 use url::Url;
 
 /// A WebSocket connector that can open a stream from a [`Url`].
@@ -62,29 +63,30 @@ impl Stream for WebSocketStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
-            return Poll::Ready(match ready!(self.0.poll_next_unpin(cx)) {
+            let frame = match ready!(self.0.poll_next_unpin(cx)) {
+                Some(result) => match result {
+                    Ok(message) => match message {
+                        WebSocketMessage::Text(text) => {
+                            tracing::trace!(bytes = text.len(), "<- TEXT");
+
+                            let bytes = bytestring_from_utf8_bytes(text);
+                            let packet = Packet::decode(bytes)?;
+
+                            Some(Ok(Frame::Packet(packet)))
+                        }
+                        WebSocketMessage::Binary(binary) => {
+                            tracing::trace!(bytes = binary.len(), "<- BINARY");
+
+                            Some(Ok(Frame::Binary(binary)))
+                        }
+                        _ => continue,
+                    },
+                    Err(e) => Some(Err(e.into())),
+                },
                 None => None,
+            };
 
-                Some(Err(e)) => Some(Err(e.into())),
-
-                Some(Ok(WebSocketMessage::Text(text))) => {
-                    tracing::trace!(len = text.len(), "received TEXT frame");
-
-                    let frame = match Packet::decode(bytestring_from_utf8_bytes(text)) {
-                        Ok(packet) => Ok(Frame::Packet(packet)),
-                        Err(e) => Err(e.into()),
-                    };
-
-                    Some(frame)
-                }
-
-                Some(Ok(WebSocketMessage::Binary(bytes))) => {
-                    tracing::trace!(len = bytes.len(), "received BINARY frame");
-                    Some(Ok(Frame::Binary(bytes)))
-                }
-
-                Some(Ok(_)) => continue,
-            });
+            return Poll::Ready(frame);
         }
     }
 }
@@ -100,10 +102,19 @@ impl Sink<Frame> for WebSocketStream {
 
     fn start_send(mut self: Pin<&mut Self>, frame: Frame) -> Result<(), Self::Error> {
         let message = match frame {
-            Frame::Packet(packet) => WebSocketMessage::text(packet.encode()),
-            Frame::Binary(bytes) => WebSocketMessage::binary(bytes),
+            Frame::Packet(packet) => {
+                let text = packet.encode();
+
+                tracing::trace!(bytes = text.len(), "-> TEXT");
+
+                WebSocketMessage::text(text)
+            }
+            Frame::Binary(bytes) => {
+                tracing::trace!(bytes = bytes.len(), "-> BINARY");
+
+                WebSocketMessage::binary(bytes)
+            }
         };
-        tracing::trace!(len = message.len(), "sending frame");
         self.0
             .start_send_unpin(message)
             .map_err(WebSocketError::Tungstenite)
@@ -161,9 +172,9 @@ impl WebSocketStream {
     {
         let url = websocket_url(base_url, sid);
 
-        tracing::debug!(%url, "connecting");
+        let span = tracing::debug_span!("connect", %url);
 
-        let mut stream = connector.connect(url).await?;
+        let mut stream = connector.connect(url).instrument(span).await?;
 
         if sid.is_some() {
             stream.probe().await?;
@@ -178,14 +189,15 @@ impl WebSocketStream {
     }
 
     /// Sends a probe `Ping` and expects a matching `Pong`, confirming the WebSocket path is live.
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn probe(&mut self) -> Result<(), WebSocketError> {
-        tracing::debug!("ping probe");
+        tracing::debug!("-> PING probe");
 
         self.send(Packet::Ping(PROBE).into()).await?;
 
         match self.required_next().await? {
             Frame::Packet(Packet::Pong(payload)) if payload == PROBE => {
-                tracing::debug!("pong probe")
+                tracing::debug!("<- PONG probe")
             }
 
             frame => return Err(WebSocketError::Probe(frame)),
@@ -214,14 +226,14 @@ impl WebSocketStream {
                     frame => return Err(TransportError::Open(frame)),
                 };
 
-                tracing::debug!(sid = %handshake.sid, "open");
+                tracing::debug!(sid = %handshake.sid, "<- OPEN");
 
                 handshake_tx
                     .send(handshake)
                     .map_err(TransportError::SendHandshake)?;
             }
             None => {
-                tracing::debug!("upgrade");
+                tracing::debug!("-> UPGRADE");
 
                 self.send(Packet::Upgrade.into()).await?;
             }

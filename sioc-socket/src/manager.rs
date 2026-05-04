@@ -326,7 +326,7 @@ impl Manager {
 
     /// Runs the socket routing loop until all namespaces disconnect.
     #[tracing::instrument(skip_all, err)]
-    pub async fn run(mut self, engine: Engine) -> Result<(), ManagerError> {
+    pub async fn socket_io(mut self, engine: Engine) -> Result<(), ManagerError> {
         while let Some(directive) = self.rx.recv().await {
             match directive {
                 ManagerAction::Socket(Ns(ns, packet)) => {
@@ -412,18 +412,18 @@ impl Manager {
             }
         };
 
-        tracing::trace!(%ns, %packet, "sending packet");
-
         let text = Message::Text(packet.encode(&ns).into());
         let binaries = attachments.into_iter().flatten().map(Message::Binary);
         let messages = std::iter::once(text).chain(binaries);
 
         match socket_buffer {
             Some(buffer) => {
-                tracing::trace!(%ns, "buffering packets");
                 buffer.extend(messages);
+
+                tracing::trace!(%ns, %packet, buffer.len = buffer.len(), "buffering messages");
             }
             None => {
+                tracing::trace!(%ns, %packet, "-> packet");
                 for message in messages {
                     engine_tx.send(message).await?;
                 }
@@ -467,7 +467,7 @@ impl Manager {
 
         let Ns(ns, packet) = text.try_into()?;
 
-        tracing::trace!(%ns, %packet, "received packet");
+        tracing::trace!(%ns, %packet, "<- packet");
 
         match packet {
             Packet::Connect(payload) => {
@@ -475,10 +475,10 @@ impl Manager {
 
                 socket.connected = true;
 
-                let len = socket.buffer.len();
+                let count = socket.buffer.len();
 
-                if len > 0 {
-                    tracing::trace!(%ns, len, "sending buffered packets");
+                if count > 0 {
+                    tracing::trace!(%ns, count, "flushed buffer");
 
                     for message in socket.buffer.drain(..) {
                         engine_tx.send(message).await?;
@@ -531,19 +531,19 @@ impl Manager {
         Ok(())
     }
 
-    async fn route_binary_message(&mut self, bytes: Bytes) -> Result<(), ManagerError> {
-        let count = bytes.len();
+    async fn route_binary_message(&mut self, attachment: Bytes) -> Result<(), ManagerError> {
+        let bytes = attachment.len();
 
-        match self.reconstructor.attach_and_take(bytes)? {
+        match self.reconstructor.attach_and_take(attachment)? {
             Some(Ns(ns, packet)) => {
                 let Ns(ns, socket) = self.sockets.get_mut(ns)?;
 
-                tracing::trace!(%ns, count, status = "complete", "received binary attachment");
+                tracing::trace!(%ns, bytes, status = "complete", "<- attachment");
 
                 socket.send_binary_packet(ns, packet).await?;
             }
             None => {
-                tracing::trace!(count, status = "pending", "received binary attachment");
+                tracing::trace!(bytes, status = "pending", "<- attachment");
             }
         }
         Ok(())
@@ -574,7 +574,7 @@ mod tests {
     ) {
         let (engine_tx, engine_rx) = mpsc::channel(32);
         let (manager_tx, manager_rx) = mpsc::channel(32);
-        let handle = tokio::spawn(Manager::new(manager_rx).run(mock_engine(engine_tx)));
+        let handle = tokio::spawn(Manager::new(manager_rx).socket_io(mock_engine(engine_tx)));
         (manager_tx, engine_rx, handle)
     }
 

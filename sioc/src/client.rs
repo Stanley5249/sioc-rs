@@ -152,7 +152,7 @@ where
 
         let manager = Manager::new(manager_rx);
 
-        let manager_handle = tokio::spawn(manager.run(engine));
+        let manager_handle = tokio::spawn(manager.socket_io(engine));
 
         Ok(Client {
             tx: ManagerSender::new(manager_tx),
@@ -287,7 +287,7 @@ impl Drop for SocketSender {
         if self.is_connected.swap(false, Ordering::Relaxed) {
             let type_name = std::any::type_name::<Self>();
 
-            tracing::warn!(ns = %self.ns, "{type_name} dropped while connected");
+            tracing::warn!(ns = %self.ns, type_name, "dropped while connected");
 
             // try_send is non-blocking; if the channel is full or closed the
             // disconnect packet is lost, but we've already logged the warning.
