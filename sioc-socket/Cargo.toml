@@ -3,6 +3,7 @@ name = "sioc-socket"
 version = "0.1.0"
 edition = "2024"
 description = "Async Socket.IO client implementation for Sioc"
+documentation = "https://docs.rs/sioc-socket"
 repository = "https://github.com/Stanley5249/sioc-rs"
 license = "MIT OR Apache-2.0"
 keywords = ["async", "networking", "socketio", "websocket"]

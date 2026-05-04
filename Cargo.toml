@@ -10,6 +10,7 @@ sioc-socket = { path = "./sioc-socket" }
 
 # Async runtime
 futures-util = "0.3"
+pin-project = "1.1.11"
 tokio = { version = "1", features = ["macros", "sync", "time"] }
 tokio-util = "0.7"
 
@@ -18,7 +19,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 serde_path_to_error = "0.1"
 
-# Zero-copy buffers
+# Buffers
 bytes = "1"
 bytestring = { version = "1", features = ["serde"] }
 
@@ -26,16 +27,23 @@ bytestring = { version = "1", features = ["serde"] }
 miette = { version = "7", features = ["fancy"] }
 thiserror = "2"
 
-# URL parsing
-url = "2"
-
-# HTTP and WebSocket clients
+# HTTP and WebSocket
+base64 = "0.22"
+http = "1"
 reqwest = { version = "0.13", default-features = false, features = ["charset"] }
 tokio-tungstenite = { version = "0.28", features = ["url"] }
+url = "2"
 
 # Logging
 tracing = "0.1.44"
 tracing-subscriber = "0.3.22"
+
+# Proc-macro utilities
+darling = "0.23"
+heck = "0.5"
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
 
 [workspace.metadata.docs.rs]
 all-features = true

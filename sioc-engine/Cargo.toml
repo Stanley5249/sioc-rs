@@ -3,12 +3,18 @@ name = "sioc-engine"
 version = "0.1.0"
 edition = "2024"
 description = "Async Engine.IO client implementation for Sioc"
+documentation = "https://docs.rs/sioc-engine"
+repository = "https://github.com/Stanley5249/sioc-rs"
 license = "MIT OR Apache-2.0"
+keywords = ["async", "engine-io", "networking", "websocket"]
+categories = ["asynchronous", "network-programming", "web-programming"]
 
 [dependencies]
+base64.workspace = true
 bytes.workspace = true
 bytestring.workspace = true
 futures-util.workspace = true
+http.workspace = true
 miette.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -19,9 +25,6 @@ tokio-tungstenite.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 url.workspace = true
-
-base64 = "0.22"
-http = "1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
