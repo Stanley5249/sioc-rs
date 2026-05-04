@@ -1619,7 +1619,6 @@ dependencies = [
  "quote",
  "serde",
  "serde_json",
- "sioc",
  "syn",
 ]
 

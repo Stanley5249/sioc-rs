@@ -31,7 +31,8 @@
 //!
 //! # Example
 //!
-//! ```rust
+//! ```rust,ignore
+//! // ignore: sioc-macros cannot dev-depend on sioc (circular); see sioc crate for runnable examples.
 //! use sioc::prelude::*;
 //!
 //! // Emit-only: only SerializePayload is required.
@@ -81,7 +82,8 @@ use syn::parse_macro_input;
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,ignore
+/// // ignore: sioc-macros cannot dev-depend on sioc (circular); see sioc crate for runnable examples.
 /// use sioc::prelude::*;
 ///
 /// // Emit-only; name defaults to "server_ping".
@@ -115,7 +117,8 @@ pub fn derive_event_type(input: TokenStream) -> TokenStream {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,ignore
+/// // ignore: sioc-macros cannot dev-depend on sioc (circular); see sioc crate for runnable examples.
 /// use sioc::prelude::*;
 ///
 /// // Receive acks only.
@@ -145,7 +148,8 @@ pub fn derive_ack_type(input: TokenStream) -> TokenStream {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,ignore
+/// // ignore: sioc-macros cannot dev-depend on sioc (circular); see sioc crate for runnable examples.
 /// use sioc::prelude::*;
 ///
 /// #[derive(EventType, SerializePayload)]
@@ -182,7 +186,8 @@ pub fn derive_serialize_payload(input: TokenStream) -> TokenStream {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,ignore
+/// // ignore: sioc-macros cannot dev-depend on sioc (circular); see sioc crate for runnable examples.
 /// use sioc::prelude::*;
 ///
 /// // Accepts trailing elements.
@@ -219,7 +224,8 @@ pub fn derive_deserialize_payload(input: TokenStream) -> TokenStream {
 ///
 /// # Example
 ///
-/// ```rust,no_run
+/// ```rust,ignore
+/// // ignore: sioc-macros cannot dev-depend on sioc (circular); see sioc crate for runnable examples.
 /// use sioc::prelude::*;
 ///
 /// #[derive(Debug, EventType, DeserializePayload)]
