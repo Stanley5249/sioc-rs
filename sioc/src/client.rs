@@ -1,6 +1,7 @@
 //! Socket.IO client and namespace handles.
 
 use crate::ack::AckType;
+use crate::config::ChannelConfig;
 use crate::error::{ClientBuilderError, ClientError, PayloadError, SocketError};
 use crate::marker::{AckId, AckMarker, BinaryMarker};
 use bytestring::ByteString;
@@ -62,6 +63,7 @@ pub struct ClientBuilder<C = ()> {
     http_client: Option<reqwest::Client>,
     websocket_connector: C,
     transport_strategy: TransportStrategy,
+    channels: ChannelConfig,
 }
 
 impl ClientBuilder<()> {
@@ -73,6 +75,7 @@ impl ClientBuilder<()> {
             http_client: None,
             websocket_connector: (),
             transport_strategy: TransportStrategy::default(),
+            channels: ChannelConfig::default(),
         }
     }
 }
@@ -122,12 +125,22 @@ where
             http_client: self.http_client,
             websocket_connector: connector,
             transport_strategy: self.transport_strategy,
+            channels: self.channels,
         }
     }
 
     /// Override the initial transport strategy (default: HTTP long-polling with WebSocket upgrade).
     pub fn transport(mut self, strategy: TransportStrategy) -> Self {
         self.transport_strategy = strategy;
+        self
+    }
+
+    /// Override the channel buffer capacities (default: 32 for all channels).
+    ///
+    /// Accepts `()` for defaults, a `usize` for uniform sizing, or a [`ChannelConfig`] for
+    /// per-channel control.
+    pub fn channels(mut self, config: impl Into<ChannelConfig>) -> Self {
+        self.channels = config.into();
         self
     }
 
@@ -140,7 +153,7 @@ where
         let websocket_connector = self.websocket_connector;
         let url = self.url.join(&self.path)?;
 
-        let (manager_tx, manager_rx) = mpsc::channel::<ManagerAction>(32);
+        let (manager_tx, manager_rx) = mpsc::channel::<ManagerAction>(self.channels.manager);
 
         let engine = Engine::connect(
             url,
@@ -148,6 +161,8 @@ where
             websocket_connector,
             self.transport_strategy,
             manager_sink(manager_tx.clone()),
+            self.channels.engine,
+            self.channels.transport,
         );
 
         let manager = Manager::new(manager_rx);
@@ -157,6 +172,7 @@ where
         Ok(Client {
             tx: ManagerSender::new(manager_tx),
             handle: manager_handle,
+            socket_capacity: self.channels.socket,
         })
     }
 }
@@ -166,6 +182,7 @@ where
 pub struct Client {
     tx: ManagerSender,
     handle: JoinHandle<Result<(), ManagerError>>,
+    socket_capacity: usize,
 }
 
 impl Client {
@@ -194,7 +211,7 @@ impl Client {
         S: Into<ByteString>,
         B: Into<ByteString>,
     {
-        let (tx, rx) = mpsc::channel(32);
+        let (tx, rx) = mpsc::channel(self.socket_capacity);
 
         let socket_tx = SocketSender::new(ns.into(), self.tx.clone());
 

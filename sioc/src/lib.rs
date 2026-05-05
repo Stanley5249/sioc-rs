@@ -94,6 +94,7 @@
 pub mod ack;
 pub mod binary;
 pub mod client;
+pub mod config;
 pub mod error;
 pub mod event;
 pub mod marker;
@@ -105,6 +106,7 @@ pub mod prelude {
     pub use crate::client::{
         Acknowledge, Client, ClientBuilder, Emit, SocketReceiver, SocketSender,
     };
+    pub use crate::config::ChannelConfig;
     pub use crate::event::{Event, EventHandler, EventType};
     pub use crate::marker::{AckId, AckMarker, BinaryMarker, HasAck, HasBinary, NoAck, NoBinary};
     pub use crate::payload::{

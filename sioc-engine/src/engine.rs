@@ -66,14 +66,16 @@ impl Engine {
         websocket_connector: C,
         strategy: TransportStrategy,
         sink: S,
+        engine_capacity: usize,
+        transport_capacity: usize,
     ) -> Self
     where
         C: WebSocketConnector,
         S: Sink<Message, Error = BoxedError> + Unpin + Send + 'static,
     {
-        let (engine_tx, engine_rx) = mpsc::channel(32);
+        let (engine_tx, engine_rx) = mpsc::channel(engine_capacity);
 
-        let (transport_tx, transport_rx) = mpsc::channel(32);
+        let (transport_tx, transport_rx) = mpsc::channel(transport_capacity);
 
         let (handshake_tx, handshake_rx) = oneshot::channel();
 
