@@ -9,6 +9,7 @@ use sioc_socket::packet::{Directive, Ns};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinError;
+use tokio::time::error::Elapsed;
 
 /// JSON serialization or deserialization failure.
 #[derive(Debug, Error, Diagnostic)]
@@ -120,6 +121,11 @@ pub enum AckError {
     #[error("invalid attachments for the ack type")]
     #[diagnostic(code(sioc::ack::attachments))]
     Attachments(#[from] AttachmentsError),
+
+    /// The deadline elapsed before the server responded.
+    #[error("ack timed out")]
+    #[diagnostic(code(sioc::ack::timeout))]
+    Timeout(#[from] Elapsed),
 }
 
 /// Ack ID presence mismatch between the inbound packet and the event type's policy.

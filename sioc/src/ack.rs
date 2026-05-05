@@ -25,7 +25,9 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 use tokio::sync::oneshot;
+use tokio::time::Instant;
 
 /// Maps a Rust struct to the Socket.IO ack JSON-array encoding.
 ///
@@ -134,8 +136,8 @@ where
 ///
 /// Obtained from [`SocketSender::emit`](crate::client::SocketSender::emit).
 /// Implements [`Future`]: `.await` it directly.
-#[must_use = "AckHandle must be awaited to receive the ack"]
 #[pin_project]
+#[must_use = "AckHandle must be awaited to receive the ack"]
 #[derive(Debug)]
 pub struct AckHandle<A> {
     #[pin]
@@ -152,6 +154,52 @@ impl<A: AckType> AckHandle<A> {
         }
     }
 }
+impl<A> AckHandle<A>
+where
+    A: AckType + DeserializePayload,
+{
+    /// Returns a future that resolves to [`AckError::Timeout`] if the server
+    /// does not respond within `duration`.
+    ///
+    /// Mirrors [`tokio::time::timeout`].
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// // Requires a live Socket.IO connection; AckHandle is obtained from SocketSender::emit.
+    /// use sioc::prelude::*;
+    /// use std::time::Duration;
+    ///
+    /// async fn example(handle: AckHandle<()>) {
+    ///     let result = handle.timeout(Duration::from_secs(5)).await;
+    /// }
+    /// ```
+    pub async fn timeout(self, duration: Duration) -> Result<Ack<A>, AckError> {
+        tokio::time::timeout(duration, self).await?
+    }
+
+    /// Returns a future that resolves to [`AckError::Timeout`] if the server
+    /// does not respond by `deadline`.
+    ///
+    /// Mirrors [`tokio::time::timeout_at`].
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// // Requires a live Socket.IO connection; AckHandle is obtained from SocketSender::emit.
+    /// use sioc::prelude::*;
+    /// use tokio::time::{Instant, Duration};
+    ///
+    /// async fn example(handle: AckHandle<()>) {
+    ///     let deadline = Instant::now() + Duration::from_secs(5);
+    ///     let result = handle.timeout_at(deadline).await;
+    /// }
+    /// ```
+    pub async fn timeout_at(self, deadline: Instant) -> Result<Ack<A>, AckError> {
+        tokio::time::timeout_at(deadline, self).await?
+    }
+}
+
 impl<A> Future for AckHandle<A>
 where
     A: AckType + DeserializePayload,
