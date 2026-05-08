@@ -117,7 +117,7 @@ impl DynAck {
 
 /// A fully decoded inbound packet.
 ///
-/// The default `E = DynEvent` carries raw events; use [`cast`](Signal::cast) to
+/// The default `E = DynEvent` carries raw events; use [`downcast`](Signal::downcast) to
 /// convert to a typed event.
 #[derive(Debug)]
 pub enum Signal<E = DynEvent> {
