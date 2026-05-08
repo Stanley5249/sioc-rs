@@ -10,7 +10,7 @@ use sioc_engine::transport::TransportStrategy;
 use sioc_engine::websocket::WebSocketConnector;
 use sioc_socket::error::ManagerError;
 use sioc_socket::manager::{Manager, ManagerAction, ManagerSender, manager_sink};
-use sioc_socket::packet::{Directive, Signal};
+use sioc_socket::packet::{Directive, DynEvent, Signal};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -323,5 +323,14 @@ impl SocketReceiver {
     /// Returns the next inbound packet, or `None` when the router shuts down.
     pub async fn recv(&mut self) -> Option<Signal> {
         self.rx.recv().await
+    }
+
+    /// Returns the next inbound packet as a typed [`Signal<E>`], or `None` when the router
+    /// shuts down. Prefer this over [`recv`](Self::recv) + [`downcast`](Signal::downcast).
+    pub async fn listen<E>(&mut self) -> Result<Option<Signal<E>>, E::Error>
+    where
+        E: TryFrom<DynEvent>,
+    {
+        self.rx.recv().await.map(|s| s.downcast()).transpose()
     }
 }

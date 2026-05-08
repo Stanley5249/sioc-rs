@@ -131,9 +131,9 @@ pub enum Signal<E = DynEvent> {
     Event(E),
 }
 
-impl Signal {
-    /// Converts the [`Event`](Signal::Event) variant via `TryFrom<DynEvent>`, passing other variants through.
-    pub fn cast<E>(self) -> Result<Signal<E>, E::Error>
+impl Signal<DynEvent> {
+    /// Converts the [`Event`](Signal::Event) variant via [`TryFrom<DynEvent>`], passing other variants through.
+    pub fn downcast<E>(self) -> Result<Signal<E>, E::Error>
     where
         E: TryFrom<DynEvent>,
     {

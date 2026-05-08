@@ -15,7 +15,7 @@ An async [Socket.IO v4](https://socket.io/docs/v4/socket-io-protocol/) client fo
 use sioc::prelude::*;
 use url::Url;
 
-#[derive(Debug, EventType, SerializePayload, DeserializePayload)]
+#[derive(Debug, EventType, DeserializePayload)]
 #[sioc(event(name = "ping"))]
 struct Ping { data: i64 }
 
@@ -26,17 +26,22 @@ struct Pong { data: i64 }
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let url = Url::parse("http://localhost:3000")?;
+
     let client = ClientBuilder::new(url).open()?;
+
     let (tx, mut rx) = client.connect("/").await?;
 
-    while let Some(packet) = rx.recv().await {
+    while let Some(packet) = rx.listen::<Event<Ping>>().await? {
         match packet {
-            Packet::Connect(info) => println!("connected: {}", info.sid),
+            Packet::Connect(connect) => println!("connected: {}", connect.sid),
+
             Packet::Disconnect => break,
+
             Packet::ConnectError(e) => { eprintln!("{e}"); break }
-            Packet::Event(ev) => {
-                let ping = ev.cast::<Event<Ping>>()?.payload;
-                tx.emit(Pong { data: ping.data }).await?;
+
+            Packet::Event(event) => {
+                let data = event.payload.data;
+                tx.emit(Pong { data }).await?;
             }
         }
     }

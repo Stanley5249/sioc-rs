@@ -43,23 +43,23 @@ async fn run_client() -> miette::Result<()> {
     let (tx, mut rx) = client.connect("/").await?;
 
     loop {
-        let item = tokio::select! {
+        let signal = tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("ctrl-c signal");
                 break;
             }
-            item = rx.recv() => item,
-        };
-
-        let signal = match item {
-            Some(signal) => signal.cast::<Event<Ping>>()?,
-            _ => break,
+            result = rx.listen::<Event<Ping>>() => {
+                match result? {
+                    Some(signal) => signal,
+                    _ => break,
+                }
+            }
         };
 
         tracing::debug!(?signal, "received signal");
 
         match signal {
-            Signal::ConnectError(error) => return Err(error).into_diagnostic(),
+            Signal::ConnectError(error) => return Err(error.into()),
 
             Signal::Event(ping) => {
                 let data = ping.payload.data;

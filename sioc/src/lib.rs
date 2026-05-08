@@ -59,8 +59,8 @@
 //! println!("connected with sid={}", info.sid);
 //!
 //! // 3. Receive events and respond.
-//! while let Some(packet) = rx.recv().await {
-//!     if let Signal::Event(event) = packet.cast::<Event<Greeting>>()? {
+//! while let Some(signal) = rx.listen::<Event<Greeting>>().await? {
+//!     if let Signal::Event(event) = signal {
 //!         println!("got: {}", event.payload.text);
 //!
 //!         let reply = Reply { text: "hello back".into() };
