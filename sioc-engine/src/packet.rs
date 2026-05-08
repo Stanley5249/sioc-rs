@@ -100,19 +100,19 @@ impl Handshake {
 /// A packet in the Engine.IO v4 protocol.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Packet {
-    /// `0` — Handshake data from the server.
+    /// `0`: Handshake data from the server.
     Open(Handshake),
-    /// `1` — The transport can be closed.
+    /// `1`: The transport can be closed.
     Close,
-    /// `2` — Heartbeat from the server (client must reply with [`Packet::Pong`]).
+    /// `2`: Heartbeat from the server (client must reply with [`Packet::Pong`]).
     Ping(ByteString),
-    /// `3` — Heartbeat reply.
+    /// `3`: Heartbeat reply.
     Pong(ByteString),
-    /// `4` — Application-level text data.
+    /// `4`: Application-level text data.
     Message(ByteString),
-    /// `5` — Sent by the client to finalise a transport upgrade.
+    /// `5`: Sent by the client to finalise a transport upgrade.
     Upgrade,
-    /// `6` — Sent by the server to flush a pending long-poll GET during upgrade.
+    /// `6`: Sent by the server to flush a pending long-poll GET during upgrade.
     Noop,
 }
 

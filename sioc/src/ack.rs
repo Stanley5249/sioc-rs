@@ -2,15 +2,15 @@
 //!
 //! When one side emits an event and the other side calls the callback, the
 //! response is called an **acknowledgement** ("ack").  On the wire, acks are
-//! JSON arrays `[arg0, arg1, ...]` — like events, but without a leading name.
+//! JSON arrays `[arg0, arg1, ...]`, like events, but without a leading name.
 //!
 //! The [`AckType`] trait (or `#[derive(AckType)]`) maps a Rust struct to this format.
 //!
-//! - [`Ack`] — inbound: decoded from a [`DynAck`] via [`TryFrom`].
-//! - [`AckHandle`] — a future that resolves when the server's ack arrives.
+//! - [`Ack`]: inbound, decoded from a [`DynAck`] via [`TryFrom`].
+//! - [`AckHandle`]: a future that resolves when the server's ack arrives.
 //!
 //! Outbound acks are sent directly via
-//! [`SocketSender::acknowledge`](crate::client::SocketSender::acknowledge) — blanket [`Acknowledge`] impls
+//! [`SocketSender::acknowledge`](crate::client::SocketSender::acknowledge); blanket [`Acknowledge`] impls
 //! handle serialization automatically for both plain acks and binary closures.
 
 use crate::binary::AttachmentsBuilder;
@@ -36,7 +36,7 @@ use tokio::time::Instant;
 /// to send acks and `#[derive(DeserializePayload)]` to receive them.
 ///
 /// Unlike [`EventType`](crate::event::EventType), ack arrays have no leading name
-/// element — the fields map directly to array positions.
+/// element; the fields map directly to array positions.
 ///
 /// # Example
 ///

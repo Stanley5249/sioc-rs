@@ -824,7 +824,7 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(
             socket_rx.try_recv().is_err(),
-            "incomplete — second attachment not yet received"
+            "incomplete, second attachment not yet received"
         );
 
         manager_tx

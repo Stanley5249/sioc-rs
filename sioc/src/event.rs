@@ -1,4 +1,4 @@
-//! Typed Socket.IO events — the primary way to send and receive data.
+//! Typed Socket.IO events: the primary way to send and receive data.
 //!
 //! In Socket.IO, every message is an **event**: a named JSON array where the
 //! first element is the event name and the rest are the payload fields:
@@ -13,13 +13,13 @@
 //! trait constructs typed events from raw parts and powers the `EventRouter`
 //! derive macro for multi-event dispatch enums.
 //!
-//! Outbound events are sent directly via [`SocketSender::emit`](crate::client::SocketSender::emit)
-//! — blanket [`Emit`] impls handle serialization automatically for both
+//! Outbound events are sent directly via [`SocketSender::emit`](crate::client::SocketSender::emit);
+//! blanket [`Emit`] impls handle serialization automatically for both
 //! plain events and binary closures.
 //!
 //! The generic parameters `A` ([`AckMarker`]) and `B` ([`BinaryMarker`])
 //! let the type system enforce whether a packet carries binary attachments
-//! or expects an acknowledgement — no runtime checks needed.
+//! or expects an acknowledgement; no runtime checks needed.
 
 use crate::ack::{AckHandle, AckType};
 use crate::binary::AttachmentsBuilder;

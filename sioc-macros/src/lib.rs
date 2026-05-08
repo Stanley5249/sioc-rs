@@ -1,4 +1,4 @@
-//! Derive macros for Sioc — generate typed Socket.IO event and acknowledgement types.
+//! Derive macros for Sioc: generate typed Socket.IO event and acknowledgement types.
 //!
 //! The four core traits are intentionally separate so you only derive what each
 //! use-site needs:
@@ -70,15 +70,15 @@ use syn::parse_macro_input;
 /// Derives the [`EventType`] trait, providing the event
 /// name constant and ack/binary policy associated types.
 ///
-/// Serialization and deserialization are **not** included — derive
+/// Serialization and deserialization are **not** included; derive
 /// [`SerializePayload`] for emit and [`DeserializePayload`] for recv as needed.
 ///
 /// # Attributes
 ///
-/// - `#[sioc(event(name = "str"))]` — override the wire name.
+/// - `#[sioc(event(name = "str"))]`: override the wire name.
 ///   Without it the struct name is converted to snake_case.
-/// - `#[sioc(event(ack = Type))]` — set `type Ack = HasAck<Type>` (default: `NoAck`).
-/// - `#[sioc(event(binary))]` — set `type Binary = HasBinary` (default: `NoBinary`).
+/// - `#[sioc(event(ack = Type))]`: set `type Ack = HasAck<Type>` (default: `NoAck`).
+/// - `#[sioc(event(binary))]`: set `type Binary = HasBinary` (default: `NoBinary`).
 ///
 /// # Example
 ///
@@ -108,12 +108,12 @@ pub fn derive_event_type(input: TokenStream) -> TokenStream {
 /// Derives the [`AckType`] trait, providing the binary
 /// policy associated type.
 ///
-/// Serialization and deserialization are **not** included — derive
+/// Serialization and deserialization are **not** included; derive
 /// [`SerializePayload`] to send acks and [`DeserializePayload`] to receive them.
 ///
 /// # Attributes
 ///
-/// - `#[sioc(ack(binary))]` — set `type Binary = HasBinary` (default: `NoBinary`).
+/// - `#[sioc(ack(binary))]`: set `type Binary = HasBinary` (default: `NoBinary`).
 ///
 /// # Example
 ///
@@ -143,7 +143,7 @@ pub fn derive_ack_type(input: TokenStream) -> TokenStream {
 ///
 /// # Field attributes
 ///
-/// - `#[sioc(flatten)]` — serialize each element of this collection field as a
+/// - `#[sioc(flatten)]`: serialize each element of this collection field as a
 ///   separate array element. Recommended on the last field.
 ///
 /// # Example
@@ -175,12 +175,12 @@ pub fn derive_serialize_payload(input: TokenStream) -> TokenStream {
 ///
 /// # Struct attributes
 ///
-/// - `#[sioc(strict)]` — return an error if the array contains more elements
+/// - `#[sioc(strict)]`: return an error if the array contains more elements
 ///   than the struct has fields. Without it trailing elements are silently ignored.
 ///
 /// # Field attributes
 ///
-/// - `#[sioc(flatten)]` — deserialize all remaining array elements into this
+/// - `#[sioc(flatten)]`: deserialize all remaining array elements into this
 ///   collection field. Recommended on the last field; fields after it cannot be
 ///   deserialized because flatten consumes the remainder of the sequence.
 ///

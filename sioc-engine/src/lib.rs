@@ -3,7 +3,7 @@
 //! Engine.IO is the low-level transport protocol underneath Socket.IO.
 //! It negotiates a connection (HTTP long-polling or WebSocket), manages
 //! heartbeats, and delivers raw [`Message`](packet::Message) frames.
-//! Most users will never touch this crate directly — the higher-level
+//! Most users will never touch this crate directly; the higher-level
 //! `sioc-socket` and `sioc` crates build on top of it.
 //!
 //! # Architecture

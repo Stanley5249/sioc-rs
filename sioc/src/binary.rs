@@ -15,7 +15,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// `{"_placeholder": true, "num": <index>}`.
 ///
 /// Obtained from [`AttachmentsBuilder::attach`].  Embed this in your event or
-/// ack struct wherever you would normally put a `Bytes` field — the manager
+/// ack struct wherever you would normally put a `Bytes` field; the manager
 /// sends the real binary data as a follow-up frame referenced by `num`.
 pub struct Placeholder {
     num: usize,

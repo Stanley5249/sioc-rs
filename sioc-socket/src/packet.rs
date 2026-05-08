@@ -3,6 +3,7 @@
 use crate::parse::{hint_packet_size, write_packet};
 use bytes::Bytes;
 use bytestring::ByteString;
+use miette::Diagnostic;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use thiserror::Error;
@@ -22,8 +23,15 @@ pub struct Connect {
 }
 
 /// Server payload for a rejected namespace connection.
-#[derive(Debug, Error, Deserialize)]
+#[derive(Debug, Error, Diagnostic, Deserialize)]
 #[error("{message}")]
+#[diagnostic(
+    code(sioc::socket::connect_error),
+    help(
+        "Server rejected the namespace connection. Verify your auth payload and server middleware."
+    ),
+    url("https://socket.io/docs/v4/socket-io-protocol/#connection-to-a-namespace")
+)]
 pub struct ConnectError {
     pub message: ByteString,
     #[serde(flatten)]
@@ -138,6 +146,29 @@ impl Signal {
     }
 }
 
+impl<E> std::fmt::Display for Signal<E>
+where
+    E: std::fmt::Display,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Connect(c) => f
+                .debug_tuple("Connect")
+                .field(&format_args!("{}", c.sid))
+                .finish(),
+            Self::Disconnect => f.write_str("Disconnect"),
+            Self::ConnectError(e) => f
+                .debug_tuple("ConnectError")
+                .field(&format_args!("{}", e))
+                .finish(),
+            Self::Event(e) => f
+                .debug_tuple("Event")
+                .field(&format_args!("{}", e))
+                .finish(),
+        }
+    }
+}
+
 /// An outbound packet to be encoded and sent to the server.
 #[derive(Debug)]
 pub enum Directive {
@@ -168,28 +199,28 @@ pub enum Directive {
 /// the follow-up binary frames and reassembles them into a [`Signal`].
 #[derive(Debug)]
 pub enum Packet {
-    /// Type `0` — namespace connection confirmed.
+    /// Type `0`: namespace connection confirmed.
     Connect(ByteString),
-    /// Type `1` — namespace disconnection.
+    /// Type `1`: namespace disconnection.
     Disconnect,
-    /// Type `2` — event (text or binary).
+    /// Type `2`: event (text or binary).
     Event {
         payload: ByteString,
         id: Option<u64>,
     },
-    /// Type `3` — acknowledgement (text or binary).
+    /// Type `3`: acknowledgement (text or binary).
     Ack { payload: ByteString, id: u64 },
-    /// Type `4` — namespace connection rejected.
+    /// Type `4`: namespace connection rejected.
     ConnectError(ByteString),
 
-    /// Type `5` — binary event with `count` follow-up binary frames.
+    /// Type `5`: binary event with `count` follow-up binary frames.
     BinaryEvent {
         payload: ByteString,
         id: Option<u64>,
         count: usize,
     },
 
-    /// Type `6` — binary acknowledgement with `count` follow-up binary frames.
+    /// Type `6`: binary acknowledgement with `count` follow-up binary frames.
     BinaryAck {
         payload: ByteString,
         id: u64,
@@ -285,26 +316,6 @@ impl std::fmt::Display for Packet {
                 .field("payload", &format_args!("{}", payload))
                 .field("id", id)
                 .field("count", count)
-                .finish(),
-        }
-    }
-}
-
-impl<E: std::fmt::Display> std::fmt::Display for Signal<E> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Connect(c) => f
-                .debug_tuple("Connect")
-                .field(&format_args!("{}", c.sid))
-                .finish(),
-            Self::Disconnect => f.write_str("Disconnect"),
-            Self::ConnectError(e) => f
-                .debug_tuple("ConnectError")
-                .field(&format_args!("{}", e))
-                .finish(),
-            Self::Event(e) => f
-                .debug_tuple("Event")
-                .field(&format_args!("{}", e))
                 .finish(),
         }
     }

@@ -107,7 +107,7 @@ fn write_attachments(buffer: &mut String, count: usize) {
     buffer.push('-');
 }
 
-/// Writes the namespace followed by `,` — skipped for the default `"/"`.
+/// Writes the namespace followed by `,`; skipped for the default `"/"`.
 fn write_namespace(buffer: &mut String, ns: &str) {
     if ns != "/" {
         buffer.push_str(ns);

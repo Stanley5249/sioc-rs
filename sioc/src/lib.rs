@@ -22,12 +22,12 @@
 //! │  • typed Event / Ack / AckHandle             │
 //! │  • marker traits: BinaryMarker, AckMarker    │
 //! ├──────────────────────────────────────────────┤
-//! │  sioc-socket — protocol logic                  │
+//! │  sioc-socket: protocol logic                   │
 //! │  • Manager: routing, ack tracking, binary    │
 //! │    reassembly                                │
 //! │  • Signal / Directive / Packet               │
 //! ├──────────────────────────────────────────────┤
-//! │  sioc-engine — Engine.IO v4 transport        │
+//! │  sioc-engine: Engine.IO v4 transport        │
 //! │  • HTTP long-polling & WebSocket             │
 //! │  • heartbeat, ping/pong                      │
 //! └──────────────────────────────────────────────┘
