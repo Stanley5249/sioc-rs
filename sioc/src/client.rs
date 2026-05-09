@@ -320,13 +320,19 @@ pub struct SocketReceiver {
 }
 
 impl SocketReceiver {
-    /// Returns the next inbound packet, or `None` when the router shuts down.
+    /// Returns the next inbound packet, or `None` when the channel closes (router shut down).
+    ///
+    /// [`Signal::Disconnect`] and [`Signal::ConnectError`] are in-band packets, not terminal;
+    /// only `None` means no further signals will arrive.
     pub async fn recv(&mut self) -> Option<Signal> {
         self.rx.recv().await
     }
 
-    /// Returns the next inbound packet as a typed [`Signal<E>`], or `None` when the router
-    /// shuts down. Prefer this over [`recv`](Self::recv) + [`downcast`](Signal::downcast).
+    /// Returns the next inbound packet as a typed [`Signal<E>`], or `None` when the channel
+    /// closes (router shut down). Prefer this over [`recv`](Self::recv) + [`downcast`](Signal::downcast).
+    ///
+    /// [`Signal::Disconnect`] and [`Signal::ConnectError`] are in-band packets, not terminal;
+    /// only `None` means no further signals will arrive.
     pub async fn listen<E>(&mut self) -> Result<Option<Signal<E>>, E::Error>
     where
         E: TryFrom<DynEvent>,

@@ -123,9 +123,9 @@ impl DynAck {
 pub enum Signal<E = DynEvent> {
     /// The server confirmed the namespace connection.
     Connect(Connect),
-    /// The server (or client) closed the namespace.
+    /// The namespace was disconnected. Does not close the receiver; a reconnect delivers a new [`Signal::Connect`].
     Disconnect,
-    /// The server rejected the namespace connection.
+    /// The server rejected a namespace connection attempt. Does not close the receiver.
     ConnectError(ConnectError),
     /// An application-level event (possibly with binary attachments).
     Event(E),
