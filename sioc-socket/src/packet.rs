@@ -169,6 +169,24 @@ where
     }
 }
 
+impl<E> Signal<E> {
+    /// Converts [`ConnectError`](Signal::ConnectError) into `Err`; passes all other variants through as `Ok`.
+    pub fn into_result(self) -> Result<Self, ConnectError> {
+        match self {
+            Self::ConnectError(e) => Err(e),
+            signal => Ok(signal),
+        }
+    }
+
+    /// Returns the inner event if this is [`Event`](Signal::Event), otherwise `None`.
+    pub fn into_event(self) -> Option<E> {
+        match self {
+            Self::Event(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
 /// An outbound packet to be encoded and sent to the server.
 #[derive(Debug)]
 pub enum Directive {
