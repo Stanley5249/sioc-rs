@@ -5,7 +5,7 @@
 //! intended for application-level code that wants a single error type.
 
 use miette::Diagnostic;
-use sioc_socket::packet::{Directive, Ns};
+use sioc_socket::manager::ManagerAction;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinError;
@@ -74,7 +74,7 @@ pub enum SocketError {
     /// Directive channel to the socket manager is closed.
     #[error("failed to send directive to socket manager")]
     #[diagnostic(code(sioc::socket::send))]
-    Send(#[from] mpsc::error::SendError<Ns<Directive>>),
+    Send(#[from] mpsc::error::SendError<ManagerAction>),
 
     /// Event payload serialization failed.
     #[error("failed to serialize payload")]

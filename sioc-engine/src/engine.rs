@@ -1,6 +1,6 @@
 //! Engine.IO protocol task.
 
-use crate::error::{BoxedError, EngineError, Error, TransportError};
+use crate::error::{EngineError, Error, TransportError};
 use crate::packet::{Frame, Handshake, Message, Packet};
 use crate::transport::TransportStrategy;
 use crate::websocket::WebSocketConnector;
@@ -71,7 +71,8 @@ impl Engine {
     ) -> Self
     where
         C: WebSocketConnector,
-        S: Sink<Message, Error = BoxedError> + Unpin + Send + 'static,
+        S: Sink<Message> + Unpin + Send + 'static,
+        S::Error: std::error::Error + Send + Sync + 'static,
     {
         let (engine_tx, engine_rx) = mpsc::channel(engine_capacity);
 
@@ -148,7 +149,8 @@ async fn engine_io<S>(
     token: CancellationToken,
 ) -> Result<(), EngineError>
 where
-    S: Sink<Message, Error = BoxedError> + Unpin,
+    S: Sink<Message> + Unpin,
+    S::Error: std::error::Error + Send + Sync + 'static,
 {
     // Ensure the transport shuts down whenever the engine exits, regardless of the reason.
     let _guard = token.drop_guard();
@@ -190,7 +192,7 @@ where
                         Packet::Message(payload) => {
                             sink.send(Message::Text(payload))
                                 .await
-                                .map_err(EngineError::SendSink)?;
+                                .map_err(|e| EngineError::SendSink(e.into()))?;
                         }
                         Packet::Noop => {}
 
@@ -202,7 +204,7 @@ where
 
                     sink.send(Message::Binary(payload))
                         .await
-                        .map_err(EngineError::SendSink)?;
+                        .map_err(|e| EngineError::SendSink(e.into()))?;
                 }
             },
             EngineAction::Sink(message) => match message {

@@ -9,8 +9,9 @@ use sioc_engine::engine::Engine;
 use sioc_engine::transport::TransportStrategy;
 use sioc_engine::websocket::WebSocketConnector;
 use sioc_socket::error::ManagerError;
-use sioc_socket::manager::{Manager, ManagerAction, ManagerSender, manager_sink};
+use sioc_socket::manager::{DirectiveSender, Manager, ManagerAction, message_sink};
 use sioc_socket::packet::{Directive, DynEvent, Signal};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -160,7 +161,7 @@ where
             http_client,
             websocket_connector,
             self.transport_strategy,
-            manager_sink(manager_tx.clone()),
+            message_sink(manager_tx.clone()),
             self.channels.engine,
             self.channels.transport,
         );
@@ -170,7 +171,7 @@ where
         let manager_handle = tokio::spawn(manager.socket_io(engine));
 
         Ok(Client {
-            tx: ManagerSender::new(manager_tx),
+            tx: DirectiveSender::new(manager_tx),
             handle: manager_handle,
             socket_capacity: self.channels.socket,
         })
@@ -180,7 +181,7 @@ where
 /// A connected Socket.IO client.
 #[derive(Debug)]
 pub struct Client {
-    tx: ManagerSender,
+    tx: DirectiveSender,
     handle: JoinHandle<Result<(), ManagerError>>,
     socket_capacity: usize,
 }
@@ -221,7 +222,7 @@ impl Client {
             tx,
             payload: payload.into(),
         };
-        socket_tx.send(directive).await?;
+        socket_tx.0.send(directive).await?;
 
         Ok((socket_tx, socket_rx))
     }
@@ -237,31 +238,45 @@ impl Client {
     }
 }
 
-/// Sender for a Socket.IO namespace.
-///
-/// Owns the connection lifetime: dropping sends a disconnect packet automatically.
-/// Wrap in [`Arc`](std::sync::Arc) to share across tasks.
 #[derive(Debug)]
-pub struct SocketSender {
+struct SocketSenderInner {
     ns: ByteString,
-    tx: ManagerSender,
-    is_connected: AtomicBool,
+    tx: DirectiveSender,
+    disconnected: AtomicBool,
 }
 
-impl SocketSender {
-    fn new(ns: ByteString, tx: ManagerSender) -> Self {
-        Self {
-            ns,
-            tx,
-            is_connected: AtomicBool::new(true),
-        }
-    }
-
+impl SocketSenderInner {
     async fn send(&self, directive: Directive) -> Result<(), SocketError> {
         self.tx
             .send(self.ns.clone(), directive)
             .await
             .map_err(SocketError::Send)
+    }
+}
+
+impl Drop for SocketSenderInner {
+    fn drop(&mut self) {
+        if !self.disconnected.swap(true, Ordering::Relaxed) {
+            tracing::warn!(ns = %self.ns, "dropped while connected");
+            let _ = self.tx.try_send(self.ns.clone(), Directive::Disconnect);
+        }
+    }
+}
+
+/// Sender for a Socket.IO namespace.
+///
+/// Cloning is cheap — all clones share the same connection. The disconnect
+/// packet is sent automatically when the last clone is dropped.
+#[derive(Clone, Debug)]
+pub struct SocketSender(Arc<SocketSenderInner>);
+
+impl SocketSender {
+    fn new(ns: ByteString, tx: DirectiveSender) -> Self {
+        Self(Arc::new(SocketSenderInner {
+            ns,
+            tx,
+            disconnected: AtomicBool::new(false),
+        }))
     }
 
     /// Emits an event; returns `()` or an [`AckHandle`](crate::ack::AckHandle) depending on the ack policy.
@@ -272,7 +287,7 @@ impl SocketSender {
         B: BinaryMarker,
     {
         let (directive, output) = event.prepare()?;
-        self.send(directive).await?;
+        self.0.send(directive).await?;
         Ok(output)
     }
 
@@ -284,32 +299,17 @@ impl SocketSender {
         B: BinaryMarker,
     {
         let directive = payload.into_directive(id.get())?;
-        self.send(directive).await
+        self.0.send(directive).await
     }
 
-    /// Closes this namespace; no-op if already disconnected.
-    pub async fn disconnect(&self) -> Result<(), SocketError> {
-        // Relaxed suffices: ns and manager_tx are immutable after construction,
-        // so no other shared data needs synchronizing through this flag.
-        if self.is_connected.swap(false, Ordering::Relaxed) {
-            self.send(Directive::Disconnect).await?;
+    /// Closes this namespace immediately.
+    ///
+    /// Sends a graceful disconnect packet. Prefer this over dropping when you need a guaranteed async send rather than a fire-and-forget `try_send`.
+    pub async fn disconnect(self) -> Result<(), SocketError> {
+        if self.0.disconnected.swap(true, Ordering::Relaxed) {
+            return Ok(());
         }
-        Ok(())
-    }
-}
-
-impl Drop for SocketSender {
-    fn drop(&mut self) {
-        // Same reasoning as disconnect(): Relaxed is sufficient.
-        if self.is_connected.swap(false, Ordering::Relaxed) {
-            let type_name = std::any::type_name::<Self>();
-
-            tracing::warn!(ns = %self.ns, type_name, "dropped while connected");
-
-            // try_send is non-blocking; if the channel is full or closed the
-            // disconnect packet is lost, but we've already logged the warning.
-            let _ = self.tx.try_send(self.ns.clone(), Directive::Disconnect);
-        }
+        self.0.send(Directive::Disconnect).await
     }
 }
 

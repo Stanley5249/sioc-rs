@@ -41,7 +41,7 @@ struct Reply {
 
 // Server to client event that requires a client ack (Sum)
 #[derive(Debug, EventType, DeserializePayload)]
-#[sioc(event(name = "add"), ack = "Sum")]
+#[sioc(event(name = "add", ack = "Sum"))]
 struct Add {
     a: i32,
     b: i32,
@@ -53,7 +53,7 @@ struct Sum(i32);
 
 // Client to server event that requires a server ack (RoomInfo)
 #[derive(Debug, EventType, SerializePayload)]
-#[sioc(event(name = "join"), ack = "RoomInfo")]
+#[sioc(event(name = "join", ack = "RoomInfo"))]
 struct Join {
     room: String,
 }
@@ -117,7 +117,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // SocketSender warns when dropped while still connected.
     tx.disconnect().await?;
 
     // Awaits the background engine and socket tasks.

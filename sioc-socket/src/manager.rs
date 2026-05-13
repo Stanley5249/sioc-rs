@@ -6,16 +6,17 @@ use bytes::Bytes;
 use bytestring::ByteString;
 use futures_util::{Sink, SinkExt, future};
 use sioc_engine::engine::{Engine, EngineSender};
-use sioc_engine::error::BoxedError;
 use sioc_engine::prelude::Message;
 use std::collections::BTreeMap;
 use std::collections::hash_map::{Entry, HashMap};
 use tokio::sync::mpsc::error::{SendError, TrySendError};
 use tokio::sync::{mpsc, oneshot};
-use tokio_util::sync::PollSender;
+use tokio_util::sync::{PollSendError, PollSender};
 
 /// Creates a [`Sink<Message>`] that maps each [`Message`] to a [`ManagerAction`] and sends it.
-pub fn manager_sink(tx: mpsc::Sender<ManagerAction>) -> impl Sink<Message, Error = BoxedError> {
+pub fn message_sink(
+    tx: mpsc::Sender<ManagerAction>,
+) -> impl Sink<Message, Error = PollSendError<ManagerAction>> {
     PollSender::new(tx).with(|message: Message| future::ok(message.into()))
 }
 
@@ -25,15 +26,6 @@ pub enum ManagerAction {
     Socket(Ns<Directive>),
     /// Inbound message from the engine.
     Engine(Message),
-}
-
-impl ManagerAction {
-    unsafe fn into_directive(self) -> Ns<Directive> {
-        match self {
-            ManagerAction::Socket(directive) => directive,
-            ManagerAction::Engine(_) => unsafe { std::hint::unreachable_unchecked() },
-        }
-    }
 }
 
 impl From<Ns<Directive>> for ManagerAction {
@@ -50,10 +42,9 @@ impl From<Message> for ManagerAction {
 
 /// Sends outbound [`Directive`]s to the socket router.
 #[derive(Clone, Debug)]
-pub struct ManagerSender(mpsc::Sender<ManagerAction>);
+pub struct DirectiveSender(mpsc::Sender<ManagerAction>);
 
-// Safety: the value sent is always `ManagerAction::Socket(...)`.
-impl ManagerSender {
+impl DirectiveSender {
     pub fn new(tx: mpsc::Sender<ManagerAction>) -> Self {
         Self(tx)
     }
@@ -62,24 +53,24 @@ impl ManagerSender {
         &self,
         ns: ByteString,
         directive: Directive,
-    ) -> Result<(), SendError<Ns<Directive>>> {
-        self.0
-            .send(Ns(ns, directive).into())
-            .await
-            .map_err(|e| SendError(unsafe { e.0.into_directive() }))
+    ) -> Result<(), SendError<ManagerAction>> {
+        self.0.send(Ns(ns, directive).into()).await
+    }
+
+    pub fn blocking_send(
+        &self,
+        ns: ByteString,
+        directive: Directive,
+    ) -> Result<(), SendError<ManagerAction>> {
+        self.0.blocking_send(Ns(ns, directive).into())
     }
 
     pub fn try_send(
         &self,
         ns: ByteString,
         directive: Directive,
-    ) -> Result<(), TrySendError<Ns<Directive>>> {
-        self.0
-            .try_send(Ns(ns, directive).into())
-            .map_err(|e| match e {
-                TrySendError::Full(x) => TrySendError::Full(unsafe { x.into_directive() }),
-                TrySendError::Closed(x) => TrySendError::Closed(unsafe { x.into_directive() }),
-            })
+    ) -> Result<(), TrySendError<ManagerAction>> {
+        self.0.try_send(Ns(ns, directive).into())
     }
 }
 
