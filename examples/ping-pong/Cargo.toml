@@ -7,7 +7,7 @@ edition = "2024"
 sioc.workspace = true
 url.workspace = true
 
-miette.workspace = true
+miette = { workspace = true, features = ["fancy"] }
 serde.workspace = true
 tokio = { workspace = true, features = ["process", "rt-multi-thread", "signal"] }
 tracing.workspace = true

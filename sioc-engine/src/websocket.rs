@@ -44,7 +44,7 @@ where
 /// or header configuration.
 impl WebSocketConnector for () {
     async fn connect(self, url: Url) -> Result<WebSocketStream, TungsteniteError> {
-        let (stream, _) = connect_async(url.as_str()).await?;
+        let (stream, _) = connect_async(url).await?;
         Ok(WebSocketStream(stream))
     }
 }
