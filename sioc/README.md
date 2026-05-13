@@ -117,6 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // SocketSender warns when dropped while still connected.
     tx.disconnect().await?;
 
     // Awaits the background engine and socket tasks.
