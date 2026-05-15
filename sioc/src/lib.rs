@@ -7,6 +7,8 @@ pub mod config;
 pub mod error;
 pub mod event;
 pub mod marker;
+pub mod manager;
+pub mod packet;
 pub mod payload;
 
 pub mod prelude {
@@ -23,10 +25,10 @@ pub mod prelude {
         event_to_json,
     };
 
-    pub use sioc_socket::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Signal};
+    pub use crate::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Signal};
 
-    pub use sioc_engine::error::WebSocketError;
-    pub use sioc_engine::prelude::{TransportStrategy, WebSocketConnector, WebSocketStream};
+    pub use eioc::error::WebSocketError;
+    pub use eioc::prelude::{TransportStrategy, WebSocketConnector, WebSocketStream};
 
     pub use sioc_macros::{AckType, DeserializePayload, EventRouter, EventType, SerializePayload};
 }

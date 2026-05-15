@@ -1,6 +1,6 @@
-//! Socket.IO v4 packet types.
+//! Socket.IO v4 packet types and wire encoding.
 
-use crate::parse::{hint_packet_size, write_packet};
+use crate::error::PacketError;
 use bytes::Bytes;
 use bytestring::ByteString;
 use miette::Diagnostic;
@@ -26,7 +26,7 @@ pub struct Connect {
 #[derive(Debug, Error, Diagnostic, Deserialize)]
 #[error("{message}")]
 #[diagnostic(
-    code(sioc::socket::connect_error),
+    code(sioc::connect_error),
     help(
         "Server rejected the namespace connection. Verify your auth payload and server middleware."
     ),
@@ -345,4 +345,192 @@ impl Ns<Packet> {
     pub fn encode(&self) -> String {
         self.1.encode(&self.0)
     }
+}
+
+impl TryFrom<ByteString> for Ns<Packet> {
+    type Error = PacketError;
+
+    fn try_from(bytes: ByteString) -> Result<Self, PacketError> {
+        let mut chars = bytes.chars();
+
+        let id = chars.next().ok_or(PacketError::Empty)?;
+
+        let bytes = bytes.slice_ref(chars.as_str());
+
+        let packet = match id {
+            '0' => {
+                let (ns, payload) = split_namespace(bytes)?;
+                Ns(ns, Packet::Connect(payload))
+            }
+            '1' => {
+                let (ns, _) = split_namespace(bytes)?;
+                Ns(ns, Packet::Disconnect)
+            }
+            '2' => {
+                let (count, bytes) = split_attachments(bytes)?;
+                if let Some(count) = count {
+                    return Err(PacketError::UnexpectedAttachments { count });
+                }
+                let (ns, bytes) = split_namespace(bytes)?;
+                let (id, payload) = split_id(bytes)?;
+                Ns(ns, Packet::Event { payload, id })
+            }
+            '3' => {
+                let (ns, bytes) = split_namespace(bytes)?;
+                let (id, payload) = split_id(bytes)?;
+                let id = id.ok_or(PacketError::MissingAckId)?;
+                Ns(ns, Packet::Ack { payload, id })
+            }
+            '4' => {
+                let (ns, payload) = split_namespace(bytes)?;
+                Ns(ns, Packet::ConnectError(payload))
+            }
+            '5' => {
+                let (count, bytes) = split_attachments(bytes)?;
+                let count = count.ok_or(PacketError::MissingAttachmentCount)?;
+                let (ns, bytes) = split_namespace(bytes)?;
+                let (id, payload) = split_id(bytes)?;
+                Ns(ns, Packet::BinaryEvent { payload, id, count })
+            }
+            '6' => {
+                let (count, bytes) = split_attachments(bytes)?;
+                let count = count.ok_or(PacketError::MissingAttachmentCount)?;
+                let (ns, bytes) = split_namespace(bytes)?;
+                let (id, payload) = split_id(bytes)?;
+                let id = id.ok_or(PacketError::MissingAckId)?;
+                Ns(ns, Packet::BinaryAck { payload, id, count })
+            }
+            id => return Err(PacketError::InvalidId { id }),
+        };
+
+        Ok(packet)
+    }
+}
+
+const U64_MAX_LEN: usize = 20; // max decimal digits in a u64
+
+const fn ack_size_hint() -> usize {
+    U64_MAX_LEN
+}
+
+const fn binary_size_hint() -> usize {
+    U64_MAX_LEN + 1
+}
+
+/// Returns the encoded byte length of a namespace field (`0` for the default `"/"`).
+fn namespace_size(ns: &str) -> usize {
+    if ns == "/" { 0 } else { ns.len() + 1 }
+}
+
+pub fn hint_packet_size(ns: &str, binary: bool, ack: bool, payload: Option<&str>) -> usize {
+    let mut n = 1 + namespace_size(ns);
+    if ack {
+        n += ack_size_hint();
+    }
+    if binary {
+        n += binary_size_hint();
+    }
+    if let Some(payload) = payload {
+        n += payload.len();
+    }
+    n
+}
+
+/// Writes `<count>-` into `buffer`.
+fn write_attachments(buffer: &mut String, count: usize) {
+    buffer.push_str(&count.to_string());
+    buffer.push('-');
+}
+
+/// Writes the namespace followed by `,`; skipped for the default `"/"`.
+fn write_namespace(buffer: &mut String, ns: &str) {
+    if ns != "/" {
+        buffer.push_str(ns);
+        buffer.push(',');
+    }
+}
+
+/// Writes a decimal ack ID.
+fn write_id(buffer: &mut String, id: u64) {
+    buffer.push_str(&id.to_string());
+}
+
+fn write_payload(buffer: &mut String, payload: &str) {
+    buffer.push_str(payload);
+}
+
+pub fn write_packet(
+    buffer: &mut String,
+    type_id: u8,
+    count: Option<usize>,
+    ns: &str,
+    id: Option<u64>,
+    payload: Option<&str>,
+) {
+    buffer.push(type_id as char);
+    if let Some(count) = count {
+        write_attachments(buffer, count);
+    }
+    write_namespace(buffer, ns);
+    if let Some(id) = id {
+        write_id(buffer, id);
+    }
+    if let Some(payload) = payload {
+        write_payload(buffer, payload);
+    }
+}
+
+/// Consumes a `<n>-` attachment count prefix.
+///
+/// Only matches when the data starts with one or more ASCII digits immediately
+/// followed by `-`. This avoids misinterpreting a namespace that contains a
+/// hyphen (e.g. `/admin-ns,["data"]`) as an attachment count.
+///
+/// Returns `(Some(count), rest)` when the prefix is present, `(None, bytes)`
+/// when absent.
+pub fn split_attachments(bytes: ByteString) -> Result<(Option<usize>, ByteString), PacketError> {
+    let pair = match bytes.char_indices().find(|(_, c)| !c.is_ascii_digit()) {
+        Some((i, '-')) => {
+            let count = bytes[..i]
+                .parse()
+                .map_err(PacketError::InvalidAttachmentCount)?;
+
+            let rest = bytes.slice_ref(&bytes[i + 1..]);
+
+            (Some(count), rest)
+        }
+        _ => (None, bytes),
+    };
+
+    Ok(pair)
+}
+
+/// Consumes a `/ns,` prefix and returns `(namespace, rest)`.
+///
+/// Returns `"/"` for the default namespace.
+pub fn split_namespace(bytes: ByteString) -> Result<(ByteString, ByteString), PacketError> {
+    match bytes.chars().next() {
+        Some('/') => match bytes.split_once(',') {
+            Some((ns, payload)) => Ok((bytes.slice_ref(ns), bytes.slice_ref(payload))),
+            None => Err(PacketError::MissingNamespaceDelimiter),
+        },
+        _ => Ok((ByteString::from_static("/"), bytes)),
+    }
+}
+
+/// Consumes a run of leading ASCII digits as a `u64`.
+///
+/// Returns `(Some(id), rest)` when digits are present and fit in `u64`,
+/// `(None, bytes)` when no leading digits are found or the input is empty.
+pub fn split_id(bytes: ByteString) -> Result<(Option<u64>, ByteString), PacketError> {
+    let pair = match bytes.char_indices().find(|(_, c)| !c.is_ascii_digit()) {
+        Some((i, _)) if i > 0 => {
+            let id = bytes[..i].parse().map_err(PacketError::InvalidAckId)?;
+            let rest = bytes.slice_ref(&bytes[i..]);
+            (Some(id), rest)
+        }
+        _ => (None, bytes),
+    };
+
+    Ok(pair)
 }

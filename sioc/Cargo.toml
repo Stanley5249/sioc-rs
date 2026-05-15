@@ -12,9 +12,8 @@ categories = ["asynchronous", "network-programming", "web-programming"]
 
 [dependencies]
 # Workspace dependencies
-sioc-engine.workspace = true
+eioc.workspace = true
 sioc-macros.workspace = true
-sioc-socket.workspace = true
 
 bytes.workspace = true
 bytestring.workspace = true
@@ -26,6 +25,7 @@ serde_json.workspace = true
 serde_path_to_error.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 url.workspace = true
 pin-project.workspace = true

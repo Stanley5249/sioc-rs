@@ -1,12 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["examples/*", "sioc", "sioc-engine", "sioc-macros", "sioc-socket"]
+members = ["examples/*", "eioc", "sioc", "sioc-macros"]
 
 [workspace.dependencies]
 sioc = { path = "./sioc", version = "0.1.0" }
-sioc-engine = { path = "./sioc-engine", version = "0.1.0" }
+eioc = { path = "./eioc", version = "0.1.0" }
 sioc-macros = { path = "./sioc-macros", version = "0.1.0" }
-sioc-socket = { path = "./sioc-socket", version = "0.1.0" }
 
 # Async runtime
 futures-util = "0.3"

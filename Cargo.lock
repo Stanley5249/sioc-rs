@@ -273,6 +273,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
+name = "eioc"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "bytes",
+ "bytestring",
+ "futures-util",
+ "http",
+ "miette",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "encoding_rs"
 version = "0.8.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1611,6 +1632,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "bytestring",
+ "eioc",
  "futures-util",
  "miette",
  "pin-project",
@@ -1618,31 +1640,9 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_path_to_error",
- "sioc-engine",
  "sioc-macros",
- "sioc-socket",
  "thiserror",
  "tokio",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "sioc-engine"
-version = "0.1.0"
-dependencies = [
- "base64",
- "bytes",
- "bytestring",
- "futures-util",
- "http",
- "miette",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-tungstenite",
  "tokio-util",
  "tracing",
  "url",
@@ -1659,24 +1659,6 @@ dependencies = [
  "serde",
  "serde_json",
  "syn",
-]
-
-[[package]]
-name = "sioc-socket"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "bytestring",
- "futures-util",
- "miette",
- "serde",
- "serde_json",
- "sioc-engine",
- "thiserror",
- "tokio",
- "tokio-util",
- "tracing",
- "url",
 ]
 
 [[package]]

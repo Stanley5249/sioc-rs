@@ -4,9 +4,9 @@ use crate::error::{ManagerError, PacketError};
 use crate::packet::{Connect, ConnectError, Directive, DynAck, DynEvent, Ns, Packet, Signal};
 use bytes::Bytes;
 use bytestring::ByteString;
+use eioc::engine::{Engine, EngineSender};
+use eioc::prelude::Message;
 use futures_util::{Sink, SinkExt, future};
-use sioc_engine::engine::{Engine, EngineSender};
-use sioc_engine::prelude::Message;
 use std::collections::BTreeMap;
 use std::collections::hash_map::{Entry, HashMap};
 use tokio::sync::mpsc::error::{SendError, TrySendError};
@@ -550,7 +550,7 @@ impl Manager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sioc_engine::engine::EngineAction;
+    use eioc::engine::EngineAction;
     use tokio::task::JoinHandle;
 
     const CONNECT_RESPONSE: &str = "0{\"sid\":\"test\"}";

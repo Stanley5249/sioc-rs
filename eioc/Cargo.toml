@@ -1,9 +1,9 @@
 [package]
-name = "sioc-engine"
+name = "eioc"
 version = "0.1.0"
 edition = "2024"
 description = "Async Engine.IO client implementation for Sioc"
-documentation = "https://docs.rs/sioc-engine"
+documentation = "https://docs.rs/eioc"
 repository = "https://github.com/Stanley5249/sioc-rs"
 license = "MIT OR Apache-2.0"
 keywords = ["async", "engine-io", "networking", "websocket"]
