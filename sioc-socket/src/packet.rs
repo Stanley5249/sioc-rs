@@ -116,9 +116,6 @@ impl DynAck {
 }
 
 /// A fully decoded inbound packet.
-///
-/// The default `E = DynEvent` carries raw events; use [`downcast`](Signal::downcast) to
-/// convert to a typed event.
 #[derive(Debug)]
 pub enum Signal<E = DynEvent> {
     /// The server confirmed the namespace connection.
@@ -129,21 +126,6 @@ pub enum Signal<E = DynEvent> {
     ConnectError(ConnectError),
     /// An application-level event (possibly with binary attachments).
     Event(E),
-}
-
-impl Signal<DynEvent> {
-    /// Converts the [`Event`](Signal::Event) variant via [`TryFrom<DynEvent>`], passing other variants through.
-    pub fn downcast<E>(self) -> Result<Signal<E>, E::Error>
-    where
-        E: TryFrom<DynEvent>,
-    {
-        match self {
-            Self::Connect(c) => Ok(Signal::Connect(c)),
-            Self::Disconnect => Ok(Signal::Disconnect),
-            Self::ConnectError(e) => Ok(Signal::ConnectError(e)),
-            Self::Event(event) => Ok(Signal::Event(E::try_from(event)?)),
-        }
-    }
 }
 
 impl<E> std::fmt::Display for Signal<E>
@@ -170,19 +152,35 @@ where
 }
 
 impl<E> Signal<E> {
-    /// Converts [`ConnectError`](Signal::ConnectError) into `Err`; passes all other variants through as `Ok`.
-    pub fn into_result(self) -> Result<Self, ConnectError> {
-        match self {
-            Self::ConnectError(e) => Err(e),
-            signal => Ok(signal),
-        }
-    }
-
     /// Returns the inner event if this is [`Event`](Signal::Event), otherwise `None`.
-    pub fn into_event(self) -> Option<E> {
+    pub fn take_event(self) -> Option<E> {
         match self {
             Self::Event(e) => Some(e),
             _ => None,
+        }
+    }
+
+    /// Applies `f` to the inner event if this is [`Event`](Signal::Event), otherwise returns `None`.
+    pub fn and_then<F, T>(self, f: F) -> Option<T>
+    where
+        F: FnOnce(E) -> Option<T>,
+    {
+        match self {
+            Self::Event(e) => f(e),
+            _ => None,
+        }
+    }
+
+    /// Applies `f` to the event in [`Event`](Signal::Event), passing other variants through unchanged.
+    pub fn map<F, U>(self, f: F) -> Signal<U>
+    where
+        F: FnOnce(E) -> U,
+    {
+        match self {
+            Self::Connect(c) => Signal::Connect(c),
+            Self::Disconnect => Signal::Disconnect,
+            Self::ConnectError(e) => Signal::ConnectError(e),
+            Self::Event(e) => Signal::Event(f(e)),
         }
     }
 }

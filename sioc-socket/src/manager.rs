@@ -478,10 +478,14 @@ impl Manager {
 
                 let connect: Connect = serde_json::from_str(&payload).map_err(PacketError::Json)?;
 
+                tracing::debug!(%ns, sid = %connect.sid, "connected");
+
                 socket.send_packet(ns, Signal::Connect(connect)).await?;
             }
             Packet::Disconnect => {
                 let Ns(ns, socket) = self.sockets.get_mut(ns)?;
+
+                tracing::debug!(%ns, "disconnected");
 
                 socket.send_packet(ns, Signal::Disconnect).await?;
             }
@@ -502,6 +506,8 @@ impl Manager {
 
                 let error: ConnectError =
                     serde_json::from_str(&payload).map_err(PacketError::Json)?;
+
+                tracing::error!(%ns, %error, "connect error");
 
                 socket.send_packet(ns, Signal::ConnectError(error)).await?;
             }

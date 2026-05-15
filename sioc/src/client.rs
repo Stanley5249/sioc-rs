@@ -302,10 +302,11 @@ impl SocketSender {
         self.0.send(directive).await
     }
 
-    /// Closes this namespace immediately.
+    /// Sends a graceful disconnect packet and marks this sender as disconnected.
     ///
-    /// Sends a graceful disconnect packet. Prefer this over dropping when you need a guaranteed async send rather than a fire-and-forget `try_send`.
-    pub async fn disconnect(self) -> Result<(), SocketError> {
+    /// Idempotent: subsequent calls return `Ok(())` immediately. Prefer this over dropping
+    /// when you need a guaranteed async send rather than the fire-and-forget `try_send` in `Drop`.
+    pub async fn disconnect(&self) -> Result<(), SocketError> {
         if self.0.disconnected.swap(true, Ordering::Relaxed) {
             return Ok(());
         }
@@ -320,23 +321,36 @@ pub struct SocketReceiver {
 }
 
 impl SocketReceiver {
-    /// Returns the next inbound packet, or `None` when the channel closes (router shut down).
+    /// Returns the next application event. [`Signal::Connect`], [`Signal::Disconnect`], and
+    /// [`Signal::ConnectError`] are silently dropped; they do not close the receiver.
+    /// Returns `None` only when the channel closes (router shut down).
     ///
-    /// [`Signal::Disconnect`] and [`Signal::ConnectError`] are in-band packets, not terminal;
-    /// only `None` means no further signals will arrive.
-    pub async fn recv(&mut self) -> Option<Signal> {
-        self.rx.recv().await
-    }
-
-    /// Returns the next inbound packet as a typed [`Signal<E>`], or `None` when the channel
-    /// closes (router shut down). Prefer this over [`recv`](Self::recv) + [`downcast`](Signal::downcast).
-    ///
-    /// [`Signal::Disconnect`] and [`Signal::ConnectError`] are in-band packets, not terminal;
-    /// only `None` means no further signals will arrive.
-    pub async fn listen<E>(&mut self) -> Result<Option<Signal<E>>, E::Error>
+    /// Cancel safe: the only suspend point is `recv`; skipped protocol signals have no
+    /// suspend point after consumption, so no events are lost on cancellation.
+    pub async fn listen<E>(&mut self) -> Result<Option<E>, E::Error>
     where
         E: TryFrom<DynEvent>,
     {
-        self.rx.recv().await.map(|s| s.downcast()).transpose()
+        loop {
+            match self.rx.recv().await {
+                None => return Ok(None),
+                Some(Signal::Event(e)) => return E::try_from(e).map(Some),
+                Some(_) => continue,
+            }
+        }
+    }
+}
+
+impl std::ops::Deref for SocketReceiver {
+    type Target = mpsc::Receiver<Signal>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.rx
+    }
+}
+
+impl std::ops::DerefMut for SocketReceiver {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.rx
     }
 }

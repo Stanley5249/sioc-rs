@@ -1,4 +1,4 @@
-use miette::IntoDiagnostic;
+use miette::{IntoDiagnostic, Result};
 use sioc::prelude::*;
 use std::path::PathBuf;
 use tokio::process::{Child, Command};
@@ -34,43 +34,33 @@ async fn run_server() -> std::io::Result<Child> {
     Ok(child)
 }
 
+async fn disconnect(tx: &SocketSender) -> Result<()> {
+    tokio::signal::ctrl_c().await.into_diagnostic()?;
+    tracing::info!("ctrl-c signal");
+    tx.disconnect().await?;
+    Ok(())
+}
+
+async fn ping_loop(tx: &SocketSender, rx: &mut SocketReceiver) -> Result<()> {
+    while let Some(ping) = rx.listen::<Event<Ping>>().await? {
+        tracing::debug!(?ping, "received ping");
+        tx.emit(Pong {
+            data: ping.payload.data,
+        })
+        .await?;
+    }
+    Ok(())
+}
+
 #[tracing::instrument(skip_all, err)]
-async fn run_client() -> miette::Result<()> {
+async fn run_client() -> Result<()> {
     let url = Url::parse("http://localhost:3000").into_diagnostic()?;
 
     let client = ClientBuilder::new(url).open()?;
 
     let (tx, mut rx) = client.connect("/").await?;
 
-    loop {
-        let signal = tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                tracing::info!("ctrl-c signal");
-                break;
-            }
-            result = rx.listen::<Event<Ping>>() => {
-                match result? {
-                    Some(signal) => signal,
-                    _ => break,
-                }
-            }
-        };
-
-        tracing::debug!(?signal, "received signal");
-
-        match signal {
-            Signal::ConnectError(error) => return Err(error.into()),
-
-            Signal::Event(ping) => {
-                let data = ping.payload.data;
-                let pong = Pong { data };
-                tx.emit(pong).await?;
-            }
-            _ => {}
-        }
-    }
-
-    tx.disconnect().await?;
+    tokio::try_join!(ping_loop(&tx, &mut rx), disconnect(&tx))?;
 
     client.join().await?;
 
@@ -78,7 +68,7 @@ async fn run_client() -> miette::Result<()> {
 }
 
 #[tokio::main]
-async fn main() -> miette::Result<()> {
+async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .pretty()
         .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
