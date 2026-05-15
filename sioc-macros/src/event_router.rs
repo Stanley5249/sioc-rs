@@ -53,6 +53,12 @@ pub fn expand(input: syn::DeriveInput) -> darling::Result<TokenStream> {
         .iter()
         .map(|(_, ty)| quote! { <#ty as ::sioc::prelude::EventHandler>::Payload::NAME });
 
+    let name_arms = variants.iter().map(|(vi, ty)| {
+        quote! {
+            #enum_ident::#vi(_) => <#ty as ::sioc::prelude::EventHandler>::Payload::NAME,
+        }
+    });
+
     let from_event_arms = variants.iter().map(|(vi, ty)| {
         quote! {
             #helper_ident::#vi(args) => {
@@ -102,6 +108,14 @@ pub fn expand(input: syn::DeriveInput) -> darling::Result<TokenStream> {
                         return Err(::serde::de::Error::unknown_variant(name, &[#(#all_names),*]));
                     }
                 })
+            }
+        }
+
+        impl ::sioc::prelude::EventRouter for #enum_ident {
+            fn name(&self) -> &'static str {
+                match self {
+                    #(#name_arms)*
+                }
             }
         }
 
