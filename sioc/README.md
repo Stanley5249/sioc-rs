@@ -88,32 +88,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("joined lobby with {} members", ack.payload.count);
 
-    // Listen accepts any type implementing TryFrom<DynEvent>. Event<E> and EventRouter enums both qualify.
-    while let Some(signal) = rx.listen::<AppEvent>().await? {
-        match signal {
-            // Emitting before Connect is fine. The send is queued until the namespace is confirmed.
-            Signal::Connect(connect) => {
-                println!("connected to '/' with sid={}", connect.sid);
+    // listen() filters out protocol signals (Connect, ConnectError, Disconnect) and returns
+    // typed app events. Event<E> and EventRouter enums both implement TryFrom<DynEvent>.
+    while let Some(event) = rx.listen::<AppEvent>().await? {
+        match event {
+            // Emit requires EventType + SerializePayload.
+            AppEvent::Greeting(Event { payload: Greeting { name }, .. }) => {
+                tx.emit(Reply { text: format!("hello, {name}!") }).await?;
             }
-            // ConnectError does not close the channel. More signals may follow.
-            Signal::ConnectError(error) => {
-                eprintln!("connect error: {error}");
+
+            // Acknowledge requires AckType + SerializePayload.
+            // id: AckId<Sum> ensures only Sum is accepted.
+            AppEvent::Add(Event { payload: Add { a, b }, id, .. }) => {
+                tx.acknowledge(id, Sum(a + b)).await?;
             }
-            // Reconnection is handled internally. The loop exits only when listen() returns None.
-            Signal::Disconnect => {}
-
-            Signal::Event(event) => match event {
-                // Emit requires EventType + SerializePayload.
-                AppEvent::Greeting(Event { payload: Greeting { name }, .. }) => {
-                    tx.emit(Reply { text: format!("hello, {name}!") }).await?;
-                }
-
-                // Acknowledge requires AckType + SerializePayload.
-                // id: AckId<Sum> ensures only Sum is accepted.
-                AppEvent::Add(Event { payload: Add { a, b }, id, .. }) => {
-                    tx.acknowledge(id, Sum(a + b)).await?;
-                }
-            },
         }
     }
 
