@@ -274,7 +274,7 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "eioc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "bytes",
@@ -1628,7 +1628,7 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "sioc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "bytestring",
@@ -1650,7 +1650,7 @@ dependencies = [
 
 [[package]]
 name = "sioc-macros"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "darling",
  "heck",
