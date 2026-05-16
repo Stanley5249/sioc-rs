@@ -2,15 +2,15 @@
 
 use crate::ack::AckType;
 use crate::config::ChannelConfig;
+use crate::error::ManagerError;
 use crate::error::{ClientBuilderError, ClientError, PayloadError, SocketError};
+use crate::manager::{DirectiveSender, Manager, ManagerAction, message_sink};
 use crate::marker::{AckId, AckMarker, BinaryMarker};
+use crate::packet::{Directive, DynEvent, Signal};
 use bytestring::ByteString;
 use eioc::engine::Engine;
 use eioc::transport::TransportStrategy;
 use eioc::websocket::WebSocketConnector;
-use crate::error::ManagerError;
-use crate::manager::{DirectiveSender, Manager, ManagerAction, message_sink};
-use crate::packet::{Directive, DynEvent, Signal};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;

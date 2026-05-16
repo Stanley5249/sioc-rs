@@ -6,8 +6,8 @@ pub mod client;
 pub mod config;
 pub mod error;
 pub mod event;
-pub mod marker;
 pub mod manager;
+pub mod marker;
 pub mod packet;
 pub mod payload;
 
