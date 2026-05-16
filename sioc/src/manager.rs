@@ -483,7 +483,7 @@ impl Manager {
                 socket.send_packet(ns, Signal::Connect(connect)).await?;
             }
             Packet::Disconnect => {
-                let Ns(ns, socket) = self.sockets.get_mut(ns)?;
+                let Ns(ns, mut socket) = self.sockets.disconnect(ns)?;
 
                 tracing::debug!(%ns, "disconnected");
 

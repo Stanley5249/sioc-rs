@@ -4,4 +4,5 @@ This directory contains examples for the sioc-rs Socket.IO client library.
 
 ## Examples
 
-- **ping-pong/**: Ping-pong demo with Python server and Rust client.
+- **quick-start/**: Self-contained demo with a Python server and Rust client showcasing events, acks, and the EventRouter macro.
+- **generals-io/**: Game bot for [generals.io](https://generals.io) demonstrating real-world usage.

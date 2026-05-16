@@ -18,97 +18,83 @@ It adds features such as _namespaces_, which allow multiple channels over a sing
 
 ## Quick start
 
-This example requires a running Socket.IO server. See the `ping-pong` example for a self-contained demo.
+This example requires a running Socket.IO server. See the `quick-start` example for a self-contained demo.
 
 ```rust,no_run
 use sioc::prelude::*;
 use std::time::Duration;
 use url::Url;
 
-// Server to client event
 #[derive(Debug, EventType, DeserializePayload)]
 #[sioc(event(name = "greeting"))]
 struct Greeting {
-    name: String,
+    message: String,
 }
 
-// Client to server event
 #[derive(Debug, EventType, SerializePayload)]
 #[sioc(event(name = "reply"))]
 struct Reply {
     text: String,
 }
 
-// Server to client event that requires a client ack (Sum)
 #[derive(Debug, EventType, DeserializePayload)]
-#[sioc(event(name = "add", ack = "Sum"))]
-struct Add {
-    a: i32,
-    b: i32,
+#[sioc(event(name = "poll", ack = "Vote"))]
+struct Survey {
+    question: String,
+    options: Vec<String>,
 }
 
-// Client to server ack in response to Add
 #[derive(Debug, AckType, SerializePayload)]
-struct Sum(i32);
+struct Vote(usize);
 
-// Client to server event that requires a server ack (RoomInfo)
 #[derive(Debug, EventType, SerializePayload)]
 #[sioc(event(name = "join", ack = "RoomInfo"))]
 struct Join {
     room: String,
 }
 
-// Server to client ack in response to Join
 #[derive(Debug, AckType, DeserializePayload)]
 struct RoomInfo {
     count: u32,
 }
 
-// Router for server to client events. Implements TryFrom<DynEvent> to dispatch on the event name.
 #[derive(Debug, EventRouter)]
 enum AppEvent {
     Greeting(Event<Greeting>),
-    Add(Event<Add>),
+    Survey(Event<Survey>),
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let url = Url::parse("http://localhost:3000")?;
 
-    let client: Client = ClientBuilder::new(url).open()?;
+    let client = ClientBuilder::new(url).open()?;
+    let (tx, mut rx) = client.connect("/").await?;
 
-    // Each namespace gets its own SocketSender and SocketReceiver.
-    let (tx, mut rx): (SocketSender, SocketReceiver) = client.connect("/").await?;
-
-    // Emitting Join returns AckHandle<RoomInfo>.
-    let ack: Ack<RoomInfo> = tx.emit(Join { room: "lobby".into() })
+    let Ack { payload: RoomInfo { count }, .. } = tx
+        .emit(Join { room: "lobby".into() })
         .await?
         .timeout(Duration::from_secs(5))
         .await?;
 
-    println!("joined lobby with {} members", ack.payload.count);
+    println!("joined lobby with {count} members");
 
-    // listen() filters out protocol signals (Connect, ConnectError, Disconnect) and returns
-    // typed app events. Event<E> and EventRouter enums both implement TryFrom<DynEvent>.
     while let Some(event) = rx.listen::<AppEvent>().await? {
         match event {
-            // Emit requires EventType + SerializePayload.
-            AppEvent::Greeting(Event { payload: Greeting { name }, .. }) => {
-                tx.emit(Reply { text: format!("hello, {name}!") }).await?;
+            AppEvent::Greeting(Event { payload: Greeting { message }, .. }) => {
+                println!("greeting: {message}");
+                tx.emit(Reply { text: "glad to be here!".into() }).await?;
             }
 
-            // Acknowledge requires AckType + SerializePayload.
-            // id: AckId<Sum> ensures only Sum is accepted.
-            AppEvent::Add(Event { payload: Add { a, b }, id, .. }) => {
-                tx.acknowledge(id, Sum(a + b)).await?;
+            AppEvent::Survey(Event { payload: Survey { question, options }, id, .. }) => {
+                println!("poll: {question} ({} options)", options.len());
+                tx.acknowledge(id, Vote(0)).await?;
             }
         }
     }
 
-    // SocketSender warns when dropped while still connected.
     tx.disconnect().await?;
 
-    // Awaits the background engine and socket tasks.
     client.join().await?;
 
     Ok(())

@@ -1,0 +1,122 @@
+/// Demonstrates a Socket.IO client exchanging typed events and acknowledgements with a Python server.
+///
+/// `sioc` derive macros enforce event schemas at compile time: `EventType`/`AckType` define the
+/// event contract, `SerializePayload`/`DeserializePayload` handle wire encoding, and `EventRouter`
+/// dispatches incoming events by name.
+///
+use miette::{IntoDiagnostic, Result};
+use sioc::prelude::*;
+use std::time::Duration;
+use tracing_subscriber::EnvFilter;
+use url::Url;
+
+/// Server -> Client event
+#[derive(Debug, EventType, DeserializePayload)]
+#[sioc(event(name = "greeting"))]
+struct Greeting {
+    message: String,
+}
+
+/// Client -> Server event
+#[derive(Debug, EventType, SerializePayload)]
+#[sioc(event(name = "reply"))]
+struct Reply {
+    text: String,
+}
+
+/// Server -> Client event with ack
+#[derive(Debug, EventType, DeserializePayload)]
+#[sioc(event(name = "poll", ack = "Vote"))]
+struct Survey {
+    question: String,
+    options: Vec<String>,
+}
+
+/// Ack for [`Survey`] event from client
+#[derive(Debug, AckType, SerializePayload)]
+struct Vote(usize);
+
+/// Client -> Server event with ack
+#[derive(Debug, EventType, SerializePayload)]
+#[sioc(event(name = "join", ack = "RoomInfo"))]
+struct Join {
+    room: String,
+}
+
+/// Ack for [`Join`] event from server
+#[derive(Debug, AckType, DeserializePayload)]
+struct RoomInfo {
+    count: u32,
+}
+
+/// Routes incoming server events by name.
+#[derive(Debug, EventRouter)]
+enum MyEvent {
+    Greeting(Event<Greeting>),
+    Survey(Event<Survey>),
+}
+
+async fn run() -> Result<()> {
+    let url = Url::parse("http://localhost:3000").into_diagnostic()?;
+
+    let client = ClientBuilder::new(url).open()?;
+    let (tx, mut rx) = client.connect("/").await?;
+
+    let room = "lobby".to_string();
+
+    let Ack {
+        payload: RoomInfo { count },
+        ..
+    } = tx
+        .emit(Join { room: room.clone() })
+        .await?
+        .timeout(Duration::from_secs(5))
+        .await?;
+
+    tracing::info!(room, count, "join room");
+
+    while let Some(event) = rx.listen::<MyEvent>().await? {
+        match event {
+            MyEvent::Greeting(Event {
+                payload: Greeting { message },
+                ..
+            }) => {
+                let reply = "glad to be here!".into();
+
+                tracing::info!(message, reply, "greeting");
+
+                tx.emit(Reply { text: reply }).await?;
+            }
+            MyEvent::Survey(Event {
+                payload: Survey { question, options },
+                id,
+                ..
+            }) => {
+                let i = options
+                    .iter()
+                    .position(|s| s.eq_ignore_ascii_case("Rust"))
+                    .unwrap_or_default();
+
+                tracing::info!(question, ?options, vote = options[i], "voting");
+
+                tx.acknowledge(id, Vote(i)).await?;
+            }
+        }
+    }
+
+    tx.disconnect().await?;
+
+    client.join().await?;
+
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .pretty()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
+    run().await
+}

@@ -1,7 +1,7 @@
 [project]
-name = "ping-pong"
+name = "quick-start"
 version = "0.1.0"
-description = "Ping-pong example with Socket.IO server in Python and client in Rust"
+description = "Quick-start example with Socket.IO server in Python and client in Rust"
 requires-python = ">=3.14"
 dependencies = [
   "python-socketio",
