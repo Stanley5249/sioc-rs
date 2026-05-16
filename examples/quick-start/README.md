@@ -1,7 +1,6 @@
 # Quick Start Example
 
-A self-contained demo of the core sioc features: a Python Socket.IO server and a Rust client
-that exchange typed events and acknowledgements.
+A self-contained demo of a Python Socket.IO server and a Rust client that exchange events and acknowledgements.
 
 ## Prerequisites
 
@@ -9,13 +8,13 @@ that exchange typed events and acknowledgements.
 
 ## Running
 
-Start the server (from `examples/quick-start/`):
+Start the server:
 
 ```bash
-uv run server.py
+uv run examples/quick-start/server.py
 ```
 
-Then in a second terminal, run the client (from the workspace root):
+Then in a second terminal, run the client:
 
 On Bash:
 
