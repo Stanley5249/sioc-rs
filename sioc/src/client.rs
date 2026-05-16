@@ -257,8 +257,7 @@ impl SocketSenderInner {
 impl Drop for SocketSenderInner {
     fn drop(&mut self) {
         if !self.disconnected.swap(true, Ordering::Relaxed) {
-            tracing::warn!(ns = %self.ns, "dropped while connected");
-            let _ = self.tx.try_send(self.ns.clone(), Directive::Disconnect);
+            let _ = self.tx.try_send(self.ns.clone(), Directive::Dropped);
         }
     }
 }
@@ -307,10 +306,10 @@ impl SocketSender {
     /// Idempotent: subsequent calls return `Ok(())` immediately. Prefer this over dropping
     /// when you need a guaranteed async send rather than the fire-and-forget `try_send` in `Drop`.
     pub async fn disconnect(&self) -> Result<(), SocketError> {
-        if self.0.disconnected.swap(true, Ordering::Relaxed) {
-            return Ok(());
+        if !self.0.disconnected.swap(true, Ordering::Relaxed) {
+            self.0.send(Directive::Disconnect).await?;
         }
-        self.0.send(Directive::Disconnect).await
+        Ok(())
     }
 }
 

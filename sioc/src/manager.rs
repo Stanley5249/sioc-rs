@@ -195,6 +195,10 @@ impl SocketsMap {
         self.0.clear();
     }
 
+    fn take(&mut self) -> HashMap<ByteString, Socket> {
+        std::mem::take(&mut self.0)
+    }
+
     fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -318,6 +322,24 @@ impl Manager {
     /// Runs the socket routing loop until all namespaces disconnect.
     #[tracing::instrument(skip_all, err)]
     pub async fn socket_io(mut self, engine: Engine) -> Result<(), ManagerError> {
+        let result = self.run(&engine).await;
+
+        if !self.sockets.is_empty() {
+            for (ns, _socket) in self.sockets.take() {
+                tracing::warn!(%ns, "namespace still connected at shutdown");
+                engine
+                    .tx
+                    .send(Message::Text(Packet::Disconnect.encode(&ns).into()))
+                    .await?;
+            }
+            engine.tx.send(Message::Close).await?;
+        }
+
+        engine.join().await?;
+        result
+    }
+
+    async fn run(&mut self, engine: &Engine) -> Result<(), ManagerError> {
         while let Some(directive) = self.rx.recv().await {
             match directive {
                 ManagerAction::Socket(Ns(ns, packet)) => {
@@ -332,9 +354,6 @@ impl Manager {
                 break;
             }
         }
-
-        engine.join().await?;
-
         Ok(())
     }
 
@@ -359,6 +378,13 @@ impl Manager {
 
                 (ns, Packet::Disconnect, None)
             }
+            Directive::Dropped => match self.sockets.disconnect(ns) {
+                Ok(Ns(ns, _)) => {
+                    tracing::warn!(%ns, "dropped while connected");
+                    (ns, Packet::Disconnect, None)
+                }
+                Err(_) => return Ok(()),
+            },
             Directive::Event {
                 payload,
                 tx,

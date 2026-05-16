@@ -50,7 +50,7 @@ impl TransportStrategy {
                     let stream = WebSocketStream::connect(base_url, None, connector).await?;
 
                     stream
-                        .transport(Some(handshake_tx), engine_tx, transport_rx, token)
+                        .transport(Some(handshake_tx), engine_tx, transport_rx)
                         .await?;
 
                     Ok(())

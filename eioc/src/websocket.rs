@@ -14,7 +14,6 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Error as TungsteniteError;
 use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
 use tokio_tungstenite::{MaybeTlsStream, connect_async};
-use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use url::Url;
 
@@ -206,18 +205,16 @@ impl WebSocketStream {
         Ok(())
     }
 
-    /// Drives the WebSocket I/O loop until cancelled, the stream closes, or a channel closes.
+    /// Drives the WebSocket I/O loop until the stream or either channel closes.
     ///
     /// When `handshake_tx` is `Some`, reads the first `Open` frame and forwards the handshake
     /// (direct WebSocket transport). When `None`, sends `Upgrade` immediately (polling upgrade path).
-    /// Drains any queued outbound frames before closing the stream.
     #[tracing::instrument(skip_all, err)]
     pub async fn transport(
         mut self,
         handshake_tx: Option<oneshot::Sender<Handshake>>,
         engine_tx: EngineSender,
         mut transport_rx: mpsc::Receiver<Frame>,
-        token: CancellationToken,
     ) -> Result<(), TransportError> {
         match handshake_tx {
             Some(handshake_tx) => {
@@ -241,11 +238,6 @@ impl WebSocketStream {
 
         loop {
             tokio::select! {
-                _ = token.cancelled() => {
-                    tracing::debug!("cancelled websocket");
-                    break;
-                },
-
                 result = self.try_next() => {
                     let Some(frame) = result? else {
                         tracing::debug!("websocket stream closed");
@@ -264,12 +256,6 @@ impl WebSocketStream {
                     self.send(frame).await?;
                 }
             };
-        }
-
-        // Drain frames queued before the engine exited so the disconnect
-        // packet is not silently dropped by a concurrent cancellation.
-        while let Some(frame) = transport_rx.recv().await {
-            self.send(frame).await?;
         }
 
         self.close().await?;

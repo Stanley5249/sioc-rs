@@ -9,6 +9,7 @@ use miette::Diagnostic;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinError;
+use tokio::time::error::Elapsed;
 
 pub type BoxedError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
@@ -66,7 +67,7 @@ pub enum EngineError {
         code(eioc::engine::heartbeat_timeout),
         help("the server stopped responding; check the network or server load")
     )]
-    HeartbeatTimeout,
+    HeartbeatTimeout(#[from] Elapsed),
 
     /// An unexpected packet was received during the session.
     #[error("unexpected packet {0:?}")]

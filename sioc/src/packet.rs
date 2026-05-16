@@ -207,6 +207,8 @@ pub enum Directive {
         id: u64,
         attachments: Option<Vec<Bytes>>,
     },
+    /// Sent by `SocketSenderInner::drop`; the manager warns if the namespace is still live.
+    Dropped,
 }
 
 /// A wire-level packet decoded from a single text frame.

@@ -5,10 +5,9 @@ use crate::packet::{Frame, Handshake, Message, Packet};
 use crate::transport::TransportStrategy;
 use crate::websocket::WebSocketConnector;
 use futures_util::{Sink, SinkExt};
-use std::pin::Pin;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tokio::time::Sleep;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -123,20 +122,20 @@ impl Engine {
 }
 
 struct Heartbeat {
-    timer: Pin<Box<Sleep>>,
+    deadline: Instant,
     ping_window: std::time::Duration,
 }
 
 impl Heartbeat {
     fn new(ping_window: std::time::Duration) -> Self {
         Self {
-            timer: Box::pin(tokio::time::sleep(ping_window)),
+            deadline: Instant::now() + ping_window,
             ping_window,
         }
     }
 
     fn reset(&mut self) {
-        self.timer = Box::pin(tokio::time::sleep(self.ping_window));
+        self.deadline = Instant::now() + self.ping_window;
     }
 }
 
@@ -160,17 +159,7 @@ where
 
     let mut heartbeat = Heartbeat::new(handshake.ping_window());
 
-    loop {
-        let option = tokio::select! {
-            _ = &mut heartbeat.timer => return Err(EngineError::HeartbeatTimeout),
-            option = engine_rx.recv() => option,
-        };
-
-        let Some(action) = option else {
-            tracing::debug!("engine channel closed");
-            break;
-        };
-
+    while let Some(action) = tokio::time::timeout_at(heartbeat.deadline, engine_rx.recv()).await? {
         match action {
             EngineAction::Transport(frame) => match frame {
                 Frame::Packet(packet) => {

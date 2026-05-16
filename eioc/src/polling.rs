@@ -256,9 +256,7 @@ impl PollingClient {
             let transport_rx = post_result?;
             let stream = stream_result?;
 
-            stream
-                .transport(None, engine_tx, transport_rx, token)
-                .await?;
+            stream.transport(None, engine_tx, transport_rx).await?;
         } else {
             let post_fut = self.post_until_closed(&url, transport_rx);
 
