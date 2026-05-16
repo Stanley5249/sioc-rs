@@ -1,9 +1,9 @@
-/// Demonstrates a Socket.IO client exchanging typed events and acknowledgements with a Python server.
-///
-/// `sioc` derive macros enforce event schemas at compile time: `EventType`/`AckType` define the
-/// event contract, `SerializePayload`/`DeserializePayload` handle wire encoding, and `EventRouter`
-/// dispatches incoming events by name.
-///
+//! Demonstrates a Socket.IO client exchanging typed events and acknowledgements
+//! with a Python server. `sioc` derive macros enforce event schemas at compile
+//! time: [`EventType`]/[`AckType`] define the event contract,
+//! [`SerializePayload`]/[`DeserializePayload`] handle wire encoding, and
+//! [`EventRouter`] dispatches incoming events by name.
+
 use miette::{IntoDiagnostic, Result};
 use sioc::prelude::*;
 use std::time::Duration;
@@ -13,45 +13,45 @@ use url::Url;
 /// Server -> Client event
 #[derive(Debug, EventType, DeserializePayload)]
 #[sioc(event(name = "greeting"))]
-struct Greeting {
-    message: String,
+pub struct Greeting {
+    pub message: String,
 }
 
 /// Client -> Server event
 #[derive(Debug, EventType, SerializePayload)]
 #[sioc(event(name = "reply"))]
-struct Reply {
-    text: String,
+pub struct Reply {
+    pub text: String,
 }
 
 /// Server -> Client event with ack
 #[derive(Debug, EventType, DeserializePayload)]
 #[sioc(event(name = "poll", ack = "Vote"))]
-struct Survey {
-    question: String,
-    options: Vec<String>,
+pub struct Survey {
+    pub question: String,
+    pub options: Vec<String>,
 }
 
 /// Ack for [`Survey`] event from client
 #[derive(Debug, AckType, SerializePayload)]
-struct Vote(usize);
+pub struct Vote(pub usize);
 
 /// Client -> Server event with ack
 #[derive(Debug, EventType, SerializePayload)]
 #[sioc(event(name = "join", ack = "RoomInfo"))]
-struct Join {
-    room: String,
+pub struct Join {
+    pub room: String,
 }
 
 /// Ack for [`Join`] event from server
 #[derive(Debug, AckType, DeserializePayload)]
-struct RoomInfo {
-    count: u32,
+pub struct RoomInfo {
+    pub count: u32,
 }
 
 /// Routes incoming server events by name.
 #[derive(Debug, EventRouter)]
-enum MyEvent {
+pub enum MyEvent {
     Greeting(Event<Greeting>),
     Survey(Event<Survey>),
 }
