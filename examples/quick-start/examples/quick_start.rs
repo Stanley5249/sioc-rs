@@ -73,7 +73,7 @@ async fn run() -> Result<()> {
         .timeout(Duration::from_secs(5))
         .await?;
 
-    tracing::info!(room, count, "join room");
+    println!("joined {room} with {count} members");
 
     while let Some(event) = rx.listen::<MyEvent>().await? {
         match event {
@@ -81,11 +81,9 @@ async fn run() -> Result<()> {
                 payload: Greeting { message },
                 ..
             }) => {
-                let reply = "glad to be here!".into();
+                println!("greeting: {message}");
 
-                tracing::info!(message, reply, "greeting");
-
-                tx.emit(Reply { text: reply }).await?;
+                tx.emit(Reply { text: "glad to be here!".into() }).await?;
             }
             MyEvent::Survey(Event {
                 payload: Survey { question, options },
@@ -97,7 +95,7 @@ async fn run() -> Result<()> {
                     .position(|s| s.eq_ignore_ascii_case("Rust"))
                     .unwrap_or_default();
 
-                tracing::info!(question, ?options, vote = options[i], "voting");
+                println!("{question}\n{options:?}");
 
                 tx.acknowledge(id, Vote(i)).await?;
             }
