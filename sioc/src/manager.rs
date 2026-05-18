@@ -4,7 +4,7 @@ use crate::error::{ManagerError, PacketError};
 use crate::packet::{Connect, ConnectError, Directive, DynAck, DynEvent, Ns, Packet, Signal};
 use bytes::Bytes;
 use bytestring::ByteString;
-use eioc::engine::{Engine, EngineSender};
+use eioc::engine::{Engine, MessageSender};
 use eioc::prelude::Message;
 use futures_util::{Sink, SinkExt, future};
 use std::collections::BTreeMap;
@@ -360,7 +360,7 @@ impl Manager {
     /// Encodes and sends (or buffers) one outbound directive.
     async fn dispatch_directive(
         &mut self,
-        engine_tx: &EngineSender,
+        message_tx: &MessageSender,
         ns: ByteString,
         directive: Directive,
     ) -> Result<(), ManagerError> {
@@ -442,7 +442,7 @@ impl Manager {
             None => {
                 tracing::trace!(%ns, %packet, "-> packet");
                 for message in messages {
-                    engine_tx.send(message).await?;
+                    message_tx.send(message).await?;
                 }
             }
         }
@@ -452,12 +452,12 @@ impl Manager {
 
     async fn route_message(
         &mut self,
-        engine_tx: &EngineSender,
+        message_tx: &MessageSender,
         message: Message,
     ) -> Result<(), ManagerError> {
         match message {
             Message::Text(text) => {
-                self.route_text_message(text, engine_tx).await?;
+                self.route_text_message(text, message_tx).await?;
             }
 
             Message::Binary(attachment) => {
@@ -476,7 +476,7 @@ impl Manager {
     async fn route_text_message(
         &mut self,
         text: ByteString,
-        engine_tx: &EngineSender,
+        message_tx: &MessageSender,
     ) -> Result<(), ManagerError> {
         if self.reconstructor.is_pending() {
             return Err(ManagerError::UnexpectedText(text));
@@ -498,7 +498,7 @@ impl Manager {
                     tracing::trace!(%ns, count, "flushed buffer");
 
                     for message in socket.buffer.drain(..) {
-                        engine_tx.send(message).await?;
+                        message_tx.send(message).await?;
                     }
                 }
 
@@ -583,7 +583,7 @@ mod tests {
 
     fn mock_engine(tx: mpsc::Sender<EngineAction>) -> Engine {
         Engine {
-            tx: EngineSender(tx),
+            tx: MessageSender(tx),
             engine_handle: tokio::spawn(async { Ok(()) }),
             transport_handle: tokio::spawn(async { Ok(()) }),
         }
@@ -595,9 +595,9 @@ mod tests {
         mpsc::Receiver<EngineAction>,
         JoinHandle<Result<(), ManagerError>>,
     ) {
-        let (engine_tx, engine_rx) = mpsc::channel(32);
+        let (message_tx, engine_rx) = mpsc::channel(32);
         let (manager_tx, manager_rx) = mpsc::channel(32);
-        let handle = tokio::spawn(Manager::new(manager_rx).socket_io(mock_engine(engine_tx)));
+        let handle = tokio::spawn(Manager::new(manager_rx).socket_io(mock_engine(message_tx)));
         (manager_tx, engine_rx, handle)
     }
 

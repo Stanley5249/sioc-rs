@@ -32,23 +32,30 @@ impl From<Message> for EngineAction {
     }
 }
 
-/// Sends [`EngineAction`]s to the engine task.
+/// Sends [`Frame`]s to the engine task (transport layer use).
 #[derive(Clone, Debug)]
-pub struct EngineSender(pub mpsc::Sender<EngineAction>);
+pub struct FrameSender(pub mpsc::Sender<EngineAction>);
 
-impl EngineSender {
-    pub async fn send<T>(&self, action: T) -> Result<(), mpsc::error::SendError<EngineAction>>
-    where
-        T: Into<EngineAction>,
-    {
-        self.0.send(action.into()).await
+impl FrameSender {
+    pub async fn send(&self, frame: Frame) -> Result<(), mpsc::error::SendError<EngineAction>> {
+        self.0.send(EngineAction::Transport(frame)).await
+    }
+}
+
+/// Sends [`Message`]s to the engine task (Socket.IO layer use).
+#[derive(Clone, Debug)]
+pub struct MessageSender(pub mpsc::Sender<EngineAction>);
+
+impl MessageSender {
+    pub async fn send(&self, message: Message) -> Result<(), mpsc::error::SendError<EngineAction>> {
+        self.0.send(EngineAction::Sink(message)).await
     }
 }
 
 /// Channel-based handles to the Engine.IO protocol and transport tasks.
 pub struct Engine {
     /// Sender for delivering outbound messages from the Socket.IO layer to the engine.
-    pub tx: EngineSender,
+    pub tx: MessageSender,
     /// Handle for the engine protocol task.
     pub engine_handle: JoinHandle<Result<(), EngineError>>,
     /// Handle for the transport coordination task.
@@ -79,7 +86,8 @@ impl Engine {
 
         let (handshake_tx, handshake_rx) = oneshot::channel();
 
-        let engine_tx = EngineSender(engine_tx);
+        let frame_tx = FrameSender(engine_tx.clone());
+        let message_tx = MessageSender(engine_tx);
 
         let token = CancellationToken::new();
 
@@ -88,7 +96,7 @@ impl Engine {
             http_client,
             websocket_connector,
             handshake_tx,
-            engine_tx.clone(),
+            frame_tx,
             transport_rx,
             token.clone(),
         );
@@ -102,7 +110,7 @@ impl Engine {
         ));
 
         Self {
-            tx: engine_tx,
+            tx: message_tx,
             engine_handle,
             transport_handle,
         }

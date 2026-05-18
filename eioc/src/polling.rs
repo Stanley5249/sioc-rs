@@ -1,7 +1,7 @@
 //! HTTP long-polling transport tasks for Engine.IO v4.
 
 use crate::ENGINE_IO_VERSION;
-use crate::engine::EngineSender;
+use crate::engine::FrameSender;
 use crate::error::{PollingError, TransportError};
 use crate::packet::{Frame, Handshake, Packet};
 use crate::prelude::WebSocketStream;
@@ -185,18 +185,18 @@ impl PollingClient {
     async fn get_until_cancelled(
         &self,
         url: &Url,
-        engine_tx: EngineSender,
+        frame_tx: FrameSender,
         token: CancellationToken,
-    ) -> Result<EngineSender, TransportError> {
+    ) -> Result<FrameSender, TransportError> {
         while !token.is_cancelled() {
             for frame in self.get(url).await? {
-                engine_tx.send(frame).await?;
+                frame_tx.send(frame).await?;
             }
         }
 
         tracing::debug!("cancelled polling GET");
 
-        Ok(engine_tx)
+        Ok(frame_tx)
     }
 
     /// Runs the full polling transport lifecycle: handshake, GET/POST loops, and optional WebSocket upgrade.
@@ -206,7 +206,7 @@ impl PollingClient {
         base_url: Url,
         connector: C,
         handshake_tx: oneshot::Sender<Handshake>,
-        engine_tx: EngineSender,
+        frame_tx: FrameSender,
         transport_rx: mpsc::Receiver<Frame>,
         token: CancellationToken,
     ) -> Result<(), TransportError>
@@ -234,7 +234,7 @@ impl PollingClient {
 
         let child_token = token.child_token();
 
-        let get_fut = self.get_until_cancelled(&url, engine_tx, child_token.clone());
+        let get_fut = self.get_until_cancelled(&url, frame_tx, child_token.clone());
 
         if do_upgrade {
             let post_fut = self.post_until_cancelled(&url, transport_rx, child_token.clone());
@@ -252,11 +252,11 @@ impl PollingClient {
             let (get_result, post_result, stream_result) =
                 tokio::join!(get_fut, post_fut, stream_fut);
 
-            let engine_tx = get_result?;
+            let frame_tx = get_result?;
             let transport_rx = post_result?;
             let stream = stream_result?;
 
-            stream.transport(None, engine_tx, transport_rx).await?;
+            stream.transport(None, frame_tx, transport_rx).await?;
         } else {
             let post_fut = self.post_until_closed(&url, transport_rx);
 

@@ -37,7 +37,7 @@ pub const ENGINE_IO_VERSION: &str = "4";
 
 /// Convenience re-exports for common usage.
 pub mod prelude {
-    pub use crate::engine::{EngineAction, EngineSender};
+    pub use crate::engine::{EngineAction, FrameSender, MessageSender};
     pub use crate::packet::{Handshake, Message, Packet};
     pub use crate::transport::TransportStrategy;
     pub use crate::websocket::{WebSocketConnector, WebSocketStream};

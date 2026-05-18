@@ -1,7 +1,7 @@
 //! WebSocket transport for Engine.IO v4.
 
 use crate::ENGINE_IO_VERSION;
-use crate::engine::EngineSender;
+use crate::engine::FrameSender;
 use crate::error::{TransportError, WebSocketError};
 use crate::packet::{Frame, Handshake, PROBE, Packet};
 use bytestring::ByteString;
@@ -213,7 +213,7 @@ impl WebSocketStream {
     pub async fn transport(
         mut self,
         handshake_tx: Option<oneshot::Sender<Handshake>>,
-        engine_tx: EngineSender,
+        frame_tx: FrameSender,
         mut transport_rx: mpsc::Receiver<Frame>,
     ) -> Result<(), TransportError> {
         match handshake_tx {
@@ -244,7 +244,7 @@ impl WebSocketStream {
                         break;
                     };
 
-                    engine_tx.send(frame).await?;
+                    frame_tx.send(frame).await?;
                 }
 
                 option = transport_rx.recv() => {
