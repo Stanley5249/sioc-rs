@@ -2,7 +2,7 @@
 
 A type-safe, async [Socket.IO protocol v5](https://socket.io/docs/v4/socket-io-protocol/) client for Rust.
 
-## What is Socket.IO?
+## What is the Socket.IO protocol?
 
 The [Socket.IO protocol v5](https://socket.io/docs/v4/socket-io-protocol/) is a real-time, bidirectional event-based communication protocol built on top of the [Engine.IO protocol v4](https://socket.io/docs/v4/engine-io-protocol/).
 
