@@ -3,7 +3,7 @@
 [![crates.io](https://img.shields.io/crates/v/sioc.svg)](https://crates.io/crates/sioc)
 [![docs.rs](https://docs.rs/sioc/badge.svg)](https://docs.rs/sioc)
 
-A type-safe, async [Socket.IO](https://socket.io) client for Rust.
+A type-safe, async [Socket.IO protocol v5](https://socket.io/docs/v4/socket-io-protocol/) client for Rust.
 
 ## Quick Start
 
@@ -116,22 +116,28 @@ while let Some(event) = rx.listen::<MyEvent>().await? {
 }
 ```
 
-To summarize the derive traits: outgoing packets need `SerializePayload` and incoming packets need `DeserializePayload`. Their fields must implement `Serialize` and `Deserialize` from serde respectively.
+## Status
 
-## Design
-
-sioc is built as an actor-model client. Tasks communicate through channels and no lock mechanism is used internally. It is built on top of async from the ground up and uses zero-copy parsing throughout.
-
-The key insight is that proc macros and Rust's type system can do the work that most Socket.IO clients push onto runtime callbacks. Event names, payload shapes, and ack associations are all resolved at compile time.
+Early development. Expect breaking changes. Benchmarks and test coverage are not yet comprehensive. This does not attempt to pass the JavaScript Socket.IO test suite.
 
 ## Comparison
 
-[rust-socketio](https://github.com/1c3t3a/rust-socketio) is the first Socket.IO client for Rust, but its callback-based model creates friction in async Rust:
+### Rust-socketio-client
 
-1. Callbacks must be `Send + Sync + 'static`, forcing `Arc<Mutex<T>>` for any shared state.
-2. Storing async callbacks requires boxing: `async move { ... }.boxed()` and `futures_util::FutureExt`.
+[rust-socketio](https://github.com/1c3t3a/rust-socketio) is another Socket.IO client for Rust, but its callback-based model creates friction in async Rust:
 
-sioc replaces callbacks with channels and enums. Event handling lives in match arms and state lives in the enclosing scope, with no boxing or shared-state boilerplate.
+1. Callbacks must be `Send + Sync + 'static`, forcing smart pointers and interior mutability for any shared state.
+2. Storing async callbacks requires boxed futures, which adds heap allocation and dynamic dispatch overhead.
+
+`sioc` replaces callbacks with channels and enums. Event handling lives in match arms and state lives in the enclosing scope, with no boxing or shared-state boilerplate.
+
+### Socketioxide
+
+[socketioxide](https://github.com/Totodore/socketioxide) is a Socket.IO server implementation that integrates with [Tower](https://github.com/tower-rs/tower) and [Tokio](https://github.com/tokio-rs/tokio) stack.
+
+Server and client use fundamentally different architectures, so `socketioxide`'s design doesn't translate to a client. `sioc` uses `tokio` as well, with networking built on top of `reqwest` and `tokio-tungstenite`.
+
+`socketioxide` uses callbacks for event handling, which is less of an issue for stateless servers. `sioc` offers stronger type safety for events and acks through its derive macros and type system.
 
 ## Examples
 
@@ -139,13 +145,9 @@ sioc replaces callbacks with channels and enums. Event handling lives in match a
 
 [`generals-io`](examples/generals-io) is the client for [generals.io](https://generals.io), the online strategy game that motivated this crate.
 
-## Status
-
-Early development. Expect breaking changes. Benchmarks and test coverage are not yet comprehensive. This does not attempt to pass the JavaScript Socket.IO test suite.
-
 ## Origin
 
-`sioc-rs` was written in the first year of learning Rust, finishing in May 2026. The goal was to build a generals.io bot, but existing clients made it frustrating enough to justify writing one from scratch. That turned out to be the fun part.
+`sioc` was written in the first year of learning Rust. It took 4 months to reach 0.1 and was published in May 2026. The goal was to build a generals.io bot, but existing clients made it frustrating enough to justify writing one from scratch. That turned out to be the fun part.
 
 AI helped with the learning journey, docstrings, and unit tests, but the design is entirely the author's own.
 
