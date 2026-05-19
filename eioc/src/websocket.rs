@@ -183,8 +183,8 @@ impl WebSocketStream {
     }
 
     /// Waits for the next frame, returning an error if the stream is closed.
-    async fn required_next(&mut self) -> Result<Frame, WebSocketError> {
-        self.try_next().await?.ok_or(WebSocketError::Closed)
+    async fn recv(&mut self) -> Result<Frame, WebSocketError> {
+        self.next().await.ok_or(WebSocketError::Closed).flatten()
     }
 
     /// Sends a probe `Ping` and expects a matching `Pong`, confirming the WebSocket path is live.
@@ -194,7 +194,7 @@ impl WebSocketStream {
 
         self.send(Packet::Ping(PROBE).into()).await?;
 
-        match self.required_next().await? {
+        match self.recv().await? {
             Frame::Packet(Packet::Pong(payload)) if payload == PROBE => {
                 tracing::debug!("<- PONG probe")
             }
@@ -218,7 +218,7 @@ impl WebSocketStream {
     ) -> Result<(), TransportError> {
         match handshake_tx {
             Some(handshake_tx) => {
-                let handshake = match self.required_next().await? {
+                let handshake = match self.recv().await? {
                     Frame::Packet(Packet::Open(handshake)) => handshake,
                     frame => return Err(TransportError::Open(frame)),
                 };

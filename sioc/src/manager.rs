@@ -4,7 +4,7 @@ use crate::error::{ManagerError, PacketError};
 use crate::packet::{Connect, ConnectError, Directive, DynAck, DynEvent, Ns, Packet, Signal};
 use bytes::Bytes;
 use bytestring::ByteString;
-use eioc::engine::{Engine, MessageSender};
+use eioc::engine::MessageSender;
 use eioc::prelude::Message;
 use futures_util::{Sink, SinkExt, future};
 use std::collections::BTreeMap;
@@ -321,36 +321,34 @@ impl Manager {
 
     /// Runs the socket routing loop until all namespaces disconnect.
     #[tracing::instrument(skip_all, err)]
-    pub async fn socket_io(mut self, engine: Engine) -> Result<(), ManagerError> {
-        let result = self.run(&engine).await;
+    pub async fn socket_io(mut self, tx: MessageSender) -> Result<(), ManagerError> {
+        let result = self.run(&tx).await;
 
         if !self.sockets.is_empty() {
             for (ns, _socket) in self.sockets.take() {
-                tracing::warn!(%ns, "namespace still connected at shutdown");
-                engine
-                    .tx
-                    .send(Message::Text(Packet::Disconnect.encode(&ns).into()))
+                tracing::warn!(%ns, "namespace still connected after closing manager");
+
+                tx.send(Message::Text(Packet::Disconnect.encode(&ns).into()))
                     .await?;
             }
-            engine.tx.send(Message::Close).await?;
+            tx.send(Message::Close).await?;
         }
 
-        engine.join().await?;
         result
     }
 
-    async fn run(&mut self, engine: &Engine) -> Result<(), ManagerError> {
+    async fn run(&mut self, tx: &MessageSender) -> Result<(), ManagerError> {
         while let Some(directive) = self.rx.recv().await {
             match directive {
                 ManagerAction::Socket(Ns(ns, packet)) => {
-                    self.dispatch_directive(&engine.tx, ns, packet).await?;
+                    self.dispatch_directive(tx, ns, packet).await?;
                 }
                 ManagerAction::Engine(message) => {
-                    self.route_message(&engine.tx, message).await?;
+                    self.route_message(tx, message).await?;
                 }
             }
             if self.sockets.is_empty() {
-                engine.tx.send(Message::Close).await?;
+                tx.send(Message::Close).await?;
                 break;
             }
         }
@@ -581,23 +579,18 @@ mod tests {
 
     const CONNECT_RESPONSE: &str = "0{\"sid\":\"test\"}";
 
-    fn mock_engine(tx: mpsc::Sender<EngineAction>) -> Engine {
-        Engine {
-            tx: MessageSender(tx),
-            engine_handle: tokio::spawn(async { Ok(()) }),
-            transport_handle: tokio::spawn(async { Ok(()) }),
-        }
-    }
-
     /// Spawns a manager and returns `(manager_tx, engine_rx, join_handle)`.
     fn setup_manager() -> (
         mpsc::Sender<ManagerAction>,
         mpsc::Receiver<EngineAction>,
         JoinHandle<Result<(), ManagerError>>,
     ) {
-        let (message_tx, engine_rx) = mpsc::channel(32);
+        let (engine_tx, engine_rx) = mpsc::channel(32);
+
         let (manager_tx, manager_rx) = mpsc::channel(32);
-        let handle = tokio::spawn(Manager::new(manager_rx).socket_io(mock_engine(message_tx)));
+
+        let handle = tokio::spawn(Manager::new(manager_rx).socket_io(MessageSender(engine_tx)));
+
         (manager_tx, engine_rx, handle)
     }
 

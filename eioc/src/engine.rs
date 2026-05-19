@@ -1,12 +1,11 @@
 //! Engine.IO protocol task.
 
-use crate::error::{EngineError, Error, TransportError};
+use crate::error::{EngineError, Error};
 use crate::packet::{Frame, Handshake, Message, Packet};
 use crate::transport::TransportStrategy;
 use crate::websocket::WebSocketConnector;
-use futures_util::{Sink, SinkExt};
+use futures_util::{Sink, SinkExt, TryFutureExt};
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -52,81 +51,51 @@ impl MessageSender {
     }
 }
 
-/// Channel-based handles to the Engine.IO protocol and transport tasks.
-pub struct Engine {
-    /// Sender for delivering outbound messages from the Socket.IO layer to the engine.
-    pub tx: MessageSender,
-    /// Handle for the engine protocol task.
-    pub engine_handle: JoinHandle<Result<(), EngineError>>,
-    /// Handle for the transport coordination task.
-    pub transport_handle: JoinHandle<Result<(), TransportError>>,
-}
+/// Drives the engine protocol and transport concurrently until the session ends.
+///
+/// `sink` receives decoded inbound [`Message`]s from the transport.
+/// The caller creates the engine channel, retains the [`MessageSender`] half,
+/// and passes the [`FrameSender`] and receiver here.
+#[allow(clippy::too_many_arguments)]
+pub async fn connect<C, S>(
+    url: Url,
+    http_client: reqwest::Client,
+    websocket_connector: C,
+    strategy: TransportStrategy,
+    sink: S,
+    engine_rx: mpsc::Receiver<EngineAction>,
+    frame_tx: FrameSender,
+    transport_capacity: usize,
+) -> Result<(), Error>
+where
+    C: WebSocketConnector,
+    S: Sink<Message> + Unpin + Send + 'static,
+    S::Error: std::error::Error + Send + Sync + 'static,
+{
+    let (transport_tx, transport_rx) = mpsc::channel(transport_capacity);
 
-impl Engine {
-    /// Spawns the engine and transport tasks and returns handles to both.
-    ///
-    /// `sink` receives decoded inbound [`Message`]s from the transport.
-    pub fn connect<C, S>(
-        url: Url,
-        http_client: reqwest::Client,
-        websocket_connector: C,
-        strategy: TransportStrategy,
-        sink: S,
-        engine_capacity: usize,
-        transport_capacity: usize,
-    ) -> Self
-    where
-        C: WebSocketConnector,
-        S: Sink<Message> + Unpin + Send + 'static,
-        S::Error: std::error::Error + Send + Sync + 'static,
-    {
-        let (engine_tx, engine_rx) = mpsc::channel(engine_capacity);
+    let (handshake_tx, handshake_rx) = oneshot::channel();
 
-        let (transport_tx, transport_rx) = mpsc::channel(transport_capacity);
+    let token = CancellationToken::new();
 
-        let (handshake_tx, handshake_rx) = oneshot::channel();
+    let eio_future = engine_io(sink, engine_rx, transport_tx, handshake_rx, token.clone());
 
-        let frame_tx = FrameSender(engine_tx.clone());
-        let message_tx = MessageSender(engine_tx);
+    let transport_future = strategy.run(
+        url,
+        http_client,
+        websocket_connector,
+        handshake_tx,
+        frame_tx,
+        transport_rx,
+        token,
+    );
 
-        let token = CancellationToken::new();
+    tokio::try_join!(
+        eio_future.map_err(Error::Engine),
+        transport_future.map_err(Error::Transport),
+    )?;
 
-        let transport_handle = strategy.connect(
-            url,
-            http_client,
-            websocket_connector,
-            handshake_tx,
-            frame_tx,
-            transport_rx,
-            token.clone(),
-        );
-
-        let engine_handle = tokio::spawn(engine_io(
-            sink,
-            engine_rx,
-            transport_tx,
-            handshake_rx,
-            token,
-        ));
-
-        Self {
-            tx: message_tx,
-            engine_handle,
-            transport_handle,
-        }
-    }
-
-    /// Awaits the engine and transport tasks.
-    ///
-    /// The caller must send [`Message::Close`] before calling this so the engine
-    /// exits naturally and the drop guard propagates cancellation to the transport.
-    pub async fn join(self) -> Result<(), Error> {
-        let (engine_result, transport_result) =
-            tokio::join!(self.engine_handle, self.transport_handle);
-        engine_result.map_err(EngineError::Join)??;
-        transport_result.map_err(TransportError::Join)??;
-        Ok(())
-    }
+    Ok(())
 }
 
 struct Heartbeat {

@@ -83,7 +83,10 @@ async fn run() -> Result<()> {
             }) => {
                 println!("greeting: {message}");
 
-                tx.emit(Reply { text: "glad to be here!".into() }).await?;
+                tx.emit(Reply {
+                    text: "glad to be here!".into(),
+                })
+                .await?;
             }
             MyEvent::Survey(Event {
                 payload: Survey { question, options },
@@ -102,7 +105,7 @@ async fn run() -> Result<()> {
         }
     }
 
-    tx.disconnect().await?;
+    tx.disconnect().await;
 
     client.join().await?;
 

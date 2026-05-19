@@ -8,9 +8,10 @@ use crate::manager::{DirectiveSender, Manager, ManagerAction, message_sink};
 use crate::marker::{AckId, AckMarker, BinaryMarker};
 use crate::packet::{Directive, DynEvent, Signal};
 use bytestring::ByteString;
-use eioc::engine::Engine;
+use eioc::engine::{FrameSender, MessageSender};
 use eioc::transport::TransportStrategy;
 use eioc::websocket::WebSocketConnector;
+use futures_util::TryFutureExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
@@ -147,7 +148,7 @@ where
 
     /// Connects to the Engine.IO server and returns a [`Client`].
     ///
-    /// Spawns the engine and transport tasks in the background.
+    /// Spawns the manager task, which drives the engine and transport concurrently.
     #[must_use = "dropping the Client stops the background tasks"]
     pub fn open(self) -> Result<Client, ClientBuilderError> {
         let http_client = self.http_client.unwrap_or_default();
@@ -156,23 +157,37 @@ where
 
         let (manager_tx, manager_rx) = mpsc::channel::<ManagerAction>(self.channels.manager);
 
-        let engine = Engine::connect(
+        let (engine_tx, engine_rx) = mpsc::channel(self.channels.engine);
+
+        let frame_tx = FrameSender(engine_tx.clone());
+
+        let message_tx = MessageSender(engine_tx);
+
+        let manager = Manager::new(manager_rx);
+
+        let sio_future = manager.socket_io(message_tx);
+
+        let eio_future = eioc::engine::connect(
             url,
             http_client,
             websocket_connector,
             self.transport_strategy,
             message_sink(manager_tx.clone()),
-            self.channels.engine,
+            engine_rx,
+            frame_tx,
             self.channels.transport,
         );
 
-        let manager = Manager::new(manager_rx);
+        let eio_future = eio_future.map_err(ManagerError::Engine);
 
-        let manager_handle = tokio::spawn(manager.socket_io(engine));
+        let handle = tokio::spawn(async {
+            tokio::try_join!(sio_future, eio_future)?;
+            Ok(())
+        });
 
         Ok(Client {
             tx: DirectiveSender::new(manager_tx),
-            handle: manager_handle,
+            handle,
             socket_capacity: self.channels.socket,
         })
     }
@@ -303,13 +318,15 @@ impl SocketSender {
 
     /// Sends a graceful disconnect packet and marks this sender as disconnected.
     ///
-    /// Idempotent: subsequent calls return `Ok(())` immediately. Prefer this over dropping
-    /// when you need a guaranteed async send rather than the fire-and-forget `try_send` in `Drop`.
-    pub async fn disconnect(&self) -> Result<(), SocketError> {
+    /// Idempotent: subsequent calls and calls made after a server-initiated disconnect
+    /// both return immediately. Prefer this over dropping when you need a guaranteed
+    /// async send rather than the fire-and-forget `try_send` in `Drop`.
+    pub async fn disconnect(&self) {
         if !self.0.disconnected.swap(true, Ordering::Relaxed) {
-            self.0.send(Directive::Disconnect).await?;
+            // Ignore SendError: a closed channel means the manager already handled
+            // the disconnect (server-initiated), so we are already disconnected.
+            let _ = self.0.send(Directive::Disconnect).await;
         }
-        Ok(())
     }
 }
 

@@ -6,7 +6,7 @@
 pub struct ChannelConfig {
     /// Engine task inbox: frames from the transport and messages from the Socket.IO layer.
     pub engine: usize,
-    /// Transport task inbox: encoded frames from the engine task.
+    /// Transport channel: encoded frames to send to the transport.
     pub transport: usize,
     /// Manager task inbox: directives from all namespace senders.
     pub manager: usize,

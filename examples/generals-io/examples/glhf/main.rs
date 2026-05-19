@@ -13,7 +13,7 @@ const ENDPOINT: &str = "https://ws.generals.io";
 
 async fn disconnect(tx: SocketSender) -> Result<()> {
     tokio::signal::ctrl_c().await.into_diagnostic()?;
-    tx.disconnect().await?;
+    tx.disconnect().await;
     Ok(())
 }
 

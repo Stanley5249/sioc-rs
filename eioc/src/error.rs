@@ -8,10 +8,7 @@ use bytestring::ByteString;
 use miette::Diagnostic;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinError;
 use tokio::time::error::Elapsed;
-
-pub type BoxedError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 /// Top-level error aggregator for `eioc`.
 #[derive(Debug, Error, Diagnostic)]
@@ -44,7 +41,7 @@ pub enum EngineError {
     )]
     // Keep as `#[source]` (not `#[from]`) so type-erased errors do not
     // implicitly convert into `EngineError` at unrelated call sites.
-    SendSink(#[source] BoxedError),
+    SendSink(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
 
     /// The handshake oneshot channel was dropped before the server responded.
     #[error("failed to receive Engine.IO handshake")]
@@ -55,11 +52,6 @@ pub enum EngineError {
         )
     )]
     RecvHandshake(#[from] oneshot::error::RecvError),
-
-    /// A background engine task panicked or was cancelled.
-    #[error("background task failed")]
-    #[diagnostic(code(eioc::engine::join))]
-    Join(#[from] JoinError),
 
     /// The server stopped sending heartbeat pings within the expected window.
     #[error("heartbeat timeout")]
@@ -110,11 +102,6 @@ pub enum TransportError {
         )
     )]
     SendHandshake(Handshake),
-
-    /// A background transport task panicked or was cancelled.
-    #[error("background transport task failed")]
-    #[diagnostic(code(eioc::transport::join))]
-    Join(#[from] JoinError),
 
     /// The first frame received was not an Open packet.
     #[error("expected Open packet as first frame")]

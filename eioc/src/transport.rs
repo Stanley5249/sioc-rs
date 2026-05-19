@@ -9,7 +9,6 @@ use crate::packet::{Frame, Handshake};
 use crate::polling::PollingClient;
 use crate::websocket::{WebSocketConnector, WebSocketStream};
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -21,10 +20,10 @@ pub enum TransportStrategy {
 }
 
 impl TransportStrategy {
-    /// Spawns the transport coordination task and returns its handle.
+    /// Runs the transport lifecycle to completion.
     #[allow(clippy::too_many_arguments)]
-    pub fn connect<C>(
-        &self,
+    pub async fn run<C>(
+        self,
         base_url: Url,
         http_client: reqwest::Client,
         connector: C,
@@ -32,30 +31,32 @@ impl TransportStrategy {
         frame_tx: FrameSender,
         transport_rx: mpsc::Receiver<Frame>,
         token: CancellationToken,
-    ) -> JoinHandle<Result<(), TransportError>>
+    ) -> Result<(), TransportError>
     where
-        C: WebSocketConnector,
+        C: WebSocketConnector + Send + 'static,
     {
         match self {
-            TransportStrategy::Polling => tokio::spawn(PollingClient(http_client).transport(
-                base_url,
-                connector,
-                handshake_tx,
-                frame_tx,
-                transport_rx,
-                token,
-            )),
-            TransportStrategy::WebSocket => tokio::spawn({
-                async {
-                    let stream = WebSocketStream::connect(base_url, None, connector).await?;
+            TransportStrategy::Polling => {
+                PollingClient(http_client)
+                    .transport(
+                        base_url,
+                        connector,
+                        handshake_tx,
+                        frame_tx,
+                        transport_rx,
+                        token,
+                    )
+                    .await
+            }
+            TransportStrategy::WebSocket => {
+                let stream = WebSocketStream::connect(base_url, None, connector).await?;
 
-                    stream
-                        .transport(Some(handshake_tx), frame_tx, transport_rx)
-                        .await?;
+                stream
+                    .transport(Some(handshake_tx), frame_tx, transport_rx)
+                    .await?;
 
-                    Ok(())
-                }
-            }),
+                Ok(())
+            }
         }
     }
 }
