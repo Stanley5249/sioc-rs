@@ -1,4 +1,8 @@
 #![doc = include_str!("../README.md")]
+#![warn(missing_docs)]
+#![warn(clippy::doc_markdown)]
+#![warn(clippy::missing_errors_doc)]
+#![warn(clippy::missing_panics_doc)]
 
 pub mod engine;
 pub mod error;

@@ -200,6 +200,10 @@ impl PollingClient {
     }
 
     /// Runs the full polling transport lifecycle: handshake, GET/POST loops, and optional WebSocket upgrade.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a network, protocol, or channel failure occurs.
     #[tracing::instrument(skip_all, err)]
     pub async fn transport<C>(
         self,

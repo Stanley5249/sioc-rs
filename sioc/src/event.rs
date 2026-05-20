@@ -95,9 +95,16 @@ where
     }
 }
 
+/// Constructs a typed event from raw parts; used by the `EventRouter` derive macro.
 pub trait EventHandler: Sized {
+    /// The event type this handler processes.
     type Payload: EventType;
 
+    /// Builds `Self` from a deserialized payload, raw ack ID, and raw attachments.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the ack ID or attachment policy is violated, or deserialization fails.
     fn handle(
         payload: Self::Payload,
         id: Option<u64>,
@@ -110,6 +117,7 @@ pub trait EventHandler: Sized {
 /// Combines `TryFrom<DynEvent>` with a `name()` method that returns the
 /// Socket.IO event name of the matched variant.
 pub trait EventRouter: TryFrom<DynEvent, Error = EventError> {
+    /// Returns the Socket.IO event name of the matched variant.
     fn name(&self) -> &'static str;
 }
 

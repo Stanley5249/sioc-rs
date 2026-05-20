@@ -12,15 +12,22 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+/// Selects which transport to use when opening an Engine.IO connection.
 #[derive(Debug, Default)]
 pub enum TransportStrategy {
+    /// Start with HTTP long-polling, then upgrade to WebSocket when the server offers it.
     #[default]
     Polling,
+    /// Connect directly over WebSocket, skipping the polling handshake.
     WebSocket,
 }
 
 impl TransportStrategy {
     /// Runs the transport lifecycle to completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the transport encounters a protocol or I/O failure.
     #[allow(clippy::too_many_arguments)]
     pub async fn run<C>(
         self,

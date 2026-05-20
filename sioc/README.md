@@ -10,7 +10,7 @@ It adds _namespaces_ for multiple channels over a single connection, _events_ as
 
 ## Design
 
-- Async networking built on [Tokio](https://tokio.rs), [reqwest](https://docs.rs/reqwest), and [tokio-tungstenite](https://docs.rs/tokio-tungstenite).
+- Async networking built on [`tokio`](https://docs.rs/tokio), [`reqwest`](https://docs.rs/reqwest), and [`tokio-tungstenite`](https://docs.rs/tokio-tungstenite).
 - Actor-model client, communicating through channels, no internal locks.
 - Derive macros for events and acks.
 - Event handling lives in match arms, no callbacks with boxed futures.

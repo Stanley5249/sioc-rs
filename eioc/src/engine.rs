@@ -36,6 +36,11 @@ impl From<Message> for EngineAction {
 pub struct FrameSender(pub mpsc::Sender<EngineAction>);
 
 impl FrameSender {
+    /// Sends a [`Frame`] to the engine task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the engine task has exited.
     pub async fn send(&self, frame: Frame) -> Result<(), mpsc::error::SendError<EngineAction>> {
         self.0.send(EngineAction::Transport(frame)).await
     }
@@ -46,6 +51,11 @@ impl FrameSender {
 pub struct MessageSender(pub mpsc::Sender<EngineAction>);
 
 impl MessageSender {
+    /// Sends a [`Message`] to the engine task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the engine task has exited.
     pub async fn send(&self, message: Message) -> Result<(), mpsc::error::SendError<EngineAction>> {
         self.0.send(EngineAction::Sink(message)).await
     }
@@ -56,6 +66,10 @@ impl MessageSender {
 /// `sink` receives decoded inbound [`Message`]s from the transport.
 /// The caller creates the engine channel, retains the [`MessageSender`] half,
 /// and passes the [`FrameSender`] and receiver here.
+///
+/// # Errors
+///
+/// Returns an error if either the engine or transport task fails.
 #[allow(clippy::too_many_arguments)]
 pub async fn connect<C, S>(
     url: Url,

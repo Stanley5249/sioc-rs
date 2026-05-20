@@ -1,3 +1,5 @@
+//! Payload serialization and deserialization traits and helpers.
+
 use crate::ack::AckType;
 use crate::error::PayloadError;
 use crate::event::EventType;
@@ -5,6 +7,10 @@ use serde::ser::SerializeSeq;
 use std::marker::PhantomData;
 
 /// Serializes `payload` to JSON, returning the encoded string.
+///
+/// # Errors
+///
+/// Returns an error if serialization fails.
 pub fn to_json<T>(payload: &T) -> Result<String, PayloadError>
 where
     T: serde::Serialize,
@@ -21,6 +27,10 @@ where
 }
 
 /// Deserializes a JSON string slice into `T`.
+///
+/// # Errors
+///
+/// Returns an error if deserialization fails.
 pub fn from_json<'de, T>(payload: &'de str) -> Result<T, PayloadError>
 where
     T: serde::Deserialize<'de>,
@@ -33,6 +43,10 @@ where
 }
 
 /// Serializes an [`EventType`] + [`SerializePayload`] value into its wire-format string representation.
+///
+/// # Errors
+///
+/// Returns an error if serialization fails.
 pub fn event_to_json<E>(event: &E) -> Result<String, PayloadError>
 where
     E: EventType + SerializePayload,
@@ -41,6 +55,10 @@ where
 }
 
 /// Deserializes a wire-format string into a typed [`EventType`] + [`DeserializePayload`] value.
+///
+/// # Errors
+///
+/// Returns an error if deserialization fails.
 pub fn event_from_json<E>(payload: &str) -> Result<E, PayloadError>
 where
     E: EventType + DeserializePayload,
@@ -50,6 +68,10 @@ where
 }
 
 /// Serializes an [`AckType`] + [`SerializePayload`] value into its wire-format string representation.
+///
+/// # Errors
+///
+/// Returns an error if serialization fails.
 pub fn ack_to_json<A>(payload: &A) -> Result<String, PayloadError>
 where
     A: AckType + SerializePayload,
@@ -58,6 +80,10 @@ where
 }
 
 /// Deserializes a wire-format string into a typed [`AckType`] + [`DeserializePayload`] value.
+///
+/// # Errors
+///
+/// Returns an error if deserialization fails.
 pub fn ack_from_json<A>(payload: &str) -> Result<A, PayloadError>
 where
     A: AckType + DeserializePayload,
@@ -68,6 +94,11 @@ where
 
 /// Serializes a struct's fields as sequential elements of a JSON array.
 pub trait SerializePayload {
+    /// Appends each field to `seq` in declaration order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying serializer fails.
     fn serialize_payload<S>(&self, seq: &mut S) -> std::result::Result<(), S::Error>
     where
         S: serde::ser::SerializeSeq;
@@ -75,6 +106,11 @@ pub trait SerializePayload {
 
 /// Deserializes a struct's fields from sequential elements of a JSON array.
 pub trait DeserializePayload: Sized {
+    /// Reads each field from `seq` in declaration order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the sequence is malformed or a field fails to deserialize.
     fn deserialize_payload<'de, S>(seq: &mut S) -> std::result::Result<Self, S::Error>
     where
         S: serde::de::SeqAccess<'de>;

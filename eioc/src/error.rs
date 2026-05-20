@@ -177,6 +177,7 @@ pub enum PollingError {
 
 /// Errors from decoding a raw Engine.IO packet.
 #[derive(Debug, Error, Diagnostic)]
+#[allow(missing_docs)]
 pub enum PacketError {
     /// Packet bytes are empty.
     #[error("empty packet")]

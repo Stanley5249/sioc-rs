@@ -37,6 +37,7 @@ impl PayloadError {
     }
 }
 
+/// Shorthand result type defaulting to the top-level [`Error`].
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Top-level error aggregator for the `sioc` public API.
@@ -44,10 +45,15 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 #[error(transparent)]
 #[diagnostic(transparent)]
 pub enum Error {
+    /// Error from [`ClientBuilder::open`](crate::client::ClientBuilder::open).
     Builder(#[from] ClientBuilderError),
+    /// Error from [`Client::join`](crate::client::Client::join).
     Client(#[from] ClientError),
+    /// Error from a [`SocketSender`](crate::client::SocketSender) operation.
     Socket(#[from] SocketError),
+    /// Error converting a [`DynEvent`](crate::packet::DynEvent) into a typed event.
     Event(#[from] EventError),
+    /// Error receiving or parsing an acknowledgement.
     Ack(#[from] AckError),
 }
 
@@ -137,6 +143,7 @@ pub enum AckError {
 /// Ack ID presence mismatch between the inbound packet and the event type's policy.
 #[derive(Debug, Error, Diagnostic)]
 pub enum AckIdError {
+    /// Event declares `HasAck` but the server sent no ack ID.
     #[error("ack ID was missing")]
     #[diagnostic(
         code(sioc::ack_id::missing),
@@ -146,6 +153,7 @@ pub enum AckIdError {
     )]
     Missing,
 
+    /// Event declares `NoAck` but the server sent an ack ID.
     #[error("ack ID was unexpected")]
     #[diagnostic(
         code(sioc::ack_id::unexpected),
@@ -159,6 +167,7 @@ pub enum AckIdError {
 /// Attachment presence mismatch between the inbound packet and the type's binary policy.
 #[derive(Debug, Error, Diagnostic)]
 pub enum AttachmentsError {
+    /// Type declares `HasBinary` but no attachments were in the packet.
     #[error("attachments were missing")]
     #[diagnostic(
         code(sioc::attachments::missing),
@@ -168,6 +177,7 @@ pub enum AttachmentsError {
     )]
     Missing,
 
+    /// Type declares `NoBinary` but the packet contained attachments.
     #[error("attachments were unexpected")]
     #[diagnostic(
         code(sioc::attachments::unexpected),
@@ -182,6 +192,7 @@ pub enum AttachmentsError {
 ///
 /// Callers receive this wrapped in [`ManagerError::Packet`].
 #[derive(Debug, Error, Diagnostic)]
+#[allow(missing_docs)]
 pub enum PacketError {
     /// JSON payload in the packet is malformed.
     #[error(transparent)]
@@ -236,6 +247,7 @@ pub enum PacketError {
 
 /// The top-level error type for Socket.IO manager operations.
 #[derive(Debug, Error, Diagnostic)]
+#[allow(missing_docs)]
 pub enum ManagerError {
     /// Error propagated from the Engine.IO transport layer.
     #[error(transparent)]

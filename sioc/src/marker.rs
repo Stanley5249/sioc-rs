@@ -25,8 +25,13 @@ pub trait AckMarker {
     type Id: Sized;
 
     /// Validates and extracts an ack ID from the wire-level `Option`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the presence of an ID does not match the policy.
     fn parse(id: Option<u64>) -> Result<Self::Id, AckIdError>;
 
+    /// Inserts the ack ID into `map` for debug output.
     fn format(id: &Self::Id, map: &mut DebugMap<'_, '_>);
 }
 
@@ -96,11 +101,16 @@ pub trait BinaryMarker {
     type Attachments: Sized;
 
     /// Validates and extracts attachments from the wire-level `Option`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if attachment presence does not match the policy.
     fn parse(attachment: Option<Vec<Bytes>>) -> Result<Self::Attachments, AttachmentsError>;
 
     /// Converts typed attachments back into the wire-level `Option`.
     fn get(attachments: Self::Attachments) -> Option<Vec<Bytes>>;
 
+    /// Inserts the attachment count into `map` for debug output.
     fn format(attachments: &Self::Attachments, map: &mut DebugMap<'_, '_>);
 }
 

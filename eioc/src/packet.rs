@@ -1,3 +1,5 @@
+//! Engine.IO packet types.
+
 use std::time::Duration;
 
 use crate::error::PacketError;
@@ -5,6 +7,7 @@ use bytes::Bytes;
 use bytestring::ByteString;
 use serde::Deserialize;
 
+/// Payload sent in the WebSocket upgrade probe ping and expected in the pong reply.
 pub const PROBE: ByteString = ByteString::from_static("probe");
 
 /// Content exchanged between the Socket.IO and Engine.IO layers.
@@ -87,6 +90,7 @@ pub struct Handshake {
 }
 
 impl Handshake {
+    /// Returns `true` if the server offered a WebSocket upgrade.
     pub fn can_upgrade_to_websocket(&self) -> bool {
         self.upgrades.iter().any(|u| u == "websocket")
     }
@@ -117,7 +121,11 @@ pub enum Packet {
 }
 
 impl Packet {
-    /// Write this packet into a [`String`].
+    /// Appends the wire encoding of this packet to `buffer`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called on `Open` or `Noop`, which are server-only packets.
     pub fn write(&self, buffer: &mut String) {
         match self {
             Self::Open(..) => panic!("client should never encode an Open packet"),
@@ -152,6 +160,10 @@ impl Packet {
     /// Decodes a single packet from a text frame.
     ///
     /// The first character is the packet-type digit (`'0'`..=`'6'`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the byte string is empty, has an unrecognised type ID, or the payload is malformed.
     pub fn decode(bytes: ByteString) -> Result<Self, PacketError> {
         let mut chars = bytes.chars();
 

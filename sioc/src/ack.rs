@@ -163,6 +163,10 @@ where
     ///
     /// Mirrors [`tokio::time::timeout`].
     ///
+    /// # Errors
+    ///
+    /// Returns [`AckError::Timeout`] if `duration` elapses, or any error from the inner [`AckHandle`].
+    ///
     /// # Example
     ///
     /// ```rust,no_run
@@ -182,6 +186,10 @@ where
     /// does not respond by `deadline`.
     ///
     /// Mirrors [`tokio::time::timeout_at`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AckError::Timeout`] if `deadline` passes, or any error from the inner [`AckHandle`].
     ///
     /// # Example
     ///

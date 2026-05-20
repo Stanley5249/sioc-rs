@@ -1,7 +1,6 @@
 //! Socket.IO client and namespace handles.
 
 use crate::ack::AckType;
-use crate::config::ChannelConfig;
 use crate::error::ManagerError;
 use crate::error::{ClientBuilderError, ClientError, PayloadError, SocketError};
 use crate::manager::{DirectiveSender, Manager, ManagerAction, message_sink};
@@ -31,6 +30,10 @@ where
     type Output;
 
     /// Serializes into a [`Directive`] and the output handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if payload serialization fails.
     fn prepare(self) -> Result<(Directive, Self::Output), PayloadError>;
 }
 
@@ -41,7 +44,55 @@ where
     B: BinaryMarker,
 {
     /// Serializes into an ack [`Directive`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if payload serialization fails.
     fn into_directive(self, id: u64) -> Result<Directive, PayloadError>;
+}
+
+/// Channel buffer capacities for each internal MPSC queue.
+///
+/// Construct via [`From<()>`] for defaults, [`From<usize>`] for uniform sizing,
+/// or build manually for per-channel control.
+#[derive(Clone, Copy, Debug)]
+pub struct ChannelConfig {
+    /// Engine task inbox: frames from the transport and messages from the Socket.IO layer.
+    pub engine: usize,
+    /// Transport channel: encoded frames to send to the transport.
+    pub transport: usize,
+    /// Manager task inbox: directives from all namespace senders.
+    pub manager: usize,
+    /// Per-namespace inbox: signals delivered to each [`SocketReceiver`].
+    pub socket: usize,
+}
+
+impl Default for ChannelConfig {
+    fn default() -> Self {
+        Self {
+            engine: 32,
+            transport: 32,
+            manager: 32,
+            socket: 32,
+        }
+    }
+}
+
+impl From<()> for ChannelConfig {
+    fn from(_: ()) -> Self {
+        Self::default()
+    }
+}
+
+impl From<usize> for ChannelConfig {
+    fn from(n: usize) -> Self {
+        Self {
+            engine: n,
+            transport: n,
+            manager: n,
+            socket: n,
+        }
+    }
 }
 
 /// Builder for a [`Client`] connection.
@@ -149,6 +200,10 @@ where
     /// Connects to the Engine.IO server and returns a [`Client`].
     ///
     /// Spawns the manager task, which drives the engine and transport concurrently.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the URL is invalid.
     #[must_use = "dropping the Client stops the background tasks"]
     pub fn open(self) -> Result<Client, ClientBuilderError> {
         let http_client = self.http_client.unwrap_or_default();
@@ -210,6 +265,10 @@ impl Client {
     /// Opens a namespace and returns a sender/receiver pair.
     ///
     /// The namespace is not confirmed until a [`Signal::Connect`] arrives on the [`SocketReceiver`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the manager channel is closed.
     pub async fn connect<S>(&self, ns: S) -> Result<(SocketSender, SocketReceiver), SocketError>
     where
         S: Into<ByteString>,
@@ -218,6 +277,10 @@ impl Client {
     }
 
     /// Opens a namespace with a connection payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the manager channel is closed.
     pub async fn connect_with<S, B>(
         &self,
         ns: S,
@@ -246,6 +309,10 @@ impl Client {
     ///
     /// The [`SocketSender`] must be dropped or explicitly disconnected before calling this.
     /// The manager exits only when the sender is dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the manager task fails or panics.
     pub async fn join(self) -> Result<(), ClientError> {
         drop(self.tx);
         self.handle.await??;
@@ -294,6 +361,10 @@ impl SocketSender {
     }
 
     /// Emits an event; returns `()` or an [`AckHandle`](crate::ack::AckHandle) depending on the ack policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization fails or the manager channel is closed.
     pub async fn emit<E, A, B>(&self, event: E) -> Result<E::Output, SocketError>
     where
         E: Emit<A, B>,
@@ -306,6 +377,10 @@ impl SocketSender {
     }
 
     /// Acknowledges a received event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization fails or the manager channel is closed.
     pub async fn acknowledge<T, A, B>(&self, id: AckId<A>, payload: T) -> Result<(), SocketError>
     where
         T: Acknowledge<A, B>,
@@ -343,6 +418,10 @@ impl SocketReceiver {
     ///
     /// Cancel safe: the only suspend point is `recv`; skipped protocol signals have no
     /// suspend point after consumption, so no events are lost on cancellation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the event cannot be converted into `E`.
     pub async fn listen<E>(&mut self) -> Result<Option<E>, E::Error>
     where
         E: TryFrom<DynEvent>,

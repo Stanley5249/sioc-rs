@@ -1,9 +1,12 @@
 #![doc = include_str!("../README.md")]
+#![warn(missing_docs)]
+#![warn(clippy::doc_markdown)]
+#![warn(clippy::missing_errors_doc)]
+#![warn(clippy::missing_panics_doc)]
 
 pub mod ack;
 pub mod binary;
 pub mod client;
-pub mod config;
 pub mod error;
 pub mod event;
 pub mod manager;
@@ -11,13 +14,13 @@ pub mod marker;
 pub mod packet;
 pub mod payload;
 
+/// Convenience re-exports for common usage.
 pub mod prelude {
     pub use crate::ack::{Ack, AckHandle, AckType};
     pub use crate::binary::{AttachmentsBuilder, Placeholder};
     pub use crate::client::{
-        Acknowledge, Client, ClientBuilder, Emit, SocketReceiver, SocketSender,
+        Acknowledge, ChannelConfig, Client, ClientBuilder, Emit, SocketReceiver, SocketSender,
     };
-    pub use crate::config::ChannelConfig;
     pub use crate::event::{Event, EventHandler, EventRouter, EventType};
     pub use crate::marker::{AckId, AckMarker, BinaryMarker, HasAck, HasBinary, NoAck, NoBinary};
     pub use crate::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Signal};

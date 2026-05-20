@@ -161,6 +161,10 @@ fn websocket_url(mut url: Url, sid: Option<&str>) -> Url {
 
 impl WebSocketStream {
     /// Opens a [`WebSocketStream`], running the upgrade probe when `sid` is present.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection or probe fails.
     pub async fn connect<C>(
         base_url: Url,
         sid: Option<&str>,
@@ -209,6 +213,10 @@ impl WebSocketStream {
     ///
     /// When `handshake_tx` is `Some`, reads the first `Open` frame and forwards the handshake
     /// (direct WebSocket transport). When `None`, sends `Upgrade` immediately (polling upgrade path).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a transport or protocol failure occurs.
     #[tracing::instrument(skip_all, err)]
     pub async fn transport(
         mut self,

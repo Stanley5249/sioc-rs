@@ -18,6 +18,7 @@ pub struct Ns<T>(pub ByteString, pub T);
 pub struct Connect {
     /// Server-assigned session ID.
     pub sid: ByteString,
+    /// Additional server-defined fields from the connection payload.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -33,7 +34,9 @@ pub struct Connect {
     url("https://socket.io/docs/v4/socket-io-protocol/#connection-to-a-namespace")
 )]
 pub struct ConnectError {
+    /// Human-readable rejection reason from the server.
     pub message: ByteString,
+    /// Additional server-defined fields from the rejection payload.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -41,8 +44,11 @@ pub struct ConnectError {
 /// Type-erased inbound event after binary reassembly.
 #[derive(Debug, Clone)]
 pub struct DynEvent {
+    /// Raw JSON payload (includes the event name as the first array element).
     pub payload: ByteString,
+    /// Ack ID assigned by the sender, if any.
     pub id: Option<u64>,
+    /// Reassembled binary attachments, if any.
     pub attachments: Option<Vec<Bytes>>,
 }
 
@@ -61,6 +67,7 @@ impl std::fmt::Display for DynEvent {
 }
 
 impl DynEvent {
+    /// Creates a `DynEvent` with no attachments.
     pub fn new<T>(payload: T, id: Option<u64>) -> Self
     where
         T: Into<ByteString>,
@@ -72,6 +79,7 @@ impl DynEvent {
         }
     }
 
+    /// Attaches binary payloads to this event.
     pub fn with_attachments(mut self, attachments: Vec<Bytes>) -> Self {
         self.attachments = Some(attachments);
         self
@@ -83,7 +91,9 @@ impl DynEvent {
 /// Convert to a typed `sioc::Ack` via `TryFrom<DynAck>`.
 #[derive(Debug, Clone)]
 pub struct DynAck {
+    /// Raw JSON ack payload.
     pub payload: ByteString,
+    /// Reassembled binary attachments, if any.
     pub attachments: Option<Vec<Bytes>>,
 }
 
@@ -99,6 +109,7 @@ impl std::fmt::Display for DynAck {
 }
 
 impl DynAck {
+    /// Creates a `DynAck` with no attachments.
     pub fn new<T>(payload: T) -> Self
     where
         T: Into<ByteString>,
@@ -109,6 +120,7 @@ impl DynAck {
         }
     }
 
+    /// Attaches binary payloads to this ack.
     pub fn with_attachments(mut self, attachments: Vec<Bytes>) -> Self {
         self.attachments = Some(attachments);
         self
@@ -187,6 +199,7 @@ impl<E> Signal<E> {
 
 /// An outbound packet to be encoded and sent to the server.
 #[derive(Debug)]
+#[allow(missing_docs)]
 pub enum Directive {
     /// Opens a namespace; `data` is an optional authentication payload.
     Connect {
@@ -216,6 +229,7 @@ pub enum Directive {
 /// Binary variants carry an attachment count; the socket router collects
 /// the follow-up binary frames and reassembles them into a [`Signal`].
 #[derive(Debug)]
+#[allow(missing_docs)]
 pub enum Packet {
     /// Type `0`: namespace connection confirmed.
     Connect(ByteString),
@@ -262,6 +276,7 @@ impl Packet {
         }
     }
 
+    /// Encodes this packet into a [`String`] using the given namespace.
     pub fn encode(&self, ns: &str) -> String {
         let mut buffer = String::with_capacity(self.size_hint(ns));
 
@@ -340,10 +355,12 @@ impl std::fmt::Display for Packet {
 }
 
 impl Ns<Packet> {
+    /// Returns a conservative upper bound on the serialised byte length.
     pub fn size_hint(&self) -> usize {
         self.1.size_hint(&self.0)
     }
 
+    /// Encodes the packet for the stored namespace.
     pub fn encode(&self) -> String {
         self.1.encode(&self.0)
     }
@@ -424,7 +441,7 @@ fn namespace_size(ns: &str) -> usize {
     if ns == "/" { 0 } else { ns.len() + 1 }
 }
 
-pub fn hint_packet_size(ns: &str, binary: bool, ack: bool, payload: Option<&str>) -> usize {
+pub(crate) fn hint_packet_size(ns: &str, binary: bool, ack: bool, payload: Option<&str>) -> usize {
     let mut n = 1 + namespace_size(ns);
     if ack {
         n += ack_size_hint();
@@ -461,7 +478,7 @@ fn write_payload(buffer: &mut String, payload: &str) {
     buffer.push_str(payload);
 }
 
-pub fn write_packet(
+pub(crate) fn write_packet(
     buffer: &mut String,
     type_id: u8,
     count: Option<usize>,
@@ -490,6 +507,10 @@ pub fn write_packet(
 ///
 /// Returns `(Some(count), rest)` when the prefix is present, `(None, bytes)`
 /// when absent.
+///
+/// # Errors
+///
+/// Returns an error if the count prefix is present but not a valid integer.
 pub fn split_attachments(bytes: ByteString) -> Result<(Option<usize>, ByteString), PacketError> {
     let pair = match bytes.char_indices().find(|(_, c)| !c.is_ascii_digit()) {
         Some((i, '-')) => {
@@ -510,6 +531,10 @@ pub fn split_attachments(bytes: ByteString) -> Result<(Option<usize>, ByteString
 /// Consumes a `/ns,` prefix and returns `(namespace, rest)`.
 ///
 /// Returns `"/"` for the default namespace.
+///
+/// # Errors
+///
+/// Returns an error if the namespace is present but missing its trailing `,` delimiter.
 pub fn split_namespace(bytes: ByteString) -> Result<(ByteString, ByteString), PacketError> {
     match bytes.chars().next() {
         Some('/') => match bytes.split_once(',') {
@@ -524,6 +549,10 @@ pub fn split_namespace(bytes: ByteString) -> Result<(ByteString, ByteString), Pa
 ///
 /// Returns `(Some(id), rest)` when digits are present and fit in `u64`,
 /// `(None, bytes)` when no leading digits are found or the input is empty.
+///
+/// # Errors
+///
+/// Returns an error if the digit run overflows `u64`.
 pub fn split_id(bytes: ByteString) -> Result<(Option<u64>, ByteString), PacketError> {
     let pair = match bytes.char_indices().find(|(_, c)| !c.is_ascii_digit()) {
         Some((i, _)) if i > 0 => {

@@ -14,12 +14,13 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::{PollSendError, PollSender};
 
 /// Creates a [`Sink<Message>`] that maps each [`Message`] to a [`ManagerAction`] and sends it.
-pub fn message_sink(
+pub(crate) fn message_sink(
     tx: mpsc::Sender<ManagerAction>,
 ) -> impl Sink<Message, Error = PollSendError<ManagerAction>> {
     PollSender::new(tx).with(|message: Message| future::ok(message.into()))
 }
 
+/// Internal dispatch action sent between the socket layer and the engine task.
 #[derive(Debug)]
 pub enum ManagerAction {
     /// Outbound directive from the client.
@@ -42,13 +43,19 @@ impl From<Message> for ManagerAction {
 
 /// Sends outbound [`Directive`]s to the socket router.
 #[derive(Clone, Debug)]
-pub struct DirectiveSender(mpsc::Sender<ManagerAction>);
+pub(crate) struct DirectiveSender(mpsc::Sender<ManagerAction>);
 
 impl DirectiveSender {
+    /// Wraps a manager channel sender.
     pub fn new(tx: mpsc::Sender<ManagerAction>) -> Self {
         Self(tx)
     }
 
+    /// Sends `directive` to the manager asynchronously.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the manager channel is closed.
     pub async fn send(
         &self,
         ns: ByteString,
@@ -57,14 +64,11 @@ impl DirectiveSender {
         self.0.send(Ns(ns, directive).into()).await
     }
 
-    pub fn blocking_send(
-        &self,
-        ns: ByteString,
-        directive: Directive,
-    ) -> Result<(), SendError<ManagerAction>> {
-        self.0.blocking_send(Ns(ns, directive).into())
-    }
-
+    /// Attempts to send `directive` without blocking.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the channel is closed or full.
     pub fn try_send(
         &self,
         ns: ByteString,
@@ -311,6 +315,7 @@ pub struct Manager {
 }
 
 impl Manager {
+    /// Creates a manager that reads from `rx`.
     pub fn new(rx: mpsc::Receiver<ManagerAction>) -> Self {
         Self {
             rx,
@@ -320,6 +325,10 @@ impl Manager {
     }
 
     /// Runs the socket routing loop until all namespaces disconnect.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the engine or a namespace channel fails.
     #[tracing::instrument(skip_all, err)]
     pub async fn socket_io(mut self, tx: MessageSender) -> Result<(), ManagerError> {
         let result = self.run(&tx).await;
