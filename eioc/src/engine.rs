@@ -213,3 +213,278 @@ where
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use futures_util::sink;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::{mpsc, oneshot};
+    use tokio_util::sync::CancellationToken;
+
+    fn make_handshake() -> Handshake {
+        Handshake {
+            sid: "sid".into(),
+            upgrades: vec![],
+            ping_interval: 25_000,
+            ping_timeout: 5_000,
+            max_payload: 1_000_000,
+        }
+    }
+
+    struct Setup {
+        tx: mpsc::Sender<EngineAction>,
+        rx: mpsc::Receiver<EngineAction>,
+        transport_tx: mpsc::Sender<Frame>,
+        transport_rx: mpsc::Receiver<Frame>,
+        handshake_rx: oneshot::Receiver<Handshake>,
+    }
+
+    fn setup() -> Setup {
+        let (tx, rx) = mpsc::channel(4);
+        let (transport_tx, transport_rx) = mpsc::channel(4);
+        let (handshake_tx, handshake_rx) = oneshot::channel();
+        handshake_tx.send(make_handshake()).unwrap();
+        Setup {
+            tx,
+            rx,
+            transport_tx,
+            transport_rx,
+            handshake_rx,
+        }
+    }
+
+    impl Setup {
+        async fn run(self) -> (Result<(), EngineError>, mpsc::Receiver<Frame>) {
+            self.run_with(sink::drain()).await
+        }
+
+        async fn run_with<S>(self, sink: S) -> (Result<(), EngineError>, mpsc::Receiver<Frame>)
+        where
+            S: Sink<Message> + Unpin,
+            S::Error: std::error::Error + Send + Sync + 'static,
+        {
+            let transport_rx = self.transport_rx;
+            let result = engine_io(
+                sink,
+                self.rx,
+                self.transport_tx,
+                self.handshake_rx,
+                CancellationToken::new(),
+            )
+            .await;
+            (result, transport_rx)
+        }
+    }
+
+    type CapturingSink = Pin<Box<dyn Sink<Message, Error = std::convert::Infallible> + Send>>;
+
+    fn capturing_sink() -> (CapturingSink, Arc<Mutex<Vec<Message>>>) {
+        let store = Arc::new(Mutex::new(Vec::<Message>::new()));
+        let s = store.clone();
+        let sink = Box::pin(sink::unfold(s, |s, msg: Message| async move {
+            s.lock().unwrap().push(msg);
+            Ok::<_, std::convert::Infallible>(s)
+        }));
+        (sink, store)
+    }
+
+    #[test]
+    fn engine_action_from_frame() {
+        let frame = Frame::Binary(Bytes::from_static(b"x"));
+        let action = EngineAction::from(frame.clone());
+        assert!(matches!(action, EngineAction::Transport(f) if f == frame));
+    }
+
+    #[test]
+    fn engine_action_from_message() {
+        let action = EngineAction::from(Message::Close);
+        assert!(matches!(action, EngineAction::Sink(Message::Close)));
+    }
+
+    #[tokio::test]
+    async fn frame_sender_wraps_frame_as_transport() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let sender = FrameSender(tx);
+        let frame = Frame::Binary(Bytes::from_static(b"x"));
+        sender.send(frame.clone()).await.unwrap();
+        assert!(matches!(rx.recv().await.unwrap(), EngineAction::Transport(f) if f == frame));
+    }
+
+    #[tokio::test]
+    async fn message_sender_wraps_message_as_sink() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let sender = MessageSender(tx);
+        sender.send(Message::Close).await.unwrap();
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            EngineAction::Sink(Message::Close)
+        ));
+    }
+
+    #[tokio::test]
+    async fn engine_io_handshake_dropped_is_error() {
+        let (_, rx) = mpsc::channel(4);
+        let (transport_tx, _) = mpsc::channel(4);
+        let (handshake_tx, handshake_rx) = oneshot::channel::<Handshake>();
+        drop(handshake_tx);
+        let result = engine_io(
+            sink::drain(),
+            rx,
+            transport_tx,
+            handshake_rx,
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(result, Err(EngineError::RecvHandshake(_))));
+    }
+
+    #[tokio::test]
+    async fn engine_io_server_close_exits_ok() {
+        let s = setup();
+        s.tx.send(EngineAction::Transport(Frame::Packet(Packet::Close)))
+            .await
+            .unwrap();
+        let (result, _) = s.run().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn engine_io_engine_channel_closed_exits_ok() {
+        let s = setup();
+        drop(s.tx);
+        let result = engine_io(
+            sink::drain(),
+            s.rx,
+            s.transport_tx,
+            s.handshake_rx,
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn engine_io_client_close_sends_close_packet() {
+        let s = setup();
+        s.tx.send(EngineAction::Sink(Message::Close)).await.unwrap();
+        let (result, mut transport_rx) = s.run().await;
+        result.unwrap();
+        assert!(matches!(
+            transport_rx.recv().await.unwrap(),
+            Frame::Packet(Packet::Close)
+        ));
+    }
+
+    #[tokio::test]
+    async fn engine_io_ping_triggers_pong() {
+        let s = setup();
+        s.tx.send(EngineAction::Transport(Frame::Packet(Packet::Ping(
+            "probe".into(),
+        ))))
+        .await
+        .unwrap();
+        s.tx.send(EngineAction::Transport(Frame::Packet(Packet::Close)))
+            .await
+            .unwrap();
+        let (result, mut transport_rx) = s.run().await;
+        result.unwrap();
+        assert!(matches!(
+            transport_rx.recv().await.unwrap(),
+            Frame::Packet(Packet::Pong(p)) if p == "probe"
+        ));
+    }
+
+    #[tokio::test]
+    async fn engine_io_noop_is_ignored() {
+        let s = setup();
+        s.tx.send(EngineAction::Transport(Frame::Packet(Packet::Noop)))
+            .await
+            .unwrap();
+        s.tx.send(EngineAction::Transport(Frame::Packet(Packet::Close)))
+            .await
+            .unwrap();
+        let (result, _) = s.run().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn engine_io_unexpected_packet_is_server_error() {
+        let s = setup();
+        s.tx.send(EngineAction::Transport(Frame::Packet(Packet::Upgrade)))
+            .await
+            .unwrap();
+        let (result, _) = s.run().await;
+        assert!(matches!(result, Err(EngineError::Server(Packet::Upgrade))));
+    }
+
+    #[tokio::test]
+    async fn engine_io_text_message_forwarded_to_sink() {
+        let s = setup();
+        s.tx.send(EngineAction::Transport(Frame::Packet(Packet::Message(
+            "hello".into(),
+        ))))
+        .await
+        .unwrap();
+        s.tx.send(EngineAction::Transport(Frame::Packet(Packet::Close)))
+            .await
+            .unwrap();
+        let (sink, store) = capturing_sink();
+        let (result, _) = s.run_with(sink).await;
+        result.unwrap();
+        let msgs = store.lock().unwrap();
+        assert!(matches!(&msgs[0], Message::Text(t) if t == "hello"));
+    }
+
+    #[tokio::test]
+    async fn engine_io_binary_frame_forwarded_to_sink() {
+        let s = setup();
+        s.tx.send(EngineAction::Transport(Frame::Binary(Bytes::from_static(
+            b"bin",
+        ))))
+        .await
+        .unwrap();
+        s.tx.send(EngineAction::Transport(Frame::Packet(Packet::Close)))
+            .await
+            .unwrap();
+        let (sink, store) = capturing_sink();
+        let (result, _) = s.run_with(sink).await;
+        result.unwrap();
+        let msgs = store.lock().unwrap();
+        assert!(matches!(&msgs[0], Message::Binary(b) if b.as_ref() == b"bin"));
+    }
+
+    #[tokio::test]
+    async fn engine_io_outbound_text_sent_to_transport() {
+        let s = setup();
+        s.tx.send(EngineAction::Sink(Message::Text("out".into())))
+            .await
+            .unwrap();
+        s.tx.send(EngineAction::Sink(Message::Close)).await.unwrap();
+        let (result, mut transport_rx) = s.run().await;
+        result.unwrap();
+        assert!(matches!(
+            transport_rx.recv().await.unwrap(),
+            Frame::Packet(Packet::Message(m)) if m == "out"
+        ));
+    }
+
+    #[tokio::test]
+    async fn engine_io_outbound_binary_sent_to_transport() {
+        let s = setup();
+        s.tx.send(EngineAction::Sink(Message::Binary(Bytes::from_static(
+            b"out",
+        ))))
+        .await
+        .unwrap();
+        s.tx.send(EngineAction::Sink(Message::Close)).await.unwrap();
+        let (result, mut transport_rx) = s.run().await;
+        result.unwrap();
+        assert!(matches!(
+            transport_rx.recv().await.unwrap(),
+            Frame::Binary(b) if b.as_ref() == b"out"
+        ));
+    }
+}

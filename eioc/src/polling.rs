@@ -273,3 +273,84 @@ impl PollingClient {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bss(s: &'static str) -> ByteString {
+        ByteString::from_static(s)
+    }
+
+    #[test]
+    fn polling_url_appends_params() {
+        let base = Url::parse("http://localhost:3000/socket.io/").unwrap();
+        let url = polling_url(base);
+        let query = url.query().unwrap();
+        assert!(query.contains("EIO=4"));
+        assert!(query.contains("transport=polling"));
+    }
+
+    #[test]
+    fn frame_decode_text_packet() {
+        let frame = Frame::decode(&bss("4hello")).unwrap();
+        assert!(matches!(frame, Frame::Packet(Packet::Message(m)) if m == "hello"));
+    }
+
+    #[test]
+    fn frame_decode_binary_base64() {
+        use base64::prelude::{BASE64_STANDARD, Engine as _};
+        let encoded = BASE64_STANDARD.encode(b"abc");
+        let input = ByteString::from(format!("b{encoded}"));
+        let frame = Frame::decode(&input).unwrap();
+        assert!(matches!(frame, Frame::Binary(b) if b.as_ref() == b"abc"));
+    }
+
+    #[test]
+    fn frame_decode_invalid_base64_is_error() {
+        assert!(Frame::decode(&bss("b!!!")).is_err());
+    }
+
+    #[test]
+    fn frame_write_packet() {
+        let frame = Frame::Packet(Packet::Message("hello".into()));
+        let mut buf = String::new();
+        frame.write(&mut buf);
+        assert_eq!(buf, "4hello");
+    }
+
+    #[test]
+    fn frame_write_binary() {
+        use base64::prelude::{BASE64_STANDARD, Engine as _};
+        let raw = Bytes::from_static(b"abc");
+        let frame = Frame::Binary(raw);
+        let mut buf = String::new();
+        frame.write(&mut buf);
+        assert_eq!(buf, format!("b{}", BASE64_STANDARD.encode(b"abc")));
+    }
+
+    #[test]
+    fn decode_encode_frames_roundtrip() {
+        let text = bss("4hello\x1e4world");
+        let frames = decode_frames(&text).unwrap();
+        assert_eq!(frames.len(), 2);
+        let encoded = encode_frames(&frames);
+        assert_eq!(encoded, "4hello\x1e4world");
+    }
+
+    #[test]
+    fn encode_frames_single() {
+        let frames = vec![Frame::Packet(Packet::Pong("probe".into()))];
+        assert_eq!(encode_frames(&frames), "3probe");
+    }
+
+    #[test]
+    fn encode_frames_empty() {
+        assert_eq!(encode_frames(&[]), "");
+    }
+
+    #[test]
+    fn decode_frames_error_propagates() {
+        assert!(decode_frames(&bss("9invalid")).is_err());
+    }
+}

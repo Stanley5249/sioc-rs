@@ -67,3 +67,16 @@ impl TransportStrategy {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_strategy_default_is_polling() {
+        assert!(matches!(
+            TransportStrategy::default(),
+            TransportStrategy::Polling
+        ));
+    }
+}

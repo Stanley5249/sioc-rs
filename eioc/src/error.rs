@@ -197,3 +197,58 @@ pub enum PacketError {
     #[diagnostic(code(eioc::packet::payload))]
     Payload { id: char, payload: ByteString },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packet_error_empty_display() {
+        assert_eq!(PacketError::Empty.to_string(), "empty packet");
+    }
+
+    #[test]
+    fn packet_error_invalid_id_display() {
+        assert!(PacketError::InvalidId { id: '9' }.to_string().contains('9'));
+    }
+
+    #[test]
+    fn packet_error_payload_display() {
+        let e = PacketError::Payload {
+            id: '1',
+            payload: "extra".into(),
+        };
+        assert!(e.to_string().contains('1'));
+    }
+
+    #[test]
+    fn engine_error_server_display() {
+        let e = EngineError::Server(crate::packet::Packet::Upgrade);
+        assert!(e.to_string().contains("unexpected"));
+    }
+
+    #[test]
+    fn polling_error_response_display() {
+        let e = PollingError::Response("forbidden".to_string());
+        assert!(e.to_string().contains("forbidden"));
+    }
+
+    #[test]
+    fn transport_error_from_polling() {
+        let e: TransportError = PollingError::Response("x".into()).into();
+        assert!(matches!(e, TransportError::Polling(_)));
+    }
+
+    #[test]
+    fn error_from_engine_error() {
+        let e: Error = EngineError::Server(crate::packet::Packet::Close).into();
+        assert!(matches!(e, Error::Engine(_)));
+    }
+
+    #[test]
+    fn error_from_transport_error() {
+        let e: Error =
+            TransportError::Open(crate::packet::Frame::Packet(crate::packet::Packet::Close)).into();
+        assert!(matches!(e, Error::Transport(_)));
+    }
+}
