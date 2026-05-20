@@ -828,7 +828,7 @@ mod tests {
         assert_eq!(ack.payload, "[\"world\"]");
     }
 
-    /// Server sends Disconnect; the socket receives Signal::Disconnect.
+    /// Server sends `Disconnect`; the socket receives `Signal::Disconnect`.
     #[tokio::test]
     async fn server_disconnect_delivery() {
         let (manager_tx, mut engine_rx, handle) = setup_manager();
@@ -855,7 +855,7 @@ mod tests {
         handle.await.unwrap().unwrap();
     }
 
-    /// Server sends ConnectError; the socket receives Signal::ConnectError.
+    /// Server sends `ConnectError`; the socket receives `Signal::ConnectError`.
     #[tokio::test]
     async fn server_connect_error_delivery() {
         let (manager_tx, mut engine_rx, _) = setup_manager();
@@ -875,7 +875,7 @@ mod tests {
         ));
     }
 
-    /// Server sends BinaryAck followed by binary frames; assembled ack is delivered.
+    /// Server sends `BinaryAck` followed by binary frames; assembled ack is delivered.
     #[tokio::test]
     async fn binary_ack_reassembly() {
         let (manager_tx, mut engine_rx, _) = setup_manager();
@@ -919,7 +919,7 @@ mod tests {
         assert_eq!(att[0], Bytes::from_static(b"\xAB\xCD"));
     }
 
-    /// Client sends a binary Event; the manager encodes BinaryEvent + binary frames.
+    /// Client sends a binary Event; the manager encodes `BinaryEvent` + binary frames.
     #[tokio::test]
     async fn directive_event_binary() {
         let (manager_tx, mut engine_rx, _) = setup_manager();
@@ -981,7 +981,7 @@ mod tests {
         }
     }
 
-    /// Client sends a binary Ack; the manager encodes BinaryAck + binary frames.
+    /// Client sends a binary Ack; the manager encodes `BinaryAck` + binary frames.
     #[tokio::test]
     async fn directive_ack_binary() {
         let (manager_tx, mut engine_rx, _) = setup_manager();
@@ -1014,7 +1014,7 @@ mod tests {
         }
     }
 
-    /// Directive::Dropped for a live namespace logs a warning and sends Disconnect.
+    /// `Directive::Dropped` for a live namespace logs a warning and sends Disconnect.
     #[tokio::test]
     async fn directive_dropped_when_connected() {
         let (manager_tx, mut engine_rx, _) = setup_manager();
@@ -1036,7 +1036,7 @@ mod tests {
         }
     }
 
-    /// Directive::Dropped for an unknown namespace is a silent no-op.
+    /// `Directive::Dropped` for an unknown namespace is a silent no-op.
     #[tokio::test]
     async fn directive_dropped_when_not_connected() {
         let (manager_tx, mut engine_rx, handle) = setup_manager();
@@ -1145,7 +1145,7 @@ mod tests {
         ));
     }
 
-    /// Message::Close clears all sockets and the manager exits cleanly.
+    /// `Message::Close` clears all sockets and the manager exits cleanly.
     #[tokio::test]
     async fn server_close_message_clears_sockets() {
         let (manager_tx, mut engine_rx, handle) = setup_manager();
@@ -1187,7 +1187,7 @@ mod tests {
         handle.await.unwrap().unwrap();
     }
 
-    /// Sending to a closed socket channel returns SendSocket.
+    /// Sending to a closed socket channel returns `SendSocket`.
     #[tokio::test]
     async fn send_packet_closed_channel_is_error() {
         let (manager_tx, mut engine_rx, handle) = setup_manager();
