@@ -18,7 +18,8 @@ The example covers all four concepts from the main README:
 Start the server:
 
 ```bash
-uv run examples/quick-start/server.py
+cd examples/quick-start
+uv run server.py
 ```
 
 Then in a second terminal, run the client.
