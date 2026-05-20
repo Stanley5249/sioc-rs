@@ -237,6 +237,10 @@ impl std::fmt::Display for Packet {
 mod tests {
     use super::*;
 
+    fn bss(s: &'static str) -> ByteString {
+        ByteString::from_static(s)
+    }
+
     fn test_handshake() -> Handshake {
         Handshake {
             sid: "abc".into(),
@@ -268,7 +272,7 @@ mod tests {
     #[test]
     fn decode_invalid_packet_id() {
         assert!(matches!(
-            Packet::decode(&ByteString::from_static("9")),
+            Packet::decode(&bss("9")),
             Err(PacketError::InvalidId { id: '9' })
         ));
     }
@@ -300,7 +304,7 @@ mod tests {
 
     #[test]
     fn encode_decode_ping_round_trip() {
-        let payload = ByteString::from_static("probe");
+        let payload = bss("probe");
         let encoded = Packet::Ping(payload.clone()).encode();
         assert_eq!(
             Packet::decode(&ByteString::from(encoded)).unwrap(),
@@ -319,7 +323,7 @@ mod tests {
 
     #[test]
     fn encode_decode_pong_round_trip() {
-        let payload = ByteString::from_static("probe");
+        let payload = bss("probe");
         let encoded = Packet::Pong(payload.clone()).encode();
         assert_eq!(
             Packet::decode(&ByteString::from(encoded)).unwrap(),
@@ -329,7 +333,7 @@ mod tests {
 
     #[test]
     fn encode_decode_message_round_trip() {
-        let text = ByteString::from_static("hello world");
+        let text = bss("hello world");
         let encoded = Packet::Message(text.clone()).encode();
         assert_eq!(
             Packet::decode(&ByteString::from(encoded)).unwrap(),
@@ -349,8 +353,71 @@ mod tests {
     #[test]
     fn decode_noop() {
         assert_eq!(
-            Packet::decode(&ByteString::from_static("6")).unwrap(),
+            Packet::decode(&bss("6")).unwrap(),
             Packet::Noop
         );
     }
+
+    #[test]
+    fn handshake_can_upgrade_to_websocket_true() {
+        let hs = test_handshake();
+        assert!(hs.can_upgrade_to_websocket());
+    }
+
+    #[test]
+    fn handshake_can_upgrade_to_websocket_false() {
+        let hs = Handshake {
+            sid: "x".into(),
+            upgrades: vec![],
+            ping_interval: 25000,
+            ping_timeout: 5000,
+            max_payload: 1_000_000,
+        };
+        assert!(!hs.can_upgrade_to_websocket());
+    }
+
+    #[test]
+    fn decode_close_with_payload_is_error() {
+        let bytes = bss("1extra");
+        assert!(matches!(
+            Packet::decode(&bytes),
+            Err(crate::error::PacketError::Payload { id: '1', .. })
+        ));
+    }
+
+    #[test]
+    fn decode_upgrade_with_payload_is_error() {
+        let bytes = bss("5extra");
+        assert!(matches!(
+            Packet::decode(&bytes),
+            Err(crate::error::PacketError::Payload { id: '5', .. })
+        ));
+    }
+
+    #[test]
+    fn decode_noop_with_payload_is_error() {
+        let bytes = bss("6extra");
+        assert!(matches!(
+            Packet::decode(&bytes),
+            Err(crate::error::PacketError::Payload { id: '6', .. })
+        ));
+    }
+
+    #[test]
+    fn message_display_text() {
+        let s = format!("{}", Message::Text(bss("hello")));
+        assert!(s.contains("hello"));
+    }
+
+    #[test]
+    fn message_display_binary() {
+        let s = format!("{}", Message::Binary(bytes::Bytes::from_static(b"\x01\x02")));
+        assert!(s.contains('2'));
+    }
+
+    #[test]
+    fn message_display_close() {
+        assert_eq!(format!("{}", Message::Close), "Close");
+    }
+
 }

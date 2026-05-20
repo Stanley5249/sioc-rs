@@ -570,3 +570,498 @@ pub fn split_id(bytes: ByteString) -> Result<(Option<u64>, ByteString), PacketEr
 
     Ok(pair)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use bytestring::ByteString;
+    use serde_json::Map;
+
+    use crate::error::PacketError;
+
+    fn bss(s: &'static str) -> ByteString {
+        ByteString::from_static(s)
+    }
+
+    fn decode(s: &'static str) -> Result<Ns<Packet>, PacketError> {
+        bss(s).try_into()
+    }
+
+    fn encode_ns(ns: &'static str, pkt: Packet) -> (String, usize) {
+        let np = Ns(bss(ns), pkt);
+        let hint = np.size_hint();
+        (np.encode(), hint)
+    }
+
+    // --- split_attachments ---
+
+    #[test]
+    fn split_attachments_empty_input() {
+        let (count, rest) = split_attachments(ByteString::new()).unwrap();
+        assert!(count.is_none());
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn split_attachments_no_prefix() {
+        let (count, rest) = split_attachments(bss("rest")).unwrap();
+        assert!(count.is_none());
+        assert_eq!(&*rest, "rest");
+    }
+
+    #[test]
+    fn split_attachments_valid_prefix() {
+        let (count, rest) = split_attachments(bss("2-rest")).unwrap();
+        assert_eq!(count, Some(2));
+        assert_eq!(&*rest, "rest");
+    }
+
+    #[test]
+    fn split_attachments_zero_count() {
+        let (count, rest) = split_attachments(bss("0-")).unwrap();
+        assert_eq!(count, Some(0));
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn split_attachments_namespace_not_misinterpreted() {
+        let (count, rest) = split_attachments(bss("/ns,data")).unwrap();
+        assert!(count.is_none());
+        assert_eq!(&*rest, "/ns,data");
+    }
+
+    // --- split_namespace ---
+
+    #[test]
+    fn split_namespace_default_ns() {
+        let (ns, rest) = split_namespace(bss("payload")).unwrap();
+        assert_eq!(&*ns, "/");
+        assert_eq!(&*rest, "payload");
+    }
+
+    #[test]
+    fn split_namespace_non_default() {
+        let (ns, rest) = split_namespace(bss(r#"/chat,["x"]"#)).unwrap();
+        assert_eq!(&*ns, "/chat");
+        assert_eq!(&*rest, r#"["x"]"#);
+    }
+
+    #[test]
+    fn split_namespace_missing_delimiter() {
+        assert!(matches!(
+            split_namespace(bss("/bad")),
+            Err(PacketError::MissingNamespaceDelimiter)
+        ));
+    }
+
+    #[test]
+    fn split_namespace_empty_payload_after_comma() {
+        let (ns, rest) = split_namespace(bss("/,")).unwrap();
+        assert_eq!(&*ns, "/");
+        assert!(rest.is_empty());
+    }
+
+    // --- split_id ---
+
+    #[test]
+    fn split_id_empty() {
+        let (id, rest) = split_id(ByteString::new()).unwrap();
+        assert!(id.is_none());
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn split_id_no_leading_digits() {
+        let (id, rest) = split_id(bss(r#"["x"]"#)).unwrap();
+        assert!(id.is_none());
+        assert_eq!(&*rest, r#"["x"]"#);
+    }
+
+    #[test]
+    fn split_id_with_digits() {
+        let (id, rest) = split_id(bss(r#"7["x"]"#)).unwrap();
+        assert_eq!(id, Some(7));
+        assert_eq!(&*rest, r#"["x"]"#);
+    }
+
+    #[test]
+    fn split_id_all_digits_no_payload() {
+        let (id, rest) = split_id(bss("123")).unwrap();
+        assert!(id.is_none());
+        assert_eq!(&*rest, "123");
+    }
+
+    // --- decode: happy paths ---
+
+    #[test]
+    fn decode_empty_is_error() {
+        assert!(matches!(decode(""), Err(PacketError::Empty)));
+    }
+
+    #[test]
+    fn decode_invalid_id_is_error() {
+        assert!(matches!(decode("9"), Err(PacketError::InvalidId { id: '9' })));
+    }
+
+    #[test]
+    fn decode_connect_default_ns() {
+        let Ns(ns, pkt) = decode(r#"0{"sid":"s"}"#).unwrap();
+        assert_eq!(&*ns, "/");
+        assert!(matches!(pkt, Packet::Connect(_)));
+    }
+
+    #[test]
+    fn decode_connect_non_default_ns() {
+        let Ns(ns, pkt) = decode(r#"0/chat,{"sid":"s"}"#).unwrap();
+        assert_eq!(&*ns, "/chat");
+        assert!(matches!(pkt, Packet::Connect(_)));
+    }
+
+    #[test]
+    fn decode_disconnect() {
+        let Ns(ns, pkt) = decode("1").unwrap();
+        assert_eq!(&*ns, "/");
+        assert!(matches!(pkt, Packet::Disconnect));
+    }
+
+    #[test]
+    fn decode_event_no_id() {
+        let Ns(_, pkt) = decode(r#"2["evt"]"#).unwrap();
+        assert!(matches!(pkt, Packet::Event { id: None, .. }));
+    }
+
+    #[test]
+    fn decode_event_with_id() {
+        let Ns(_, pkt) = decode(r#"27["evt"]"#).unwrap();
+        assert!(matches!(pkt, Packet::Event { id: Some(7), .. }));
+    }
+
+    #[test]
+    fn decode_ack() {
+        let Ns(_, pkt) = decode(r#"37["ok"]"#).unwrap();
+        assert!(matches!(pkt, Packet::Ack { id: 7, .. }));
+    }
+
+    #[test]
+    fn decode_connect_error() {
+        let Ns(_, pkt) = decode(r#"4{"message":"bad"}"#).unwrap();
+        assert!(matches!(pkt, Packet::ConnectError(_)));
+    }
+
+    #[test]
+    fn decode_binary_event_no_id() {
+        let Ns(_, pkt) = decode(r#"52-["img"]"#).unwrap();
+        assert!(matches!(
+            pkt,
+            Packet::BinaryEvent {
+                count: 2,
+                id: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn decode_binary_event_with_id() {
+        let Ns(_, pkt) = decode(r#"52-3["img"]"#).unwrap();
+        assert!(matches!(
+            pkt,
+            Packet::BinaryEvent {
+                count: 2,
+                id: Some(3),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn decode_binary_ack() {
+        let Ns(_, pkt) = decode(r#"62-7["ok"]"#).unwrap();
+        assert!(matches!(
+            pkt,
+            Packet::BinaryAck {
+                count: 2,
+                id: 7,
+                ..
+            }
+        ));
+    }
+
+    // --- decode: error paths ---
+
+    #[test]
+    fn decode_ack_missing_id_is_error() {
+        assert!(matches!(
+            decode(r#"3["noid"]"#),
+            Err(PacketError::MissingAckId)
+        ));
+    }
+
+    #[test]
+    fn decode_event_unexpected_attachments_is_error() {
+        assert!(matches!(
+            decode(r#"22-["x"]"#),
+            Err(PacketError::UnexpectedAttachments { count: 2 })
+        ));
+    }
+
+    #[test]
+    fn decode_binary_event_missing_count_is_error() {
+        assert!(matches!(
+            decode(r#"5["x"]"#),
+            Err(PacketError::MissingAttachmentCount)
+        ));
+    }
+
+    #[test]
+    fn decode_namespace_missing_delimiter_is_error() {
+        assert!(matches!(
+            decode(r#"0/chat["x"]"#),
+            Err(PacketError::MissingNamespaceDelimiter)
+        ));
+    }
+
+    // --- encode roundtrips ---
+
+    #[test]
+    fn encode_connect_default_ns() {
+        let (enc, hint) = encode_ns("/", Packet::Connect("{}".into()));
+        assert_eq!(enc, "0{}");
+        assert!(enc.len() <= hint);
+    }
+
+    #[test]
+    fn encode_connect_non_default_ns() {
+        let (enc, hint) = encode_ns("/chat", Packet::Connect("{}".into()));
+        assert_eq!(enc, "0/chat,{}");
+        assert!(enc.len() <= hint);
+    }
+
+    #[test]
+    fn encode_disconnect() {
+        let (enc, hint) = encode_ns("/", Packet::Disconnect);
+        assert_eq!(enc, "1");
+        assert!(enc.len() <= hint);
+    }
+
+    #[test]
+    fn encode_event_no_id() {
+        let (enc, hint) = encode_ns(
+            "/",
+            Packet::Event {
+                payload: r#"["evt"]"#.into(),
+                id: None,
+            },
+        );
+        assert_eq!(enc, r#"2["evt"]"#);
+        assert!(enc.len() <= hint);
+    }
+
+    #[test]
+    fn encode_event_with_id() {
+        let (enc, hint) = encode_ns(
+            "/",
+            Packet::Event {
+                payload: r#"["evt"]"#.into(),
+                id: Some(7),
+            },
+        );
+        assert_eq!(enc, r#"27["evt"]"#);
+        assert!(enc.len() <= hint);
+    }
+
+    #[test]
+    fn encode_ack() {
+        let (enc, hint) = encode_ns(
+            "/",
+            Packet::Ack {
+                payload: r#"["ok"]"#.into(),
+                id: 7,
+            },
+        );
+        assert_eq!(enc, r#"37["ok"]"#);
+        assert!(enc.len() <= hint);
+    }
+
+    #[test]
+    fn encode_connect_error() {
+        let (enc, hint) = encode_ns("/", Packet::ConnectError(r#"{"message":"bad"}"#.into()));
+        assert_eq!(enc, r#"4{"message":"bad"}"#);
+        assert!(enc.len() <= hint);
+    }
+
+    #[test]
+    fn encode_binary_event() {
+        let (enc, hint) = encode_ns(
+            "/",
+            Packet::BinaryEvent {
+                payload: r#"["img"]"#.into(),
+                id: None,
+                count: 2,
+            },
+        );
+        assert_eq!(enc, r#"52-["img"]"#);
+        assert!(enc.len() <= hint);
+    }
+
+    #[test]
+    fn encode_binary_ack() {
+        let (enc, hint) = encode_ns(
+            "/",
+            Packet::BinaryAck {
+                payload: r#"["ok"]"#.into(),
+                id: 7,
+                count: 2,
+            },
+        );
+        assert_eq!(enc, r#"62-7["ok"]"#);
+        assert!(enc.len() <= hint);
+    }
+
+    // --- DynEvent ---
+
+    #[test]
+    fn dyn_event_new_has_no_attachments() {
+        let ev = DynEvent::new(r#"["ping"]"#, None);
+        assert!(ev.attachments.is_none());
+        assert!(ev.id.is_none());
+    }
+
+    #[test]
+    fn dyn_event_with_attachments() {
+        let ev =
+            DynEvent::new(r#"["ping"]"#, None).with_attachments(vec![Bytes::from_static(b"\x01")]);
+        assert_eq!(ev.attachments.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn dyn_event_display_shows_payload() {
+        let ev = DynEvent::new(r#"["ping"]"#, Some(3));
+        let s = format!("{ev}");
+        assert!(s.contains("ping"));
+    }
+
+    // --- DynAck ---
+
+    #[test]
+    fn dyn_ack_new_has_no_attachments() {
+        let ack = DynAck::new("[true]");
+        assert!(ack.attachments.is_none());
+    }
+
+    #[test]
+    fn dyn_ack_with_attachments() {
+        let ack = DynAck::new("[true]").with_attachments(vec![Bytes::from_static(b"\x02")]);
+        assert_eq!(ack.attachments.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn dyn_ack_display_shows_payload() {
+        let ack = DynAck::new("[true]");
+        let s = format!("{ack}");
+        assert!(s.contains("true"));
+    }
+
+    // --- Signal ---
+
+    fn make_connect() -> Connect {
+        Connect {
+            sid: bss("t"),
+            extra: Map::new(),
+        }
+    }
+
+    fn make_connect_error() -> ConnectError {
+        ConnectError {
+            message: bss("bad"),
+            extra: Map::new(),
+        }
+    }
+
+    #[test]
+    fn signal_take_event_returns_some() {
+        let sig = Signal::Event(DynEvent::new("[]", None));
+        assert!(sig.take_event().is_some());
+    }
+
+    #[test]
+    fn signal_take_event_on_non_event_returns_none() {
+        assert!(Signal::<u8>::Disconnect.take_event().is_none());
+        assert!(Signal::<u8>::Connect(make_connect()).take_event().is_none());
+        assert!(Signal::<u8>::ConnectError(make_connect_error())
+            .take_event()
+            .is_none());
+    }
+
+    #[test]
+    fn signal_map_transforms_event() {
+        let sig: Signal<u8> = Signal::Event(3u8);
+        assert!(matches!(sig.map(|x| x * 2), Signal::Event(6)));
+    }
+
+    #[test]
+    fn signal_map_passes_non_event_through() {
+        assert!(matches!(
+            Signal::<u8>::Disconnect.map(|x: u8| x * 2),
+            Signal::Disconnect
+        ));
+        assert!(matches!(
+            Signal::<u8>::Connect(make_connect()).map(|x: u8| x * 2),
+            Signal::Connect(_)
+        ));
+        assert!(matches!(
+            Signal::<u8>::ConnectError(make_connect_error()).map(|x: u8| x * 2),
+            Signal::ConnectError(_)
+        ));
+    }
+
+    #[test]
+    fn signal_and_then_returns_some_on_event() {
+        let sig: Signal<u8> = Signal::Event(3u8);
+        assert_eq!(sig.and_then(|x| if x > 0 { Some(x) } else { None }), Some(3));
+    }
+
+    #[test]
+    fn signal_and_then_returns_none_when_f_returns_none() {
+        let sig: Signal<u8> = Signal::Event(0u8);
+        assert!(sig
+            .and_then(|x| if x > 0 { Some(x) } else { None })
+            .is_none());
+    }
+
+    #[test]
+    fn signal_and_then_returns_none_on_non_event() {
+        assert!(Signal::<u8>::Disconnect
+            .and_then(|x: u8| Some(x))
+            .is_none());
+        assert!(Signal::<u8>::Connect(make_connect())
+            .and_then(|x: u8| Some(x))
+            .is_none());
+    }
+
+    #[test]
+    fn signal_display_variants() {
+        assert_eq!(format!("{}", Signal::<u8>::Disconnect), "Disconnect");
+        let ev_sig = Signal::Event(DynEvent::new("[]", None));
+        assert!(format!("{ev_sig}").contains("Event"));
+        let connect_sig: Signal<u8> = Signal::Connect(make_connect());
+        assert!(format!("{connect_sig}").contains("Connect"));
+        let err_sig: Signal<u8> = Signal::ConnectError(make_connect_error());
+        assert!(format!("{err_sig}").contains("ConnectError"));
+    }
+
+    #[test]
+    fn packet_display_variants() {
+        assert_eq!(format!("{}", Packet::Disconnect), "Disconnect");
+        assert!(format!("{}", Packet::Connect("{}".into())).contains("Connect"));
+        assert!(format!(
+            "{}",
+            Packet::Event {
+                payload: "[]".into(),
+                id: None,
+            }
+        )
+        .contains("Event"));
+    }
+}

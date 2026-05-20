@@ -226,3 +226,150 @@ where
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::{AckIdError, AttachmentsError, EventError};
+    use crate::marker::{HasAck, HasBinary, NoAck, NoBinary};
+    use crate::packet::DynEvent;
+    use crate::payload::DeserializePayload;
+    use bytes::Bytes;
+    use bytestring::ByteString;
+
+    fn bss(s: &'static str) -> ByteString {
+        ByteString::from_static(s)
+    }
+
+    // Minimal test event type: no ack, no binary.
+    #[derive(Debug, PartialEq)]
+    struct Ping;
+
+    impl EventType for Ping {
+        const NAME: &'static str = "ping";
+        type Ack = NoAck;
+        type Binary = NoBinary;
+    }
+
+    impl DeserializePayload for Ping {
+        fn deserialize_payload<'de, S>(seq: &mut S) -> Result<Self, S::Error>
+        where
+            S: serde::de::SeqAccess<'de>,
+        {
+            while let Some(serde::de::IgnoredAny) = seq.next_element()? {}
+            Ok(Ping)
+        }
+    }
+
+    // Event type with HasAck<()>.
+    #[derive(Debug, PartialEq)]
+    struct PingWithAck;
+
+    impl EventType for PingWithAck {
+        const NAME: &'static str = "ping";
+        type Ack = HasAck<()>;
+        type Binary = NoBinary;
+    }
+
+    impl DeserializePayload for PingWithAck {
+        fn deserialize_payload<'de, S>(seq: &mut S) -> Result<Self, S::Error>
+        where
+            S: serde::de::SeqAccess<'de>,
+        {
+            while let Some(serde::de::IgnoredAny) = seq.next_element()? {}
+            Ok(PingWithAck)
+        }
+    }
+
+    // Event type with HasBinary.
+    #[derive(Debug, PartialEq)]
+    struct PingWithBinary;
+
+    impl EventType for PingWithBinary {
+        const NAME: &'static str = "ping";
+        type Ack = NoAck;
+        type Binary = HasBinary;
+    }
+
+    impl DeserializePayload for PingWithBinary {
+        fn deserialize_payload<'de, S>(seq: &mut S) -> Result<Self, S::Error>
+        where
+            S: serde::de::SeqAccess<'de>,
+        {
+            while let Some(serde::de::IgnoredAny) = seq.next_element()? {}
+            Ok(PingWithBinary)
+        }
+    }
+
+    fn ping_event(id: Option<u64>, attachments: Option<Vec<Bytes>>) -> DynEvent {
+        DynEvent {
+            payload: bss(r#"["ping"]"#),
+            id,
+            attachments,
+        }
+    }
+
+    #[test]
+    fn try_from_basic_event_succeeds() {
+        let ev: Event<Ping> = ping_event(None, None).try_into().unwrap();
+        assert_eq!(ev.payload, Ping);
+    }
+
+    #[test]
+    fn try_from_wrong_name_fails() {
+        let dyn_ev = DynEvent {
+            payload: bss(r#"["pong"]"#),
+            id: None,
+            attachments: None,
+        };
+        assert!(matches!(
+            Event::<Ping>::try_from(dyn_ev),
+            Err(EventError::Payload(_))
+        ));
+    }
+
+    #[test]
+    fn try_from_unexpected_ack_id_fails() {
+        assert!(matches!(
+            Event::<Ping>::try_from(ping_event(Some(1), None)),
+            Err(EventError::AckId(AckIdError::Unexpected))
+        ));
+    }
+
+    #[test]
+    fn try_from_missing_ack_id_fails() {
+        assert!(matches!(
+            Event::<PingWithAck>::try_from(ping_event(None, None)),
+            Err(EventError::AckId(AckIdError::Missing))
+        ));
+    }
+
+    #[test]
+    fn try_from_with_ack_id_succeeds() {
+        let ev: Event<PingWithAck> = ping_event(Some(5), None).try_into().unwrap();
+        assert_eq!(ev.id.get(), 5);
+    }
+
+    #[test]
+    fn try_from_unexpected_attachments_fails() {
+        assert!(matches!(
+            Event::<Ping>::try_from(ping_event(None, Some(vec![Bytes::from_static(b"x")]))),
+            Err(EventError::Attachments(AttachmentsError::Unexpected))
+        ));
+    }
+
+    #[test]
+    fn try_from_missing_attachments_fails() {
+        assert!(matches!(
+            Event::<PingWithBinary>::try_from(ping_event(None, None)),
+            Err(EventError::Attachments(AttachmentsError::Missing))
+        ));
+    }
+
+    #[test]
+    fn try_from_with_attachments_succeeds() {
+        let att = vec![Bytes::from_static(b"\xFF")];
+        let ev: Event<PingWithBinary> = ping_event(None, Some(att)).try_into().unwrap();
+        assert_eq!(ev.attachments.len(), 1);
+    }
+}
