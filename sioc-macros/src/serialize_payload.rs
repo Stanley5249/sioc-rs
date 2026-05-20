@@ -3,8 +3,8 @@ use darling::FromDeriveInput;
 use proc_macro2::TokenStream;
 use quote::quote;
 
-pub fn expand(input: syn::DeriveInput) -> darling::Result<TokenStream> {
-    let input = SiocInput::from_derive_input(&input)?;
+pub fn expand(input: &syn::DeriveInput) -> darling::Result<TokenStream> {
+    let input = SiocInput::from_derive_input(input)?;
 
     let fields = match input.data {
         darling::ast::Data::Struct(f) => f,
@@ -18,7 +18,7 @@ pub fn expand(input: syn::DeriveInput) -> darling::Result<TokenStream> {
 
     let (impl_generics, type_generics, where_clause) = input.generics.split_for_impl();
     let ident = &input.ident;
-    let body = generate_body(fields);
+    let body = generate_body(&fields);
 
     Ok(quote! {
         impl #impl_generics ::sioc::prelude::SerializePayload for #ident #type_generics #where_clause {
@@ -32,14 +32,13 @@ pub fn expand(input: syn::DeriveInput) -> darling::Result<TokenStream> {
     })
 }
 
-fn generate_body(fields: darling::ast::Fields<SiocField>) -> TokenStream {
+fn generate_body(fields: &darling::ast::Fields<SiocField>) -> TokenStream {
     let it = fields.iter().enumerate().map(|(i, field)| {
-        let accessor = match &field.ident {
-            Some(name) => quote! { #name },
-            None => {
-                let index = syn::Index::from(i);
-                quote! { #index }
-            }
+        let accessor = if let Some(name) = &field.ident {
+            quote! { #name }
+        } else {
+            let index = syn::Index::from(i);
+            quote! { #index }
         };
 
         if field.flatten.is_present() {

@@ -24,7 +24,7 @@ pub enum Message {
 impl std::fmt::Display for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Text(s) => f.debug_tuple("Text").field(&format_args!("{}", s)).finish(),
+            Self::Text(s) => f.debug_tuple("Text").field(&format_args!("{s}")).finish(),
             Self::Binary(b) => f.debug_struct("Binary").field("len", &b.len()).finish(),
             Self::Close => f.write_str("Close"),
         }
@@ -164,12 +164,11 @@ impl Packet {
     /// # Errors
     ///
     /// Returns an error if the byte string is empty, has an unrecognised type ID, or the payload is malformed.
-    pub fn decode(bytes: ByteString) -> Result<Self, PacketError> {
+    pub fn decode(bytes: &ByteString) -> Result<Self, PacketError> {
         let mut chars = bytes.chars();
 
-        let id = match chars.next() {
-            Some(c) => c,
-            None => return Err(PacketError::Empty),
+        let Some(id) = chars.next() else {
+            return Err(PacketError::Empty);
         };
 
         let rest = chars.as_str();
@@ -222,11 +221,11 @@ impl std::fmt::Display for Packet {
                 .field(&format_args!("{}", h.sid))
                 .finish(),
             Self::Close => f.write_str("Close"),
-            Self::Ping(s) => f.debug_tuple("Ping").field(&format_args!("{}", s)).finish(),
-            Self::Pong(s) => f.debug_tuple("Pong").field(&format_args!("{}", s)).finish(),
+            Self::Ping(s) => f.debug_tuple("Ping").field(&format_args!("{s}")).finish(),
+            Self::Pong(s) => f.debug_tuple("Pong").field(&format_args!("{s}")).finish(),
             Self::Message(s) => f
                 .debug_tuple("Message")
-                .field(&format_args!("{}", s))
+                .field(&format_args!("{s}"))
                 .finish(),
             Self::Upgrade => f.write_str("Upgrade"),
             Self::Noop => f.write_str("Noop"),
@@ -256,23 +255,20 @@ mod tests {
             "pingInterval": 25000,
             "pingTimeout": 20000
         });
-        let bytes = ByteString::from(format!("0{}", json));
-        assert!(Packet::decode(bytes).is_err());
+        let bytes = ByteString::from(format!("0{json}"));
+        assert!(Packet::decode(&bytes).is_err());
     }
 
     #[test]
     fn handshake_ping_window() {
         let hs = test_handshake();
-        assert_eq!(
-            hs.ping_window(),
-            std::time::Duration::from_millis(25000 + 5000)
-        );
+        assert_eq!(hs.ping_window(), std::time::Duration::from_secs(30));
     }
 
     #[test]
     fn decode_invalid_packet_id() {
         assert!(matches!(
-            Packet::decode(ByteString::from_static("9")),
+            Packet::decode(&ByteString::from_static("9")),
             Err(PacketError::InvalidId { id: '9' })
         ));
     }
@@ -280,7 +276,7 @@ mod tests {
     #[test]
     fn decode_empty_packet() {
         assert!(matches!(
-            Packet::decode(ByteString::new()),
+            Packet::decode(&ByteString::new()),
             Err(PacketError::Empty)
         ));
     }
@@ -290,14 +286,14 @@ mod tests {
         let hs = test_handshake();
         let json = r#"{"sid":"abc","upgrades":["websocket"],"pingInterval":25000,"pingTimeout":5000,"maxPayload":1000000}"#;
         let bytes = ByteString::from(format!("0{json}"));
-        assert_eq!(Packet::decode(bytes).unwrap(), Packet::Open(hs));
+        assert_eq!(Packet::decode(&bytes).unwrap(), Packet::Open(hs));
     }
 
     #[test]
     fn encode_decode_close_round_trip() {
         let encoded = Packet::Close.encode();
         assert_eq!(
-            Packet::decode(ByteString::from(encoded)).unwrap(),
+            Packet::decode(&ByteString::from(encoded)).unwrap(),
             Packet::Close
         );
     }
@@ -307,7 +303,7 @@ mod tests {
         let payload = ByteString::from_static("probe");
         let encoded = Packet::Ping(payload.clone()).encode();
         assert_eq!(
-            Packet::decode(ByteString::from(encoded)).unwrap(),
+            Packet::decode(&ByteString::from(encoded)).unwrap(),
             Packet::Ping(payload)
         );
     }
@@ -316,7 +312,7 @@ mod tests {
     fn encode_decode_ping_empty_payload() {
         let encoded = Packet::Ping(ByteString::new()).encode();
         assert_eq!(
-            Packet::decode(ByteString::from(encoded)).unwrap(),
+            Packet::decode(&ByteString::from(encoded)).unwrap(),
             Packet::Ping(ByteString::new())
         );
     }
@@ -326,7 +322,7 @@ mod tests {
         let payload = ByteString::from_static("probe");
         let encoded = Packet::Pong(payload.clone()).encode();
         assert_eq!(
-            Packet::decode(ByteString::from(encoded)).unwrap(),
+            Packet::decode(&ByteString::from(encoded)).unwrap(),
             Packet::Pong(payload)
         );
     }
@@ -336,7 +332,7 @@ mod tests {
         let text = ByteString::from_static("hello world");
         let encoded = Packet::Message(text.clone()).encode();
         assert_eq!(
-            Packet::decode(ByteString::from(encoded)).unwrap(),
+            Packet::decode(&ByteString::from(encoded)).unwrap(),
             Packet::Message(text)
         );
     }
@@ -345,7 +341,7 @@ mod tests {
     fn encode_decode_upgrade_round_trip() {
         let encoded = Packet::Upgrade.encode();
         assert_eq!(
-            Packet::decode(ByteString::from(encoded)).unwrap(),
+            Packet::decode(&ByteString::from(encoded)).unwrap(),
             Packet::Upgrade
         );
     }
@@ -353,7 +349,7 @@ mod tests {
     #[test]
     fn decode_noop() {
         assert_eq!(
-            Packet::decode(ByteString::from_static("6")).unwrap(),
+            Packet::decode(&ByteString::from_static("6")).unwrap(),
             Packet::Noop
         );
     }

@@ -1,5 +1,3 @@
-#![allow(unused_assignments)] // named fields in #[error("...")] trigger this spuriously
-
 //! Error types for Engine.IO operations.
 
 use crate::engine::EngineAction;

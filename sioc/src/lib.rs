@@ -1,10 +1,6 @@
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
-#![warn(clippy::doc_markdown)]
-#![warn(clippy::missing_errors_doc)]
-#![warn(clippy::missing_panics_doc)]
-#![warn(clippy::return_self_not_must_use)]
-#![warn(clippy::must_use_candidate)]
+#![warn(clippy::pedantic)]
 
 pub mod ack;
 pub mod binary;

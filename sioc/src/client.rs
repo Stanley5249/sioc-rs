@@ -79,7 +79,7 @@ impl Default for ChannelConfig {
 }
 
 impl From<()> for ChannelConfig {
-    fn from(_: ()) -> Self {
+    fn from((): ()) -> Self {
         Self::default()
     }
 }
@@ -431,7 +431,7 @@ impl SocketReceiver {
             match self.rx.recv().await {
                 None => return Ok(None),
                 Some(Signal::Event(e)) => return E::try_from(e).map(Some),
-                Some(_) => continue,
+                Some(_) => {}
             }
         }
     }

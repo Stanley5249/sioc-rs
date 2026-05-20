@@ -69,7 +69,7 @@ impl Stream for WebSocketStream {
                             tracing::trace!(bytes = text.len(), "<- TEXT");
 
                             let bytes = bytestring_from_utf8_bytes(text);
-                            let packet = Packet::decode(bytes)?;
+                            let packet = Packet::decode(&bytes)?;
 
                             Some(Ok(Frame::Packet(packet)))
                         }
@@ -200,7 +200,7 @@ impl WebSocketStream {
 
         match self.recv().await? {
             Frame::Packet(Packet::Pong(payload)) if payload == PROBE => {
-                tracing::debug!("<- PONG probe")
+                tracing::debug!("<- PONG probe");
             }
 
             frame => return Err(WebSocketError::Probe(frame)),
@@ -224,25 +224,22 @@ impl WebSocketStream {
         frame_tx: FrameSender,
         mut transport_rx: mpsc::Receiver<Frame>,
     ) -> Result<(), TransportError> {
-        match handshake_tx {
-            Some(handshake_tx) => {
-                let handshake = match self.recv().await? {
-                    Frame::Packet(Packet::Open(handshake)) => handshake,
-                    frame => return Err(TransportError::Open(frame)),
-                };
+        if let Some(handshake_tx) = handshake_tx {
+            let handshake = match self.recv().await? {
+                Frame::Packet(Packet::Open(handshake)) => handshake,
+                frame => return Err(TransportError::Open(frame)),
+            };
 
-                tracing::debug!(sid = %handshake.sid, "<- OPEN");
+            tracing::debug!(sid = %handshake.sid, "<- OPEN");
 
-                handshake_tx
-                    .send(handshake)
-                    .map_err(TransportError::SendHandshake)?;
-            }
-            None => {
-                tracing::debug!("-> UPGRADE");
+            handshake_tx
+                .send(handshake)
+                .map_err(TransportError::SendHandshake)?;
+        } else {
+            tracing::debug!("-> UPGRADE");
 
-                self.send(Packet::Upgrade.into()).await?;
-            }
-        };
+            self.send(Packet::Upgrade.into()).await?;
+        }
 
         loop {
             tokio::select! {

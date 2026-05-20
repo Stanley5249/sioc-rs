@@ -6,7 +6,7 @@ use crate::error::{PollingError, TransportError};
 use crate::packet::{Frame, Handshake, Packet};
 use crate::prelude::WebSocketStream;
 use crate::websocket::WebSocketConnector;
-use base64::prelude::*;
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use bytes::Bytes;
 use bytestring::ByteString;
 use reqwest::Client;
@@ -22,11 +22,11 @@ impl Frame {
         Ok(Self::Binary(Bytes::from(BASE64_STANDARD.decode(data)?)))
     }
 
-    fn decode_packet(bytes: ByteString) -> Result<Self, PollingError> {
+    fn decode_packet(bytes: &ByteString) -> Result<Self, PollingError> {
         Ok(Self::Packet(Packet::decode(bytes)?))
     }
 
-    fn decode(bytes: ByteString) -> Result<Self, PollingError> {
+    fn decode(bytes: &ByteString) -> Result<Self, PollingError> {
         let mut chars = bytes.chars();
 
         if chars.next().is_some_and(|b| b == 'b') {
@@ -47,10 +47,10 @@ impl Frame {
     }
 }
 
-fn decode_frames(bytes: ByteString) -> Result<Vec<Frame>, PollingError> {
+fn decode_frames(bytes: &ByteString) -> Result<Vec<Frame>, PollingError> {
     bytes
         .split(SEPARATOR)
-        .map(|s| Frame::decode(bytes.slice_ref(s)))
+        .map(|s| Frame::decode(&bytes.slice_ref(s)))
         .collect()
 }
 
@@ -90,7 +90,7 @@ impl PollingClient {
             .await?;
 
         tracing::trace!(bytes = response.len(), "<- GET");
-        decode_frames(response.into())
+        decode_frames(&ByteString::from(response))
     }
 
     async fn get_one(&self, url: &Url) -> Result<Frame, PollingError> {
@@ -105,7 +105,7 @@ impl PollingClient {
 
         tracing::trace!(bytes = response.len(), "<- GET");
 
-        Frame::decode(response.into())
+        Frame::decode(&ByteString::from(response))
     }
 
     async fn post(&self, url: &Url, frames: &[Frame]) -> Result<(), PollingError> {
@@ -143,7 +143,7 @@ impl PollingClient {
 
         loop {
             let count = tokio::select! {
-                _ = token.cancelled() => {
+                () = token.cancelled() => {
                     tracing::debug!("cancelled polling POST");
                     break;
                 },

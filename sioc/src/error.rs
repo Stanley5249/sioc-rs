@@ -1,5 +1,3 @@
-#![allow(unused_assignments)] // named fields in #[error("...")] trigger this spuriously
-
 //! Error types for the `sioc` crate.
 //!
 //! Each fallible operation returns a specific error type.  [`enum@Error`] is a

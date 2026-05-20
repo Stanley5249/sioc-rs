@@ -441,17 +441,14 @@ impl Manager {
         let binaries = attachments.into_iter().flatten().map(Message::Binary);
         let messages = std::iter::once(text).chain(binaries);
 
-        match socket_buffer {
-            Some(buffer) => {
-                buffer.extend(messages);
+        if let Some(buffer) = socket_buffer {
+            buffer.extend(messages);
 
-                tracing::trace!(%ns, %packet, buffer.len = buffer.len(), "buffering messages");
-            }
-            None => {
-                tracing::trace!(%ns, %packet, "-> packet");
-                for message in messages {
-                    message_tx.send(message).await?;
-                }
+            tracing::trace!(%ns, %packet, buffer.len = buffer.len(), "buffering messages");
+        } else {
+            tracing::trace!(%ns, %packet, "-> packet");
+            for message in messages {
+                message_tx.send(message).await?;
             }
         }
 
@@ -557,7 +554,7 @@ impl Manager {
                 self.reconstructor
                     .insert(ns, BinaryPacket::ack(payload, id, count));
             }
-        };
+        }
 
         Ok(())
     }
@@ -666,7 +663,7 @@ mod tests {
         engine_rx.recv().await.unwrap();
 
         for c in 'a'..='c' {
-            let payload = format!("[\"{}\"]", c);
+            let payload = format!("[\"{c}\"]");
 
             manager_tx
                 .send(ManagerAction::Socket(Ns(
@@ -690,7 +687,7 @@ mod tests {
         for exp in &expected {
             match engine_rx.recv().await.unwrap() {
                 EngineAction::Sink(Message::Text(text)) => assert_eq!(&*text, *exp),
-                other => panic!("expected Text, got {:?}", other),
+                other => panic!("expected Text, got {other:?}"),
             }
         }
         assert!(matches!(

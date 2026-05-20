@@ -1,3 +1,5 @@
+#![allow(clippy::needless_continue)]
+
 use darling::{FromDeriveInput, FromField, FromMeta, FromVariant};
 
 #[derive(FromDeriveInput)]

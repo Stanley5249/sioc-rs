@@ -3,8 +3,8 @@ use darling::FromDeriveInput;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
-pub fn expand(input: syn::DeriveInput) -> darling::Result<TokenStream> {
-    let input = SiocInput::from_derive_input(&input)?;
+pub fn expand(input: &syn::DeriveInput) -> darling::Result<TokenStream> {
+    let input = SiocInput::from_derive_input(input)?;
 
     let fields = match input.data {
         darling::ast::Data::Struct(f) => f,
@@ -33,12 +33,11 @@ pub fn expand(input: syn::DeriveInput) -> darling::Result<TokenStream> {
 }
 
 fn var_for_field(f: &SiocField, pos: usize) -> TokenStream {
-    match &f.ident {
-        Some(name) => quote! { #name },
-        None => {
-            let v = format_ident!("__field_{}", pos);
-            quote! { #v }
-        }
+    if let Some(name) = &f.ident {
+        quote! { #name }
+    } else {
+        let v = format_ident!("__field_{pos}");
+        quote! { #v }
     }
 }
 

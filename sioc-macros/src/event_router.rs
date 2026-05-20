@@ -3,39 +3,60 @@ use darling::FromDeriveInput;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
-pub fn expand(input: syn::DeriveInput) -> darling::Result<TokenStream> {
-    let input = SiocInput::from_derive_input(&input)?;
-    let enum_ident = &input.ident;
+struct ExpandData {
+    enum_ident: syn::Ident,
+    helper_ident: syn::Ident,
+    visitor_ident: syn::Ident,
+    variants: Vec<(syn::Ident, syn::Type)>,
+}
 
-    let variants = match input.data {
+fn parse_expand_data(input: SiocInput) -> darling::Result<ExpandData> {
+    let enum_ident = input.ident.clone();
+
+    let raw_variants = match input.data {
         darling::ast::Data::Enum(v) => v,
         darling::ast::Data::Struct(..) => {
             return Err(
                 darling::Error::unsupported_shape_with_expected("struct", &"enum")
-                    .with_span(&input.ident),
+                    .with_span(&enum_ident),
             );
         }
     };
 
     let shape = darling::util::ShapeSet::new([darling::util::Shape::Newtype]);
-
-    for variant in &variants {
+    for variant in &raw_variants {
         shape
             .check(&variant.fields)
             .map_err(|e| e.with_span(&variant.ident))?;
     }
 
+    let variants = raw_variants
+        .into_iter()
+        .map(|v| {
+            let ty = v.fields.into_iter().next().unwrap().ty;
+            (v.ident, ty)
+        })
+        .collect();
+
     let helper_ident = format_ident!("__{enum_ident}Helper");
     let visitor_ident = format_ident!("__{enum_ident}Visitor");
 
-    let variants = variants
-        .into_iter()
-        .map(|v| {
-            let ident = v.ident;
-            let ty = v.fields.into_iter().next().unwrap().ty;
-            (ident, ty)
-        })
-        .collect::<Vec<_>>();
+    Ok(ExpandData {
+        enum_ident,
+        helper_ident,
+        visitor_ident,
+        variants,
+    })
+}
+
+pub fn expand(input: &syn::DeriveInput) -> darling::Result<TokenStream> {
+    let input = SiocInput::from_derive_input(input)?;
+    let ExpandData {
+        enum_ident,
+        helper_ident,
+        visitor_ident,
+        variants,
+    } = parse_expand_data(input)?;
 
     let helper_variants = variants.iter().map(|(vi, ty)| {
         quote! { #vi(<#ty as ::sioc::prelude::EventHandler>::Payload) }

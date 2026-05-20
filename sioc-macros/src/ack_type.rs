@@ -8,8 +8,8 @@ use quote::quote;
 /// Expands `#[derive(AckType)]` into an `AckType` trait implementation.
 ///
 /// Generates `type Binary` for the annotated struct.
-pub fn expand(input: syn::DeriveInput) -> darling::Result<TokenStream> {
-    let input = SiocInput::from_derive_input(&input)?;
+pub fn expand(input: &syn::DeriveInput) -> darling::Result<TokenStream> {
+    let input = SiocInput::from_derive_input(input)?;
 
     let (impl_generics, type_generics, where_clause) = input.generics.split_for_impl();
     let ident = &input.ident;

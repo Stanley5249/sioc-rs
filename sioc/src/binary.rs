@@ -43,7 +43,8 @@ impl Serialize for Placeholder {
 
 #[derive(Deserialize)]
 struct RawPlaceholder {
-    _placeholder: bool,
+    #[serde(rename = "_placeholder")]
+    placeholder: bool,
     num: usize,
 }
 
@@ -53,7 +54,7 @@ impl<'de> Deserialize<'de> for Placeholder {
         D: Deserializer<'de>,
     {
         let raw = RawPlaceholder::deserialize(deserializer)?;
-        if !raw._placeholder {
+        if !raw.placeholder {
             Err(serde::de::Error::custom("expected _placeholder to be true"))?;
         }
         Ok(Placeholder { num: raw.num })
@@ -74,7 +75,7 @@ impl AttachmentsBuilder {
     /// Creates an empty builder.
     #[must_use]
     pub fn new() -> Self {
-        Default::default()
+        AttachmentsBuilder::default()
     }
 
     /// Registers `data` as the next binary attachment and returns a
