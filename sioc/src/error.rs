@@ -29,6 +29,7 @@ pub struct PayloadError {
 
 impl PayloadError {
     /// Creates a `PayloadError` for type `T`.
+    #[must_use]
     pub fn new<T>(source: serde_path_to_error::Error<serde_json::Error>) -> Self {
         Self {
             type_name: std::any::type_name::<T>(),

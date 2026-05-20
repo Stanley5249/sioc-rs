@@ -80,6 +80,7 @@ impl DynEvent {
     }
 
     /// Attaches binary payloads to this event.
+    #[must_use]
     pub fn with_attachments(mut self, attachments: Vec<Bytes>) -> Self {
         self.attachments = Some(attachments);
         self
@@ -121,6 +122,7 @@ impl DynAck {
     }
 
     /// Attaches binary payloads to this ack.
+    #[must_use]
     pub fn with_attachments(mut self, attachments: Vec<Bytes>) -> Self {
         self.attachments = Some(attachments);
         self

@@ -96,6 +96,7 @@ impl From<usize> for ChannelConfig {
 }
 
 /// Builder for a [`Client`] connection.
+#[must_use = "call open() to connect"]
 ///
 /// # Example
 ///

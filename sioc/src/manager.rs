@@ -316,6 +316,7 @@ pub struct Manager {
 
 impl Manager {
     /// Creates a manager that reads from `rx`.
+    #[must_use]
     pub fn new(rx: mpsc::Receiver<ManagerAction>) -> Self {
         Self {
             rx,

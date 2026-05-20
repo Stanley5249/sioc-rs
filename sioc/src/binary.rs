@@ -23,6 +23,7 @@ pub struct Placeholder {
 
 impl Placeholder {
     /// Consumes the placeholder and returns its zero-based attachment index.
+    #[must_use]
     pub fn num(self) -> usize {
         self.num
     }
@@ -71,6 +72,7 @@ pub struct AttachmentsBuilder {
 
 impl AttachmentsBuilder {
     /// Creates an empty builder.
+    #[must_use]
     pub fn new() -> Self {
         Default::default()
     }
@@ -85,6 +87,7 @@ impl AttachmentsBuilder {
 
     /// Consumes the builder and returns the accumulated attachment buffers
     /// in registration order.
+    #[must_use]
     pub fn finish(self) -> Vec<Bytes> {
         self.buffer
     }

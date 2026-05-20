@@ -90,6 +90,7 @@ impl<A> AckId<A> {
     }
 
     /// Consumes the wrapper and returns the raw wire-level `u64` ID.
+    #[must_use]
     pub fn get(self) -> u64 {
         self.0
     }

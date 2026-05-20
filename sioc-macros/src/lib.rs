@@ -1,6 +1,8 @@
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
 #![warn(clippy::doc_markdown)]
+#![warn(clippy::return_self_not_must_use)]
+#![warn(clippy::must_use_candidate)]
 
 mod ack_type;
 mod attrs;
