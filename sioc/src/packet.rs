@@ -1064,30 +1064,75 @@ mod tests {
     fn packet_display_variants() {
         assert_eq!(format!("{}", Packet::Disconnect), "Disconnect");
         assert!(format!("{}", Packet::Connect("{}".into())).contains("Connect"));
-        assert!(format!("{}", Packet::Event { payload: "[]".into(), id: None }).contains("Event"));
         assert!(
-            format!("{}", Packet::Event { payload: "[]".into(), id: Some(3) }).contains("id")
+            format!(
+                "{}",
+                Packet::Event {
+                    payload: "[]".into(),
+                    id: None
+                }
+            )
+            .contains("Event")
         );
-        assert!(format!("{}", Packet::Ack { payload: "[]".into(), id: 5 }).contains("Ack"));
+        assert!(
+            format!(
+                "{}",
+                Packet::Event {
+                    payload: "[]".into(),
+                    id: Some(3)
+                }
+            )
+            .contains("id")
+        );
+        assert!(
+            format!(
+                "{}",
+                Packet::Ack {
+                    payload: "[]".into(),
+                    id: 5
+                }
+            )
+            .contains("Ack")
+        );
         assert!(format!("{}", Packet::ConnectError("{}".into())).contains("ConnectError"));
         assert!(
-            format!("{}", Packet::BinaryEvent { payload: "[]".into(), id: None, count: 2 })
-                .contains("BinaryEvent")
+            format!(
+                "{}",
+                Packet::BinaryEvent {
+                    payload: "[]".into(),
+                    id: None,
+                    count: 2
+                }
+            )
+            .contains("BinaryEvent")
         );
         assert!(
-            format!("{}", Packet::BinaryEvent { payload: "[]".into(), id: Some(3), count: 2 })
-                .contains("id")
+            format!(
+                "{}",
+                Packet::BinaryEvent {
+                    payload: "[]".into(),
+                    id: Some(3),
+                    count: 2
+                }
+            )
+            .contains("id")
         );
         assert!(
-            format!("{}", Packet::BinaryAck { payload: "[]".into(), id: 5, count: 2 })
-                .contains("BinaryAck")
+            format!(
+                "{}",
+                Packet::BinaryAck {
+                    payload: "[]".into(),
+                    id: 5,
+                    count: 2
+                }
+            )
+            .contains("BinaryAck")
         );
     }
 
     #[test]
     fn dyn_event_display_with_attachments() {
-        let ev =
-            DynEvent::new("[]", None).with_attachments(vec![Bytes::from_static(b"\x01")]);
+        let ev = DynEvent::new("[]", None).with_attachments(vec![Bytes::from_static(b"\x01")]);
         let s = format!("{ev}");
         assert!(s.contains("count"));
     }
