@@ -701,7 +701,10 @@ mod tests {
 
     #[test]
     fn decode_invalid_id_is_error() {
-        assert!(matches!(decode("9"), Err(PacketError::InvalidId { id: '9' })));
+        assert!(matches!(
+            decode("9"),
+            Err(PacketError::InvalidId { id: '9' })
+        ));
     }
 
     #[test]
@@ -989,9 +992,11 @@ mod tests {
     fn signal_take_event_on_non_event_returns_none() {
         assert!(Signal::<u8>::Disconnect.take_event().is_none());
         assert!(Signal::<u8>::Connect(make_connect()).take_event().is_none());
-        assert!(Signal::<u8>::ConnectError(make_connect_error())
-            .take_event()
-            .is_none());
+        assert!(
+            Signal::<u8>::ConnectError(make_connect_error())
+                .take_event()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1019,25 +1024,29 @@ mod tests {
     #[test]
     fn signal_and_then_returns_some_on_event() {
         let sig: Signal<u8> = Signal::Event(3u8);
-        assert_eq!(sig.and_then(|x| if x > 0 { Some(x) } else { None }), Some(3));
+        assert_eq!(
+            sig.and_then(|x| if x > 0 { Some(x) } else { None }),
+            Some(3)
+        );
     }
 
     #[test]
     fn signal_and_then_returns_none_when_f_returns_none() {
         let sig: Signal<u8> = Signal::Event(0u8);
-        assert!(sig
-            .and_then(|x| if x > 0 { Some(x) } else { None })
-            .is_none());
+        assert!(
+            sig.and_then(|x| if x > 0 { Some(x) } else { None })
+                .is_none()
+        );
     }
 
     #[test]
     fn signal_and_then_returns_none_on_non_event() {
-        assert!(Signal::<u8>::Disconnect
-            .and_then(|x: u8| Some(x))
-            .is_none());
-        assert!(Signal::<u8>::Connect(make_connect())
-            .and_then(|x: u8| Some(x))
-            .is_none());
+        assert!(Signal::<u8>::Disconnect.and_then(|x: u8| Some(x)).is_none());
+        assert!(
+            Signal::<u8>::Connect(make_connect())
+                .and_then(|x: u8| Some(x))
+                .is_none()
+        );
     }
 
     #[test]
@@ -1055,13 +1064,15 @@ mod tests {
     fn packet_display_variants() {
         assert_eq!(format!("{}", Packet::Disconnect), "Disconnect");
         assert!(format!("{}", Packet::Connect("{}".into())).contains("Connect"));
-        assert!(format!(
-            "{}",
-            Packet::Event {
-                payload: "[]".into(),
-                id: None,
-            }
-        )
-        .contains("Event"));
+        assert!(
+            format!(
+                "{}",
+                Packet::Event {
+                    payload: "[]".into(),
+                    id: None,
+                }
+            )
+            .contains("Event")
+        );
     }
 }

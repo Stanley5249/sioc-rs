@@ -352,10 +352,7 @@ mod tests {
 
     #[test]
     fn decode_noop() {
-        assert_eq!(
-            Packet::decode(&bss("6")).unwrap(),
-            Packet::Noop
-        );
+        assert_eq!(Packet::decode(&bss("6")).unwrap(), Packet::Noop);
     }
 
     #[test]
@@ -411,7 +408,10 @@ mod tests {
 
     #[test]
     fn message_display_binary() {
-        let s = format!("{}", Message::Binary(bytes::Bytes::from_static(b"\x01\x02")));
+        let s = format!(
+            "{}",
+            Message::Binary(bytes::Bytes::from_static(b"\x01\x02"))
+        );
         assert!(s.contains('2'));
     }
 
@@ -419,5 +419,4 @@ mod tests {
     fn message_display_close() {
         assert_eq!(format!("{}", Message::Close), "Close");
     }
-
 }
