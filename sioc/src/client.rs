@@ -450,3 +450,120 @@ impl std::ops::DerefMut for SocketReceiver {
         &mut self.rx
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manager::ManagerAction;
+    use crate::packet::{Connect, ConnectError, Directive, DynEvent, Ns, Signal};
+    use serde_json::Map;
+    use tokio::sync::mpsc;
+
+    fn make_directive_sender() -> (DirectiveSender, mpsc::Receiver<ManagerAction>) {
+        let (tx, rx) = mpsc::channel(8);
+        (DirectiveSender::new(tx), rx)
+    }
+
+    struct Pass(DynEvent);
+
+    impl From<DynEvent> for Pass {
+        fn from(e: DynEvent) -> Self {
+            Self(e)
+        }
+    }
+
+    #[test]
+    fn channel_config_default_is_32() {
+        let c = ChannelConfig::default();
+        assert_eq!((c.engine, c.transport, c.manager, c.socket), (32, 32, 32, 32));
+    }
+
+    #[test]
+    fn channel_config_from_unit_matches_default() {
+        let c = ChannelConfig::from(());
+        assert_eq!((c.engine, c.transport, c.manager, c.socket), (32, 32, 32, 32));
+    }
+
+    #[test]
+    fn channel_config_from_usize_uniform() {
+        let c = ChannelConfig::from(8_usize);
+        assert_eq!((c.engine, c.transport, c.manager, c.socket), (8, 8, 8, 8));
+    }
+
+    #[tokio::test]
+    async fn listen_skips_protocol_signals() {
+        let (tx, rx) = mpsc::channel(8);
+        let mut receiver = SocketReceiver { rx };
+        tx.send(Signal::Connect(Connect {
+            sid: ByteString::default(),
+            extra: Map::default(),
+        }))
+        .await
+        .unwrap();
+        tx.send(Signal::Disconnect).await.unwrap();
+        tx.send(Signal::ConnectError(ConnectError {
+            message: "err".into(),
+            extra: Map::default(),
+        }))
+        .await
+        .unwrap();
+        tx.send(Signal::Event(DynEvent::new(r#"["hi"]"#, None)))
+            .await
+            .unwrap();
+        let Pass(event) = receiver.listen::<Pass>().await.unwrap().unwrap();
+        assert_eq!(event.payload, r#"["hi"]"#);
+    }
+
+    #[tokio::test]
+    async fn listen_returns_none_on_closed_channel() {
+        let (tx, rx) = mpsc::channel::<Signal>(4);
+        let mut receiver = SocketReceiver { rx };
+        drop(tx);
+        assert!(receiver.listen::<Pass>().await.unwrap().is_none());
+    }
+
+    #[test]
+    fn drop_sends_dropped_when_not_disconnected() {
+        let (directive_tx, mut rx) = make_directive_sender();
+        let sender = SocketSender::new("ns".into(), directive_tx);
+        drop(sender);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ManagerAction::Socket(Ns(_, Directive::Dropped))
+        ));
+    }
+
+    #[tokio::test]
+    async fn drop_is_no_op_after_disconnect() {
+        let (directive_tx, mut rx) = make_directive_sender();
+        let sender = SocketSender::new("ns".into(), directive_tx);
+        sender.disconnect().await;
+        drop(sender);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ManagerAction::Socket(Ns(_, Directive::Disconnect))
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn disconnect_sends_disconnect_directive() {
+        let (directive_tx, mut rx) = make_directive_sender();
+        let sender = SocketSender::new("ns".into(), directive_tx);
+        sender.disconnect().await;
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ManagerAction::Socket(Ns(_, Directive::Disconnect))
+        ));
+    }
+
+    #[tokio::test]
+    async fn disconnect_is_idempotent() {
+        let (directive_tx, mut rx) = make_directive_sender();
+        let sender = SocketSender::new("ns".into(), directive_tx);
+        sender.disconnect().await;
+        sender.disconnect().await;
+        rx.try_recv().unwrap();
+        assert!(rx.try_recv().is_err());
+    }
+}
