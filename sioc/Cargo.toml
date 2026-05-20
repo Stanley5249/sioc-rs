@@ -31,4 +31,7 @@ tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+axum = "0.8.9"
+socketioxide = "0.18.3"
 tokio = { workspace = true, features = ["full"] }
+url.workspace = true
