@@ -188,7 +188,10 @@ impl WebSocketStream {
 
     /// Waits for the next frame, returning an error if the stream is closed.
     async fn recv(&mut self) -> Result<Frame, WebSocketError> {
-        self.next().await.ok_or(WebSocketError::Closed).flatten()
+        self.next()
+            .await
+            .ok_or(WebSocketError::Closed)
+            .and_then(|r| r)
     }
 
     /// Sends a probe `Ping` and expects a matching `Pong`, confirming the WebSocket path is live.
