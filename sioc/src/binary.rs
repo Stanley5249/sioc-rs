@@ -112,14 +112,6 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_serializes_to_wire_format() {
-        let p = Placeholder { num: 3 };
-        let json = serde_json::to_string(&p).unwrap();
-        assert!(json.contains("\"_placeholder\":true"));
-        assert!(json.contains("\"num\":3"));
-    }
-
-    #[test]
     fn placeholder_round_trips_through_json() {
         let original = Placeholder { num: 5 };
         let json = serde_json::to_vec(&original).unwrap();

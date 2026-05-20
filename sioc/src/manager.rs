@@ -686,11 +686,12 @@ mod tests {
 
         server_connect(&manager_tx).await;
 
-        for _ in 0..3 {
-            assert!(matches!(
-                engine_rx.recv().await.unwrap(),
-                EngineAction::Sink(Message::Text(_))
-            ));
+        let expected = ["2[\"a\"]", "2[\"b\"]", "2[\"c\"]"];
+        for exp in &expected {
+            match engine_rx.recv().await.unwrap() {
+                EngineAction::Sink(Message::Text(text)) => assert_eq!(&*text, *exp),
+                other => panic!("expected Text, got {:?}", other),
+            }
         }
         assert!(matches!(
             socket_rx.recv().await.unwrap(),
@@ -769,22 +770,28 @@ mod tests {
     async fn double_disconnect_returns_error() {
         let (manager_tx, mut engine_rx, handle) = setup_manager();
         let _socket_rx = open_namespace(&manager_tx, "/").await;
-        engine_rx.recv().await.unwrap();
+        let _other_rx = open_namespace(&manager_tx, "/other").await;
+        engine_rx.recv().await.unwrap(); // drain `/` connect frame
+        engine_rx.recv().await.unwrap(); // drain `/other` connect frame
 
-        server_connect(&manager_tx).await;
+        // First disconnect succeeds; manager stays alive because `/other` is still open.
+        manager_tx
+            .send(ManagerAction::Socket(Ns("/".into(), Directive::Disconnect)))
+            .await
+            .unwrap();
+        engine_rx.recv().await.unwrap(); // drain disconnect frame
+
+        // Second disconnect on the same namespace must return UnknownNamespace.
         manager_tx
             .send(ManagerAction::Socket(Ns("/".into(), Directive::Disconnect)))
             .await
             .unwrap();
 
-        // Drain the disconnect frame and Close so the second disconnect can be processed.
-        engine_rx.recv().await.unwrap(); // disconnect frame
-        engine_rx.recv().await.unwrap(); // Close
-
-        // Manager already broke out of the loop; second disconnect goes unprocessed.
-        // Verify the manager task exited cleanly after the first disconnect.
         drop(manager_tx);
-        handle.await.unwrap().unwrap();
+        assert!(matches!(
+            handle.await.unwrap(),
+            Err(crate::error::ManagerError::UnknownNamespace { .. })
+        ));
     }
 
     /// Ack IDs are assigned per-namespace and responses route back correctly.
@@ -862,7 +869,12 @@ mod tests {
 
         let pkt = socket_rx.recv().await.unwrap();
         match pkt {
-            Signal::Event(ev) => assert_eq!(ev.attachments.as_ref().unwrap().len(), 2),
+            Signal::Event(ev) => {
+                let attachments = ev.attachments.as_ref().unwrap();
+                assert_eq!(attachments.len(), 2);
+                assert_eq!(attachments[0], Bytes::from_static(b"\x01\x02"));
+                assert_eq!(attachments[1], Bytes::from_static(b"\x03\x04"));
+            }
             other => panic!("expected Event, got {other:?}"),
         }
     }
