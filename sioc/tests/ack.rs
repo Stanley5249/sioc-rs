@@ -17,6 +17,11 @@ struct Save {
 #[sioc(strict)]
 struct Strict(bool);
 
+/// Binary ack: carries binary attachments.
+#[derive(Debug, PartialEq, AckType)]
+#[sioc(ack(binary))]
+struct BinaryStatus(bool);
+
 /// Flatten: collects trailing elements into `extras`.
 #[derive(Debug, PartialEq, AckType, SerializePayload, DeserializePayload)]
 struct Flex {
@@ -25,12 +30,19 @@ struct Flex {
     extras: Vec<serde_json::Value>,
 }
 
+fn assert_binary_marker<A: AckType<Binary = HasBinary>>() {}
+
 fn roundtrip<A>(val: A)
 where
     A: std::fmt::Debug + PartialEq + AckType + SerializePayload + DeserializePayload,
 {
     let bytes = ack_to_json(&val).unwrap();
     assert_eq!(ack_from_json::<A>(&bytes).unwrap(), val);
+}
+
+#[test]
+fn binary_ack_marker() {
+    assert_binary_marker::<BinaryStatus>();
 }
 
 #[test]

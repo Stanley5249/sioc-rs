@@ -57,3 +57,14 @@ fn generate_body(fields: &darling::ast::Fields<SiocField>) -> TokenStream {
         ::std::result::Result::Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enum_input_returns_error() {
+        let input: syn::DeriveInput = syn::parse_str("enum Foo { A(i32) }").unwrap();
+        assert!(expand(&input).is_err());
+    }
+}

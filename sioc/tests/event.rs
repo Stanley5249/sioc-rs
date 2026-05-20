@@ -21,6 +21,13 @@ struct Payload<T: serde::Serialize + serde::de::DeserializeOwned> {
     value: T,
 }
 
+/// Binary event: carries binary attachments.
+#[derive(Debug, PartialEq, EventType, SerializePayload, DeserializePayload)]
+#[sioc(event(binary))]
+struct Upload {
+    name: String,
+}
+
 /// Strict: rejects trailing elements.
 #[derive(Debug, PartialEq, EventType, SerializePayload, DeserializePayload)]
 #[sioc(strict)]
@@ -34,12 +41,19 @@ struct Stream {
     tags: Vec<serde_json::Value>,
 }
 
+fn assert_binary_marker<E: EventType<Binary = HasBinary>>() {}
+
 fn roundtrip<E>(val: E)
 where
     E: std::fmt::Debug + PartialEq + EventType + SerializePayload + DeserializePayload,
 {
     let bytes = event_to_json(&val).unwrap();
     assert_eq!(event_from_json::<E>(&bytes).unwrap(), val);
+}
+
+#[test]
+fn binary_event_marker() {
+    assert_binary_marker::<Upload>();
 }
 
 #[test]

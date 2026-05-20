@@ -153,3 +153,14 @@ pub fn expand(input: &syn::DeriveInput) -> darling::Result<TokenStream> {
         }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn struct_input_returns_error() {
+        let input: syn::DeriveInput = syn::parse_str("struct Foo { x: i32 }").unwrap();
+        assert!(expand(&input).is_err());
+    }
+}
