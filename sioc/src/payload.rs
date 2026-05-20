@@ -242,3 +242,88 @@ where
         A::deserialize_payload(&mut seq).map(AckPayload)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::marker::NoBinary;
+
+    struct TestEvent;
+
+    impl EventType for TestEvent {
+        const NAME: &'static str = "test";
+        type Ack = crate::marker::NoAck;
+        type Binary = NoBinary;
+    }
+
+    impl DeserializePayload for TestEvent {
+        fn deserialize_payload<'de, S>(seq: &mut S) -> Result<Self, S::Error>
+        where
+            S: serde::de::SeqAccess<'de>,
+        {
+            while let Some(serde::de::IgnoredAny) = seq.next_element()? {}
+            Ok(TestEvent)
+        }
+    }
+
+    impl SerializePayload for TestEvent {
+        fn serialize_payload<S>(&self, _seq: &mut S) -> Result<(), S::Error>
+        where
+            S: serde::ser::SerializeSeq,
+        {
+            Ok(())
+        }
+    }
+
+    struct TestAck;
+
+    impl AckType for TestAck {
+        type Binary = NoBinary;
+    }
+
+    impl DeserializePayload for TestAck {
+        fn deserialize_payload<'de, S>(seq: &mut S) -> Result<Self, S::Error>
+        where
+            S: serde::de::SeqAccess<'de>,
+        {
+            while let Some(serde::de::IgnoredAny) = seq.next_element()? {}
+            Ok(TestAck)
+        }
+    }
+
+    #[test]
+    fn to_json_roundtrip() {
+        assert_eq!(to_json(&42u32).unwrap(), "42");
+    }
+
+    #[test]
+    fn from_json_roundtrip() {
+        let value: u32 = from_json("42").unwrap();
+        assert_eq!(value, 42u32);
+    }
+
+    #[test]
+    fn from_json_invalid_fails() {
+        assert!(from_json::<u32>("not_a_number").is_err());
+    }
+
+    #[test]
+    fn event_to_json_roundtrip() {
+        assert_eq!(event_to_json(&TestEvent).unwrap(), r#"["test"]"#);
+    }
+
+    #[test]
+    fn event_from_json_non_array_fails() {
+        assert!(event_from_json::<TestEvent>("42").is_err());
+    }
+
+    #[test]
+    fn ack_to_json_roundtrip() {
+        assert_eq!(ack_to_json(&()).unwrap(), "[]");
+    }
+
+    #[test]
+    fn ack_from_json_non_array_fails() {
+        assert!(ack_from_json::<TestAck>("42").is_err());
+    }
+}

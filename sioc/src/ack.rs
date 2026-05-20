@@ -222,7 +222,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::marker::{AckMarker, HasAck, HasBinary};
+    use crate::error::AckError;
+    use crate::marker::{AckMarker, HasAck, HasBinary, NoBinary};
     use bytes::Bytes;
     use bytestring::ByteString;
 
@@ -278,11 +279,6 @@ mod tests {
         {
             Ok(Self)
         }
-    }
-
-    #[test]
-    fn serialize_unit_ack() {
-        assert_eq!(ack_to_json(&()).unwrap(), "[]");
     }
 
     #[test]
@@ -357,5 +353,94 @@ mod tests {
 
         let result: Result<Ack<()>, _> = handle.await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn debug_ack_no_binary() {
+        let ack = Ack {
+            payload: (),
+            attachments: (),
+        };
+        let s = format!("{ack:?}");
+        assert!(s.contains("payload"));
+    }
+
+    #[test]
+    fn debug_ack_with_binary() {
+        let ack = Ack {
+            payload: BinaryBoolAck(true),
+            attachments: vec![Bytes::from_static(b"x")],
+        };
+        let s = format!("{ack:?}");
+        assert!(s.contains("count"));
+    }
+
+    #[test]
+    fn send_ack_into_directive_no_binary() {
+        let directive = Acknowledge::<(), NoBinary>::into_directive((), 7).unwrap();
+        match directive {
+            Directive::Ack {
+                payload,
+                id,
+                attachments,
+            } => {
+                assert_eq!(&payload[..], "[]");
+                assert_eq!(id, 7);
+                assert!(attachments.is_none());
+            }
+            _ => panic!("expected Ack directive"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ack_handle_resolves_on_send() {
+        let (tx, rx) = oneshot::channel::<DynAck>();
+        let handle = AckHandle::<()>::new(rx);
+        tx.send(DynAck {
+            payload: ByteString::from_static("[]"),
+            attachments: None,
+        })
+        .unwrap();
+        let result: Result<Ack<()>, _> = handle.await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ack_handle_timeout_expires() {
+        use std::time::Duration;
+        let (_tx, rx) = oneshot::channel::<DynAck>();
+        let handle = AckHandle::<()>::new(rx);
+        let result = handle.timeout(Duration::from_millis(1)).await;
+        assert!(matches!(result, Err(AckError::Timeout(_))));
+    }
+
+    #[tokio::test]
+    async fn ack_handle_timeout_resolves() {
+        use std::time::Duration;
+        let (tx, rx) = oneshot::channel::<DynAck>();
+        let handle = AckHandle::<()>::new(rx);
+        tx.send(DynAck {
+            payload: ByteString::from_static("[]"),
+            attachments: None,
+        })
+        .unwrap();
+        let result = handle.timeout(Duration::from_secs(5)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ack_handle_timeout_at_resolves() {
+        use std::time::Duration;
+        use tokio::time::Instant;
+        let (tx, rx) = oneshot::channel::<DynAck>();
+        let handle = AckHandle::<()>::new(rx);
+        tx.send(DynAck {
+            payload: ByteString::from_static("[]"),
+            attachments: None,
+        })
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let result = handle.timeout_at(deadline).await;
+        assert!(result.is_ok());
     }
 }
