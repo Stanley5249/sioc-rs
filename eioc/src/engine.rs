@@ -218,11 +218,34 @@ where
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use futures_util::sink;
+    use futures_util::{Sink, sink};
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll};
     use tokio::sync::{mpsc, oneshot};
     use tokio_util::sync::CancellationToken;
+
+    struct FailingSink;
+
+    impl Sink<Message> for FailingSink {
+        type Error = std::io::Error;
+
+        fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, _: Message) -> Result<(), Self::Error> {
+            Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
 
     fn make_handshake() -> Handshake {
         Handshake {
@@ -486,5 +509,44 @@ mod tests {
             transport_rx.recv().await.unwrap(),
             Frame::Binary(b) if b.as_ref() == b"out"
         ));
+    }
+
+    #[tokio::test]
+    async fn engine_io_heartbeat_timeout_fires() {
+        let (tx, rx) = mpsc::channel(4);
+        let (transport_tx, _transport_rx) = mpsc::channel(4);
+        let (handshake_tx, handshake_rx) = oneshot::channel();
+        handshake_tx
+            .send(Handshake {
+                sid: "sid".into(),
+                upgrades: vec![],
+                ping_interval: 1,
+                ping_timeout: 1,
+                max_payload: 1_000_000,
+            })
+            .unwrap();
+        // tx is kept alive so recv() never returns None; heartbeat fires after 2ms.
+        let result = engine_io(
+            sink::drain(),
+            rx,
+            transport_tx,
+            handshake_rx,
+            CancellationToken::new(),
+        )
+        .await;
+        drop(tx);
+        assert!(matches!(result, Err(EngineError::HeartbeatTimeout(_))));
+    }
+
+    #[tokio::test]
+    async fn engine_io_message_sink_error() {
+        let s = setup();
+        s.tx.send(EngineAction::Transport(Frame::Packet(Packet::Message(
+            "x".into(),
+        ))))
+        .await
+        .unwrap();
+        let (result, _) = s.run_with(FailingSink).await;
+        assert!(matches!(result, Err(EngineError::SendSink(_))));
     }
 }

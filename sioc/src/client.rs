@@ -454,10 +454,31 @@ impl std::ops::DerefMut for SocketReceiver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::PayloadError;
     use crate::manager::ManagerAction;
+    use crate::marker::{HasAck, NoAck, NoBinary};
     use crate::packet::{Connect, ConnectError, Directive, DynEvent, Ns, Signal};
+    use eioc::transport::TransportStrategy;
     use serde_json::Map;
     use tokio::sync::mpsc;
+    use url::Url;
+
+    struct TestEmit;
+
+    impl Emit<NoAck, NoBinary> for TestEmit {
+        type Output = ();
+
+        fn prepare(self) -> Result<(Directive, ()), PayloadError> {
+            Ok((
+                Directive::Event {
+                    payload: r#"["test"]"#.into(),
+                    tx: None,
+                    attachments: None,
+                },
+                (),
+            ))
+        }
+    }
 
     fn make_directive_sender() -> (DirectiveSender, mpsc::Receiver<ManagerAction>) {
         let (tx, rx) = mpsc::channel(8);
@@ -571,5 +592,75 @@ mod tests {
         sender.disconnect().await;
         rx.try_recv().unwrap();
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn open_returns_client() {
+        let url = Url::parse("http://localhost:9999/").unwrap();
+        assert!(ClientBuilder::new(url).open().is_ok());
+    }
+
+    #[tokio::test]
+    async fn client_builder_alias() {
+        let url = Url::parse("http://localhost:9999/").unwrap();
+        assert!(Client::builder(url).open().is_ok());
+    }
+
+    #[tokio::test]
+    async fn builder_path_channels_transport() {
+        let url = Url::parse("http://localhost:9999/").unwrap();
+        let result = ClientBuilder::new(url)
+            .path("socket.io/")
+            .channels(16_usize)
+            .transport(TransportStrategy::WebSocket)
+            .open();
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn builder_http_client() {
+        let url = Url::parse("http://localhost:9999/").unwrap();
+        let result = ClientBuilder::new(url)
+            .http_client(reqwest::Client::new())
+            .open();
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn emit_sends_event_directive() {
+        let (directive_tx, mut rx) = make_directive_sender();
+        let sender = SocketSender::new("ns".into(), directive_tx);
+        sender.emit(TestEmit).await.unwrap();
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ManagerAction::Socket(Ns(_, Directive::Event { .. }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn emit_returns_error_on_closed_channel() {
+        let (directive_tx, rx) = make_directive_sender();
+        drop(rx);
+        let sender = SocketSender::new("ns".into(), directive_tx);
+        assert!(sender.emit(TestEmit).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn acknowledge_sends_ack_directive_with_correct_id() {
+        let (directive_tx, mut rx) = make_directive_sender();
+        let sender = SocketSender::new("ns".into(), directive_tx);
+        let id = HasAck::<()>::parse(Some(5)).unwrap();
+        sender.acknowledge(id, ()).await.unwrap();
+        let ManagerAction::Socket(Ns(_, Directive::Ack { id, .. })) = rx.try_recv().unwrap() else {
+            panic!("expected Ack directive");
+        };
+        assert_eq!(id, 5);
+    }
+
+    #[test]
+    fn socket_receiver_deref_gives_inner_receiver() {
+        let (_tx, rx) = mpsc::channel::<Signal>(4);
+        let receiver = SocketReceiver { rx };
+        let _ = &*receiver;
     }
 }
