@@ -2,6 +2,7 @@
 
 [![crates.io](https://img.shields.io/crates/v/sioc.svg)](https://crates.io/crates/sioc)
 [![docs.rs](https://docs.rs/sioc/badge.svg)](https://docs.rs/sioc)
+[![codecov](https://codecov.io/gh/Stanley5249/sioc-rs/graph/badge.svg)](https://codecov.io/gh/Stanley5249/sioc-rs)
 
 A type-safe, async [Socket.IO protocol v5](https://socket.io/docs/v4/socket-io-protocol/) client for Rust.
 

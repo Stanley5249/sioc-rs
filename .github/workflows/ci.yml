@@ -1,6 +1,7 @@
 name: CI
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   pull_request:
 
@@ -44,11 +45,11 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-llvm-cov
-      - run: cargo llvm-cov --workspace --all-targets --html
-      - uses: actions/upload-artifact@v4
+      - run: cargo llvm-cov --workspace --all-targets --lcov --output-path lcov.info
+      - uses: codecov/codecov-action@v4
         with:
-          name: coverage-report
-          path: target/llvm-cov/html/
+          files: lcov.info
+          fail_ci_if_error: true
 
   doc:
     runs-on: ubuntu-latest
