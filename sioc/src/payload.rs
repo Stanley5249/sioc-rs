@@ -292,12 +292,12 @@ mod tests {
     }
 
     #[test]
-    fn to_json_roundtrip() {
+    fn serializes_to_json() {
         assert_eq!(to_json(&42u32).unwrap(), "42");
     }
 
     #[test]
-    fn from_json_roundtrip() {
+    fn deserializes_from_json() {
         let value: u32 = from_json("42").unwrap();
         assert_eq!(value, 42u32);
     }

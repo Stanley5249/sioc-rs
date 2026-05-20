@@ -475,13 +475,19 @@ mod tests {
     #[test]
     fn channel_config_default_is_32() {
         let c = ChannelConfig::default();
-        assert_eq!((c.engine, c.transport, c.manager, c.socket), (32, 32, 32, 32));
+        assert_eq!(
+            (c.engine, c.transport, c.manager, c.socket),
+            (32, 32, 32, 32)
+        );
     }
 
     #[test]
     fn channel_config_from_unit_matches_default() {
         let c = ChannelConfig::from(());
-        assert_eq!((c.engine, c.transport, c.manager, c.socket), (32, 32, 32, 32));
+        assert_eq!(
+            (c.engine, c.transport, c.manager, c.socket),
+            (32, 32, 32, 32)
+        );
     }
 
     #[test]

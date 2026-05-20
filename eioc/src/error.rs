@@ -209,7 +209,10 @@ mod tests {
 
     #[test]
     fn packet_error_invalid_id_display() {
-        assert!(PacketError::InvalidId { id: '9' }.to_string().contains('9'));
+        assert_eq!(
+            PacketError::InvalidId { id: '9' }.to_string(),
+            "invalid type id 9"
+        );
     }
 
     #[test]
@@ -218,19 +221,19 @@ mod tests {
             id: '1',
             payload: "extra".into(),
         };
-        assert!(e.to_string().contains('1'));
+        assert_eq!(e.to_string(), "unexpected payload for type id 1");
     }
 
     #[test]
     fn engine_error_server_display() {
         let e = EngineError::Server(crate::packet::Packet::Upgrade);
-        assert!(e.to_string().contains("unexpected"));
+        assert_eq!(e.to_string(), "unexpected packet Upgrade");
     }
 
     #[test]
     fn polling_error_response_display() {
         let e = PollingError::Response("forbidden".to_string());
-        assert!(e.to_string().contains("forbidden"));
+        assert_eq!(e.to_string(), "unexpected polling response: forbidden");
     }
 
     #[test]

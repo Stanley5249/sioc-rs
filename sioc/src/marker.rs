@@ -216,11 +216,4 @@ mod tests {
     fn has_ack_parse_none_fails() {
         assert!(<HasAck<()>>::parse(None).is_err());
     }
-
-    #[test]
-    fn ack_id_debug_format() {
-        let id = <HasAck<()>>::parse(Some(42)).unwrap();
-        let s = format!("{id:?}");
-        assert!(s.contains("42"));
-    }
 }

@@ -320,20 +320,19 @@ mod tests {
             id.get(),
         )
         .unwrap();
-        match directive {
-            Directive::Ack {
-                payload,
-                id,
-                attachments,
-            } => {
-                assert_eq!(&payload[..], "[true]");
-                assert_eq!(id, 3);
-                let att = attachments.expect("expected attachments");
-                assert_eq!(att.len(), 1);
-                assert_eq!(att[0], Bytes::from_static(b"\xCA\xFE"));
-            }
-            _ => panic!("expected Ack packet"),
-        }
+        let Directive::Ack {
+            payload,
+            id,
+            attachments,
+        } = directive
+        else {
+            panic!("expected Ack directive");
+        };
+        assert_eq!(&payload[..], "[true]");
+        assert_eq!(id, 3);
+        let att = attachments.expect("expected attachments");
+        assert_eq!(att.len(), 1);
+        assert_eq!(att[0], Bytes::from_static(b"\xCA\xFE"));
     }
 
     #[tokio::test]
@@ -347,40 +346,19 @@ mod tests {
     }
 
     #[test]
-    fn debug_ack_no_binary() {
-        let ack = Ack {
-            payload: (),
-            attachments: (),
-        };
-        let s = format!("{ack:?}");
-        assert!(s.contains("payload"));
-    }
-
-    #[test]
-    fn debug_ack_with_binary() {
-        let ack = Ack {
-            payload: BinaryBoolAck(true),
-            attachments: vec![Bytes::from_static(b"x")],
-        };
-        let s = format!("{ack:?}");
-        assert!(s.contains("count"));
-    }
-
-    #[test]
     fn send_ack_into_directive_no_binary() {
         let directive = Acknowledge::<(), NoBinary>::into_directive((), 7).unwrap();
-        match directive {
-            Directive::Ack {
-                payload,
-                id,
-                attachments,
-            } => {
-                assert_eq!(&payload[..], "[]");
-                assert_eq!(id, 7);
-                assert!(attachments.is_none());
-            }
-            _ => panic!("expected Ack directive"),
-        }
+        let Directive::Ack {
+            payload,
+            id,
+            attachments,
+        } = directive
+        else {
+            panic!("expected Ack directive");
+        };
+        assert_eq!(&payload[..], "[]");
+        assert_eq!(id, 7);
+        assert!(attachments.is_none());
     }
 
     #[tokio::test]

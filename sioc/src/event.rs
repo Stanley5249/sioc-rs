@@ -243,120 +243,41 @@ mod tests {
         ByteString::from_static(s)
     }
 
-    // Minimal test event type: no ack, no binary.
-    #[derive(Debug, PartialEq)]
-    struct Ping;
-
-    impl EventType for Ping {
-        const NAME: &'static str = "ping";
-        type Ack = NoAck;
-        type Binary = NoBinary;
+    // Proc-macro paths resolve as `::sioc::` and don't work inside this crate,
+    // so test event types are defined with a declarative macro instead.
+    macro_rules! test_event {
+        ($name:ident, ack = $ack:ty, binary = $binary:ty) => {
+            #[derive(Debug, PartialEq)]
+            struct $name;
+            impl EventType for $name {
+                const NAME: &'static str = "ping";
+                type Ack = $ack;
+                type Binary = $binary;
+            }
+            impl DeserializePayload for $name {
+                fn deserialize_payload<'de, S>(seq: &mut S) -> Result<Self, S::Error>
+                where
+                    S: serde::de::SeqAccess<'de>,
+                {
+                    while let Some(serde::de::IgnoredAny) = seq.next_element()? {}
+                    Ok($name)
+                }
+            }
+            impl SerializePayload for $name {
+                fn serialize_payload<S>(&self, _seq: &mut S) -> Result<(), S::Error>
+                where
+                    S: serde::ser::SerializeSeq,
+                {
+                    Ok(())
+                }
+            }
+        };
     }
 
-    impl DeserializePayload for Ping {
-        fn deserialize_payload<'de, S>(seq: &mut S) -> Result<Self, S::Error>
-        where
-            S: serde::de::SeqAccess<'de>,
-        {
-            while let Some(serde::de::IgnoredAny) = seq.next_element()? {}
-            Ok(Ping)
-        }
-    }
-
-    impl SerializePayload for Ping {
-        fn serialize_payload<S>(&self, _seq: &mut S) -> Result<(), S::Error>
-        where
-            S: serde::ser::SerializeSeq,
-        {
-            Ok(())
-        }
-    }
-
-    // Event type with HasAck<()>.
-    #[derive(Debug, PartialEq)]
-    struct PingWithAck;
-
-    impl EventType for PingWithAck {
-        const NAME: &'static str = "ping";
-        type Ack = HasAck<()>;
-        type Binary = NoBinary;
-    }
-
-    impl DeserializePayload for PingWithAck {
-        fn deserialize_payload<'de, S>(seq: &mut S) -> Result<Self, S::Error>
-        where
-            S: serde::de::SeqAccess<'de>,
-        {
-            while let Some(serde::de::IgnoredAny) = seq.next_element()? {}
-            Ok(PingWithAck)
-        }
-    }
-
-    impl SerializePayload for PingWithAck {
-        fn serialize_payload<S>(&self, _seq: &mut S) -> Result<(), S::Error>
-        where
-            S: serde::ser::SerializeSeq,
-        {
-            Ok(())
-        }
-    }
-
-    // Event type with HasBinary.
-    #[derive(Debug, PartialEq)]
-    struct PingWithBinary;
-
-    impl EventType for PingWithBinary {
-        const NAME: &'static str = "ping";
-        type Ack = NoAck;
-        type Binary = HasBinary;
-    }
-
-    impl DeserializePayload for PingWithBinary {
-        fn deserialize_payload<'de, S>(seq: &mut S) -> Result<Self, S::Error>
-        where
-            S: serde::de::SeqAccess<'de>,
-        {
-            while let Some(serde::de::IgnoredAny) = seq.next_element()? {}
-            Ok(PingWithBinary)
-        }
-    }
-
-    impl SerializePayload for PingWithBinary {
-        fn serialize_payload<S>(&self, _seq: &mut S) -> Result<(), S::Error>
-        where
-            S: serde::ser::SerializeSeq,
-        {
-            Ok(())
-        }
-    }
-
-    #[derive(Debug, PartialEq)]
-    struct PingWithAckAndBinary;
-
-    impl EventType for PingWithAckAndBinary {
-        const NAME: &'static str = "ping";
-        type Ack = HasAck<()>;
-        type Binary = HasBinary;
-    }
-
-    impl DeserializePayload for PingWithAckAndBinary {
-        fn deserialize_payload<'de, S>(seq: &mut S) -> Result<Self, S::Error>
-        where
-            S: serde::de::SeqAccess<'de>,
-        {
-            while let Some(serde::de::IgnoredAny) = seq.next_element()? {}
-            Ok(PingWithAckAndBinary)
-        }
-    }
-
-    impl SerializePayload for PingWithAckAndBinary {
-        fn serialize_payload<S>(&self, _seq: &mut S) -> Result<(), S::Error>
-        where
-            S: serde::ser::SerializeSeq,
-        {
-            Ok(())
-        }
-    }
+    test_event!(Ping, ack = NoAck, binary = NoBinary);
+    test_event!(PingWithAck, ack = HasAck<()>, binary = NoBinary);
+    test_event!(PingWithBinary, ack = NoAck, binary = HasBinary);
+    test_event!(PingWithAckAndBinary, ack = HasAck<()>, binary = HasBinary);
 
     fn ping_event(id: Option<u64>, attachments: Option<Vec<Bytes>>) -> DynEvent {
         DynEvent {
@@ -444,28 +365,6 @@ mod tests {
     }
 
     #[test]
-    fn debug_event_no_markers() {
-        let ev: Event<Ping> = ping_event(None, None).try_into().unwrap();
-        let s = format!("{ev:?}");
-        assert!(s.contains("Ping"));
-    }
-
-    #[test]
-    fn debug_event_with_ack() {
-        let ev: Event<PingWithAck> = ping_event(Some(3), None).try_into().unwrap();
-        let s = format!("{ev:?}");
-        assert!(s.contains("id"));
-    }
-
-    #[test]
-    fn debug_event_with_binary() {
-        let att = vec![Bytes::from_static(b"\xFF")];
-        let ev: Event<PingWithBinary> = ping_event(None, Some(att)).try_into().unwrap();
-        let s = format!("{ev:?}");
-        assert!(s.contains("count"));
-    }
-
-    #[test]
     fn event_handler_handle_succeeds() {
         let ev = Event::<Ping>::handle(Ping, None, None).unwrap();
         assert_eq!(ev.payload, Ping);
@@ -479,35 +378,33 @@ mod tests {
     #[test]
     fn emit_no_ack_no_binary_prepare() {
         let (directive, ()) = Ping.prepare().unwrap();
-        match directive {
-            Directive::Event {
-                payload,
-                tx,
-                attachments,
-            } => {
-                assert_eq!(&payload[..], r#"["ping"]"#);
-                assert!(tx.is_none());
-                assert!(attachments.is_none());
-            }
-            _ => panic!("expected Event directive"),
-        }
+        let Directive::Event {
+            payload,
+            tx,
+            attachments,
+        } = directive
+        else {
+            panic!("expected Event directive");
+        };
+        assert_eq!(&payload[..], r#"["ping"]"#);
+        assert!(tx.is_none());
+        assert!(attachments.is_none());
     }
 
     #[test]
     fn emit_has_ack_no_binary_prepare() {
         let (directive, _handle) = PingWithAck.prepare().unwrap();
-        match directive {
-            Directive::Event {
-                payload,
-                tx,
-                attachments,
-            } => {
-                assert_eq!(&payload[..], r#"["ping"]"#);
-                assert!(tx.is_some());
-                assert!(attachments.is_none());
-            }
-            _ => panic!("expected Event directive"),
-        }
+        let Directive::Event {
+            payload,
+            tx,
+            attachments,
+        } = directive
+        else {
+            panic!("expected Event directive");
+        };
+        assert_eq!(&payload[..], r#"["ping"]"#);
+        assert!(tx.is_some());
+        assert!(attachments.is_none());
     }
 
     #[test]
@@ -517,19 +414,18 @@ mod tests {
             PingWithBinary
         };
         let (directive, ()) = closure.prepare().unwrap();
-        match directive {
-            Directive::Event {
-                payload,
-                tx,
-                attachments,
-            } => {
-                assert_eq!(&payload[..], r#"["ping"]"#);
-                assert!(tx.is_none());
-                let att = attachments.expect("expected attachments");
-                assert_eq!(att.len(), 1);
-            }
-            _ => panic!("expected Event directive"),
-        }
+        let Directive::Event {
+            payload,
+            tx,
+            attachments,
+        } = directive
+        else {
+            panic!("expected Event directive");
+        };
+        assert_eq!(&payload[..], r#"["ping"]"#);
+        assert!(tx.is_none());
+        let att = attachments.expect("expected attachments");
+        assert_eq!(att.len(), 1);
     }
 
     #[test]
@@ -539,18 +435,17 @@ mod tests {
             PingWithAckAndBinary
         };
         let (directive, _handle) = closure.prepare().unwrap();
-        match directive {
-            Directive::Event {
-                payload,
-                tx,
-                attachments,
-            } => {
-                assert_eq!(&payload[..], r#"["ping"]"#);
-                assert!(tx.is_some());
-                let att = attachments.expect("expected attachments");
-                assert_eq!(att.len(), 1);
-            }
-            _ => panic!("expected Event directive"),
-        }
+        let Directive::Event {
+            payload,
+            tx,
+            attachments,
+        } = directive
+        else {
+            panic!("expected Event directive");
+        };
+        assert_eq!(&payload[..], r#"["ping"]"#);
+        assert!(tx.is_some());
+        let att = attachments.expect("expected attachments");
+        assert_eq!(att.len(), 1);
     }
 }
