@@ -326,4 +326,24 @@ mod tests {
     fn ack_from_json_non_array_fails() {
         assert!(ack_from_json::<TestAck>("42").is_err());
     }
+
+    #[test]
+    fn event_from_json_roundtrip() {
+        assert!(event_from_json::<TestEvent>(r#"["test"]"#).is_ok());
+    }
+
+    #[test]
+    fn event_from_json_wrong_name_fails() {
+        assert!(event_from_json::<TestEvent>(r#"["other"]"#).is_err());
+    }
+
+    #[test]
+    fn event_from_json_empty_array_fails() {
+        assert!(event_from_json::<TestEvent>("[]").is_err());
+    }
+
+    #[test]
+    fn deserialize_unit_ignores_extra_elements() {
+        assert_eq!(ack_from_json::<()>("[1,2,3]").unwrap(), ());
+    }
 }

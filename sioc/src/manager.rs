@@ -828,6 +828,384 @@ mod tests {
         assert_eq!(ack.payload, "[\"world\"]");
     }
 
+    /// Server sends Disconnect; the socket receives Signal::Disconnect.
+    #[tokio::test]
+    async fn server_disconnect_delivery() {
+        let (manager_tx, mut engine_rx, handle) = setup_manager();
+        let mut socket_rx = open_namespace(&manager_tx, "/").await;
+        engine_rx.recv().await.unwrap();
+        server_connect(&manager_tx).await;
+        socket_rx.recv().await.unwrap(); // consume Connect signal
+
+        manager_tx
+            .send(ManagerAction::Engine(Message::Text(
+                ByteString::from_static("1"),
+            )))
+            .await
+            .unwrap();
+
+        assert!(matches!(socket_rx.recv().await.unwrap(), Signal::Disconnect));
+        assert!(matches!(
+            engine_rx.recv().await.unwrap(),
+            EngineAction::Sink(Message::Close)
+        ));
+        handle.await.unwrap().unwrap();
+    }
+
+    /// Server sends ConnectError; the socket receives Signal::ConnectError.
+    #[tokio::test]
+    async fn server_connect_error_delivery() {
+        let (manager_tx, mut engine_rx, _) = setup_manager();
+        let mut socket_rx = open_namespace(&manager_tx, "/").await;
+        engine_rx.recv().await.unwrap();
+
+        manager_tx
+            .send(ManagerAction::Engine(Message::Text(
+                ByteString::from_static(r#"4{"message":"forbidden"}"#),
+            )))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            socket_rx.recv().await.unwrap(),
+            Signal::ConnectError(_)
+        ));
+    }
+
+    /// Server sends BinaryAck followed by binary frames; assembled ack is delivered.
+    #[tokio::test]
+    async fn binary_ack_reassembly() {
+        let (manager_tx, mut engine_rx, _) = setup_manager();
+        let mut socket_rx = open_namespace(&manager_tx, "/").await;
+        engine_rx.recv().await.unwrap();
+        server_connect(&manager_tx).await;
+        socket_rx.recv().await.unwrap();
+
+        let (ack_tx, mut ack_rx) = oneshot::channel();
+        manager_tx
+            .send(ManagerAction::Socket(Ns(
+                "/".into(),
+                Directive::Event {
+                    payload: ByteString::from_static(r#"["greet"]"#),
+                    tx: Some(ack_tx),
+                    attachments: None,
+                },
+            )))
+            .await
+            .unwrap();
+        engine_rx.recv().await.unwrap();
+
+        manager_tx
+            .send(ManagerAction::Engine(Message::Text(
+                ByteString::from_static(r#"61-0["ok"]"#),
+            )))
+            .await
+            .unwrap();
+        manager_tx
+            .send(ManagerAction::Engine(Message::Binary(Bytes::from_static(
+                b"\xAB\xCD",
+            ))))
+            .await
+            .unwrap();
+
+        tokio::task::yield_now().await;
+        let ack = ack_rx.try_recv().unwrap();
+        assert_eq!(&*ack.payload, r#"["ok"]"#);
+        let att = ack.attachments.as_ref().unwrap();
+        assert_eq!(att.len(), 1);
+        assert_eq!(att[0], Bytes::from_static(b"\xAB\xCD"));
+    }
+
+    /// Client sends a binary Event; the manager encodes BinaryEvent + binary frames.
+    #[tokio::test]
+    async fn directive_event_binary() {
+        let (manager_tx, mut engine_rx, _) = setup_manager();
+        let mut socket_rx = open_namespace(&manager_tx, "/").await;
+        engine_rx.recv().await.unwrap();
+        server_connect(&manager_tx).await;
+        socket_rx.recv().await.unwrap();
+
+        manager_tx
+            .send(ManagerAction::Socket(Ns(
+                "/".into(),
+                Directive::Event {
+                    payload: ByteString::from_static(r#"["img"]"#),
+                    tx: None,
+                    attachments: Some(vec![Bytes::from_static(b"\x01\x02")]),
+                },
+            )))
+            .await
+            .unwrap();
+
+        match engine_rx.recv().await.unwrap() {
+            EngineAction::Sink(Message::Text(text)) => {
+                assert_eq!(&*text, r#"51-["img"]"#);
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+        match engine_rx.recv().await.unwrap() {
+            EngineAction::Sink(Message::Binary(bytes)) => {
+                assert_eq!(bytes, Bytes::from_static(b"\x01\x02"));
+            }
+            other => panic!("expected Binary, got {other:?}"),
+        }
+    }
+
+    /// Client sends a plain Ack; the manager encodes and forwards it.
+    #[tokio::test]
+    async fn directive_ack_no_binary() {
+        let (manager_tx, mut engine_rx, _) = setup_manager();
+        open_namespace(&manager_tx, "/").await;
+        engine_rx.recv().await.unwrap();
+
+        manager_tx
+            .send(ManagerAction::Socket(Ns(
+                "/".into(),
+                Directive::Ack {
+                    payload: ByteString::from_static("[true]"),
+                    id: 42,
+                    attachments: None,
+                },
+            )))
+            .await
+            .unwrap();
+
+        match engine_rx.recv().await.unwrap() {
+            EngineAction::Sink(Message::Text(text)) => {
+                assert_eq!(&*text, "342[true]");
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    /// Client sends a binary Ack; the manager encodes BinaryAck + binary frames.
+    #[tokio::test]
+    async fn directive_ack_binary() {
+        let (manager_tx, mut engine_rx, _) = setup_manager();
+        open_namespace(&manager_tx, "/").await;
+        engine_rx.recv().await.unwrap();
+
+        manager_tx
+            .send(ManagerAction::Socket(Ns(
+                "/".into(),
+                Directive::Ack {
+                    payload: ByteString::from_static("[true]"),
+                    id: 7,
+                    attachments: Some(vec![Bytes::from_static(b"\xCA\xFE")]),
+                },
+            )))
+            .await
+            .unwrap();
+
+        match engine_rx.recv().await.unwrap() {
+            EngineAction::Sink(Message::Text(text)) => {
+                assert_eq!(&*text, "61-7[true]");
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+        match engine_rx.recv().await.unwrap() {
+            EngineAction::Sink(Message::Binary(bytes)) => {
+                assert_eq!(bytes, Bytes::from_static(b"\xCA\xFE"));
+            }
+            other => panic!("expected Binary, got {other:?}"),
+        }
+    }
+
+    /// Directive::Dropped for a live namespace logs a warning and sends Disconnect.
+    #[tokio::test]
+    async fn directive_dropped_when_connected() {
+        let (manager_tx, mut engine_rx, _) = setup_manager();
+        let _socket_rx = open_namespace(&manager_tx, "/").await;
+        let _other_rx = open_namespace(&manager_tx, "/other").await;
+        engine_rx.recv().await.unwrap();
+        engine_rx.recv().await.unwrap();
+
+        manager_tx
+            .send(ManagerAction::Socket(Ns("/".into(), Directive::Dropped)))
+            .await
+            .unwrap();
+
+        match engine_rx.recv().await.unwrap() {
+            EngineAction::Sink(Message::Text(text)) => {
+                assert_eq!(&*text, "1");
+            }
+            other => panic!("expected Disconnect text, got {other:?}"),
+        }
+    }
+
+    /// Directive::Dropped for an unknown namespace is a silent no-op.
+    #[tokio::test]
+    async fn directive_dropped_when_not_connected() {
+        let (manager_tx, mut engine_rx, handle) = setup_manager();
+        let _socket_rx = open_namespace(&manager_tx, "/").await;
+        engine_rx.recv().await.unwrap();
+
+        manager_tx
+            .send(ManagerAction::Socket(Ns(
+                "/unknown".into(),
+                Directive::Dropped,
+            )))
+            .await
+            .unwrap();
+
+        tokio::task::yield_now().await;
+        assert!(
+            engine_rx.try_recv().is_err(),
+            "Dropped for unknown ns must not produce engine messages"
+        );
+        drop(manager_tx);
+        let _ = handle.await;
+    }
+
+    /// An unexpected binary frame with no pending reassembly is an error.
+    #[tokio::test]
+    async fn unexpected_binary_frame_is_error() {
+        let (manager_tx, _engine_rx, handle) = setup_manager();
+        let _socket_rx = open_namespace(&manager_tx, "/").await;
+
+        manager_tx
+            .send(ManagerAction::Engine(Message::Binary(Bytes::from_static(
+                b"\x01",
+            ))))
+            .await
+            .unwrap();
+
+        drop(manager_tx);
+        assert!(matches!(
+            handle.await.unwrap(),
+            Err(crate::error::ManagerError::UnexpectedBinary(_))
+        ));
+    }
+
+    /// A text frame arriving while binary reassembly is pending is an error.
+    #[tokio::test]
+    async fn unexpected_text_during_binary_is_error() {
+        let (manager_tx, _engine_rx, handle) = setup_manager();
+        let _socket_rx = open_namespace(&manager_tx, "/").await;
+
+        manager_tx
+            .send(ManagerAction::Engine(Message::Text(
+                ByteString::from_static(r#"52-["img"]"#),
+            )))
+            .await
+            .unwrap();
+
+        manager_tx
+            .send(ManagerAction::Engine(Message::Text(
+                ByteString::from_static(r#"2["ping"]"#),
+            )))
+            .await
+            .unwrap();
+
+        drop(manager_tx);
+        assert!(matches!(
+            handle.await.unwrap(),
+            Err(crate::error::ManagerError::UnexpectedText(_))
+        ));
+    }
+
+    /// Ack arrives after the caller has dropped its receiver.
+    #[tokio::test]
+    async fn ack_receiver_dropped_returns_error() {
+        let (manager_tx, mut engine_rx, handle) = setup_manager();
+        let mut socket_rx = open_namespace(&manager_tx, "/").await;
+        engine_rx.recv().await.unwrap();
+        server_connect(&manager_tx).await;
+        socket_rx.recv().await.unwrap();
+
+        let (ack_tx, ack_rx) = oneshot::channel();
+        manager_tx
+            .send(ManagerAction::Socket(Ns(
+                "/".into(),
+                Directive::Event {
+                    payload: ByteString::from_static(r#"["greet"]"#),
+                    tx: Some(ack_tx),
+                    attachments: None,
+                },
+            )))
+            .await
+            .unwrap();
+        engine_rx.recv().await.unwrap();
+        drop(ack_rx);
+
+        manager_tx
+            .send(ManagerAction::Engine(Message::Text(
+                ByteString::from_static(r#"30["ok"]"#),
+            )))
+            .await
+            .unwrap();
+
+        drop(manager_tx);
+        assert!(matches!(
+            handle.await.unwrap(),
+            Err(crate::error::ManagerError::SendAck { .. })
+        ));
+    }
+
+    /// Message::Close clears all sockets and the manager exits cleanly.
+    #[tokio::test]
+    async fn server_close_message_clears_sockets() {
+        let (manager_tx, mut engine_rx, handle) = setup_manager();
+        let _socket_rx = open_namespace(&manager_tx, "/").await;
+        engine_rx.recv().await.unwrap();
+
+        manager_tx
+            .send(ManagerAction::Engine(Message::Close))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            engine_rx.recv().await.unwrap(),
+            EngineAction::Sink(Message::Close)
+        ));
+        drop(manager_tx);
+        handle.await.unwrap().unwrap();
+    }
+
+    /// Manager cleans up still-connected namespaces when the channel is dropped.
+    #[tokio::test]
+    async fn socket_io_cleanup_on_channel_close() {
+        let (manager_tx, mut engine_rx, handle) = setup_manager();
+        let _socket_rx = open_namespace(&manager_tx, "/other").await;
+        engine_rx.recv().await.unwrap();
+
+        drop(manager_tx);
+
+        match engine_rx.recv().await.unwrap() {
+            EngineAction::Sink(Message::Text(text)) => {
+                assert_eq!(&*text, "1/other,");
+            }
+            other => panic!("expected Disconnect text, got {other:?}"),
+        }
+        assert!(matches!(
+            engine_rx.recv().await.unwrap(),
+            EngineAction::Sink(Message::Close)
+        ));
+        handle.await.unwrap().unwrap();
+    }
+
+    /// Sending to a closed socket channel returns SendSocket.
+    #[tokio::test]
+    async fn send_packet_closed_channel_is_error() {
+        let (manager_tx, mut engine_rx, handle) = setup_manager();
+        let socket_rx = open_namespace(&manager_tx, "/").await;
+        engine_rx.recv().await.unwrap();
+        drop(socket_rx);
+
+        manager_tx
+            .send(ManagerAction::Engine(Message::Text(
+                ByteString::from_static(r#"2["ping"]"#),
+            )))
+            .await
+            .unwrap();
+
+        drop(manager_tx);
+        assert!(matches!(
+            handle.await.unwrap(),
+            Err(crate::error::ManagerError::SendSocket { .. })
+        ));
+    }
+
     /// A binary event is held until all attachment frames arrive, then delivered as a complete packet.
     #[tokio::test]
     async fn binary_event_reassembly() {

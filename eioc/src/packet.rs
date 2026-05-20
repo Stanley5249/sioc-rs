@@ -419,4 +419,25 @@ mod tests {
     fn message_display_close() {
         assert_eq!(format!("{}", Message::Close), "Close");
     }
+
+    #[test]
+    fn packet_display_variants() {
+        let hs = test_handshake();
+        assert!(format!("{}", Packet::Open(hs)).contains("Open"));
+        assert_eq!(format!("{}", Packet::Close), "Close");
+        assert!(format!("{}", Packet::Ping(bss("probe"))).contains("probe"));
+        assert!(format!("{}", Packet::Pong(bss("probe"))).contains("probe"));
+        assert!(format!("{}", Packet::Message(bss("hello"))).contains("hello"));
+        assert_eq!(format!("{}", Packet::Upgrade), "Upgrade");
+        assert_eq!(format!("{}", Packet::Noop), "Noop");
+    }
+
+    #[test]
+    fn frame_from_conversions() {
+        let frame: Frame = Packet::Close.into();
+        assert!(matches!(frame, Frame::Packet(Packet::Close)));
+
+        let frame: Frame = bytes::Bytes::from_static(b"\x01").into();
+        assert!(matches!(frame, Frame::Binary(_)));
+    }
 }
