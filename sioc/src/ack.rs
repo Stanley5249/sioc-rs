@@ -263,15 +263,6 @@ mod tests {
         type Binary = HasBinary;
     }
 
-    impl SerializePayload for BinaryUnitAck {
-        fn serialize_payload<S>(&self, _seq: &mut S) -> std::result::Result<(), S::Error>
-        where
-            S: serde::ser::SerializeSeq,
-        {
-            Ok(())
-        }
-    }
-
     impl DeserializePayload for BinaryUnitAck {
         fn deserialize_payload<'de, S>(_seq: &mut S) -> std::result::Result<Self, S::Error>
         where

@@ -440,4 +440,16 @@ mod tests {
         let frame: Frame = bytes::Bytes::from_static(b"\x01").into();
         assert!(matches!(frame, Frame::Binary(_)));
     }
+
+    #[test]
+    #[should_panic(expected = "client should never encode an Open packet")]
+    fn encode_open_panics() {
+        Packet::Open(test_handshake()).encode();
+    }
+
+    #[test]
+    #[should_panic(expected = "client should never encode a Noop packet")]
+    fn encode_noop_panics() {
+        Packet::Noop.encode();
+    }
 }

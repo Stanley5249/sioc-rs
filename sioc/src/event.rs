@@ -367,6 +367,19 @@ mod tests {
     }
 
     #[test]
+    fn try_from_with_ack_and_binary_succeeds() {
+        let att = vec![Bytes::from_static(b"\xFF")];
+        let ev: Event<PingWithAckAndBinary> = DynEvent {
+            payload: bss(r#"["ping"]"#),
+            id: Some(1),
+            attachments: Some(att),
+        }
+        .try_into()
+        .unwrap();
+        assert_eq!(ev.id.get(), 1);
+    }
+
+    #[test]
     fn try_from_basic_event_succeeds() {
         let ev: Event<Ping> = ping_event(None, None).try_into().unwrap();
         assert_eq!(ev.payload, Ping);

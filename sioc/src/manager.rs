@@ -844,7 +844,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(matches!(socket_rx.recv().await.unwrap(), Signal::Disconnect));
+        assert!(matches!(
+            socket_rx.recv().await.unwrap(),
+            Signal::Disconnect
+        ));
         assert!(matches!(
             engine_rx.recv().await.unwrap(),
             EngineAction::Sink(Message::Close)
@@ -1203,6 +1206,94 @@ mod tests {
         assert!(matches!(
             handle.await.unwrap(),
             Err(crate::error::ManagerError::SendSocket { .. })
+        ));
+    }
+
+    #[test]
+    fn manager_action_from_directive() {
+        let a = ManagerAction::from(Ns("/".into(), Directive::Disconnect));
+        assert!(matches!(a, ManagerAction::Socket(_)));
+    }
+
+    #[test]
+    fn manager_action_from_message() {
+        let a = ManagerAction::from(Message::Close);
+        assert!(matches!(a, ManagerAction::Engine(Message::Close)));
+    }
+
+    #[tokio::test]
+    async fn directive_sender_send() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let sender = DirectiveSender::new(tx);
+        sender
+            .send("/".into(), Directive::Disconnect)
+            .await
+            .unwrap();
+        assert!(rx.recv().await.is_some());
+    }
+
+    #[test]
+    fn directive_sender_try_send() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let sender = DirectiveSender::new(tx);
+        sender.try_send("/".into(), Directive::Disconnect).unwrap();
+        assert!(rx.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn message_sink_wraps_messages() {
+        use futures_util::SinkExt;
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut sink = message_sink(tx);
+        sink.send(Message::Close).await.unwrap();
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            ManagerAction::Engine(Message::Close)
+        ));
+    }
+
+    #[tokio::test]
+    async fn unknown_ack_id_returns_error() {
+        let (manager_tx, mut engine_rx, handle) = setup_manager();
+        let mut socket_rx = open_namespace(&manager_tx, "/").await;
+        engine_rx.recv().await.unwrap();
+        server_connect(&manager_tx).await;
+        socket_rx.recv().await.unwrap(); // consume Connect signal
+
+        manager_tx
+            .send(ManagerAction::Engine(Message::Text(
+                ByteString::from_static("399[]"),
+            )))
+            .await
+            .unwrap();
+
+        drop(manager_tx);
+        assert!(matches!(
+            handle.await.unwrap(),
+            Err(crate::error::ManagerError::UnknownAckId { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn ack_directive_to_unknown_namespace_returns_error() {
+        let (manager_tx, _engine_rx, handle) = setup_manager();
+
+        manager_tx
+            .send(ManagerAction::Socket(Ns(
+                "/no-such-ns".into(),
+                Directive::Ack {
+                    payload: ByteString::from_static("[]"),
+                    id: 0,
+                    attachments: None,
+                },
+            )))
+            .await
+            .unwrap();
+
+        drop(manager_tx);
+        assert!(matches!(
+            handle.await.unwrap(),
+            Err(crate::error::ManagerError::UnknownNamespace { .. })
         ));
     }
 
