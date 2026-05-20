@@ -36,7 +36,7 @@ impl PayloadError {
     }
 }
 
-/// Shorthand result type defaulting to the top-level [`Error`].
+/// Shorthand result type defaulting to the top-level [`enum@Error`].
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Top-level error aggregator for the `sioc` public API.
