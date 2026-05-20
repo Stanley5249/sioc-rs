@@ -2,7 +2,10 @@
 
 [![crates.io](https://img.shields.io/crates/v/sioc.svg)](https://crates.io/crates/sioc)
 [![docs.rs](https://docs.rs/sioc/badge.svg)](https://docs.rs/sioc)
+[![CI](https://github.com/Stanley5249/sioc-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/Stanley5249/sioc-rs/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/Stanley5249/sioc-rs/graph/badge.svg)](https://codecov.io/gh/Stanley5249/sioc-rs)
+[![License](https://img.shields.io/crates/l/sioc.svg)](https://crates.io/crates/sioc)
+[![MSRV](https://img.shields.io/badge/rustc-1.85+-blue.svg)](https://blog.rust-lang.org/2025/02/20/Rust-1.85.0.html)
 
 A type-safe, async [Socket.IO protocol v5](https://socket.io/docs/v4/socket-io-protocol/) client for Rust.
 

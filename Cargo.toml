@@ -4,6 +4,7 @@ members = ["eioc", "examples/*", "sioc", "sioc-macros"]
 
 [workspace.package]
 version = "0.3.0"
+rust-version = "1.85"
 
 [workspace.dependencies]
 eioc = { path = "./eioc", version = "0.3.0" }
