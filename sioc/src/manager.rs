@@ -1237,7 +1237,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(1);
         let sender = DirectiveSender::new(tx);
         sender.try_send("/".into(), Directive::Disconnect).unwrap();
-        assert!(rx.try_recv().is_ok());
+        rx.try_recv().unwrap();
     }
 
     #[tokio::test]

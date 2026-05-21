@@ -308,7 +308,7 @@ mod tests {
 
     #[test]
     fn frame_decode_invalid_base64_is_error() {
-        assert!(Frame::decode(&bss("b!!!")).is_err());
+        Frame::decode(&bss("b!!!")).unwrap_err();
     }
 
     #[test]
@@ -351,6 +351,6 @@ mod tests {
 
     #[test]
     fn decode_frames_error_propagates() {
-        assert!(decode_frames(&bss("9invalid")).is_err());
+        decode_frames(&bss("9invalid")).unwrap_err();
     }
 }

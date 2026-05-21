@@ -570,7 +570,7 @@ mod tests {
             rx.try_recv().unwrap(),
             ManagerAction::Socket(Ns(_, Directive::Disconnect))
         ));
-        assert!(rx.try_recv().is_err());
+        rx.try_recv().unwrap_err();
     }
 
     #[tokio::test]
@@ -591,19 +591,19 @@ mod tests {
         sender.disconnect().await;
         sender.disconnect().await;
         rx.try_recv().unwrap();
-        assert!(rx.try_recv().is_err());
+        rx.try_recv().unwrap_err();
     }
 
     #[tokio::test]
     async fn open_returns_client() {
         let url = Url::parse("http://localhost:9999/").unwrap();
-        assert!(ClientBuilder::new(url).open().is_ok());
+        ClientBuilder::new(url).open().unwrap();
     }
 
     #[tokio::test]
     async fn client_builder_alias() {
         let url = Url::parse("http://localhost:9999/").unwrap();
-        assert!(Client::builder(url).open().is_ok());
+        Client::builder(url).open().unwrap();
     }
 
     #[tokio::test]
@@ -614,7 +614,7 @@ mod tests {
             .channels(16_usize)
             .transport(TransportStrategy::WebSocket)
             .open();
-        assert!(result.is_ok());
+        result.unwrap();
     }
 
     #[tokio::test]
@@ -623,7 +623,7 @@ mod tests {
         let result = ClientBuilder::new(url)
             .http_client(reqwest::Client::new())
             .open();
-        assert!(result.is_ok());
+        result.unwrap();
     }
 
     #[tokio::test]

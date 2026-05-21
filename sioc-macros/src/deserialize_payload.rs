@@ -108,6 +108,6 @@ mod tests {
     #[test]
     fn enum_input_returns_error() {
         let input: syn::DeriveInput = syn::parse_str("enum Foo { A(i32) }").unwrap();
-        assert!(expand(&input).is_err());
+        expand(&input).unwrap_err();
     }
 }

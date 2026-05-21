@@ -369,7 +369,7 @@ mod tests {
     async fn stream_invalid_packet_id_is_error() {
         let (mut client, mut server) = ws_pair().await;
         server.send(WsMsg::text("9bad")).await.unwrap();
-        assert!(client.next().await.unwrap().is_err());
+        client.next().await.unwrap().unwrap_err();
     }
 
     #[tokio::test]

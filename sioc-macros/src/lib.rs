@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
 #![warn(clippy::pedantic)]
+#![warn(clippy::assertions_on_result_states)]
 
 mod ack_type;
 mod attrs;

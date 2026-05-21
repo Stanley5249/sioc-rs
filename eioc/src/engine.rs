@@ -371,7 +371,7 @@ mod tests {
             .await
             .unwrap();
         let (result, _) = s.run().await;
-        assert!(result.is_ok());
+        result.unwrap();
     }
 
     #[tokio::test]
@@ -386,7 +386,7 @@ mod tests {
             CancellationToken::new(),
         )
         .await;
-        assert!(result.is_ok());
+        result.unwrap();
     }
 
     #[tokio::test]
@@ -430,7 +430,7 @@ mod tests {
             .await
             .unwrap();
         let (result, _) = s.run().await;
-        assert!(result.is_ok());
+        result.unwrap();
     }
 
     #[tokio::test]

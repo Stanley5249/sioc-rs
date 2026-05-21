@@ -304,7 +304,7 @@ mod tests {
 
     #[test]
     fn from_json_invalid_fails() {
-        assert!(from_json::<u32>("not_a_number").is_err());
+        from_json::<u32>("not_a_number").unwrap_err();
     }
 
     #[test]
@@ -329,7 +329,7 @@ mod tests {
 
     #[test]
     fn event_from_json_roundtrip() {
-        assert!(event_from_json::<TestEvent>(r#"["test"]"#).is_ok());
+        event_from_json::<TestEvent>(r#"["test"]"#).unwrap();
     }
 
     #[test]

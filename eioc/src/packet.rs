@@ -260,7 +260,7 @@ mod tests {
             "pingTimeout": 20000
         });
         let bytes = ByteString::from(format!("0{json}"));
-        assert!(Packet::decode(&bytes).is_err());
+        Packet::decode(&bytes).unwrap_err();
     }
 
     #[test]
