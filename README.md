@@ -65,7 +65,7 @@ while let Some(event) = rx.listen::<MyEvent>().await? {
 
 ### Acks
 
-Socket.IO acks let the two sides confirm receipt of an event. sioc models this through the type system so the compiler catches mismatches at build time.
+Socket.IO acks let the two sides confirm receipt of an event. `sioc` models this through the type system so the compiler catches mismatches at build time.
 
 **Client requests an ack.** Associate an ack type with an event using `ack = "TypeName"`. When you emit that event, `emit` returns `Ack<A>` instead of `()`, and you can await the response with an optional timeout.
 
@@ -115,6 +115,62 @@ while let Some(event) = rx.listen::<MyEvent>().await? {
         MyEvent::Survey(Event { payload: Survey { question, options }, id, .. }) => {
             println!("{question}\n{options:?}");
             tx.acknowledge(id, Vote(0)).await?;
+        }
+    }
+}
+```
+
+### Binary
+
+JSON cannot represent binary data directly, so Socket.IO sends it as _binary attachments_, separate frames that accompany the JSON packet. The Socket.IO JS library finds and replaces binary objects automatically at runtime. `sioc` requires you to register binary data via an `AttachmentsBuilder` closure and embed the returned `Placeholder` in your struct. On the receiving side, use `data.slot()` to index into `attachments`.
+
+**Upload**
+
+```rust
+use bytes::Bytes;
+
+#[derive(Debug, EventType, SerializePayload)]
+#[sioc(event(name = "upload", binary))]
+struct Upload {
+    name: String,
+    header: Placeholder,
+    body: Placeholder,
+}
+
+let header = Bytes::from_static(b"PNG\r\n\x1a\n");
+let body = Bytes::from(vec![0u8; 1024]);
+tx.emit(|a: &mut AttachmentsBuilder| Upload {
+    name: "photo.png".into(),
+    header: a.attach(header), // slot 0
+    body: a.attach(body),     // slot 1
+})
+.await?;
+```
+
+**Download**
+
+```rust
+#[derive(Debug, EventType, DeserializePayload)]
+#[sioc(event(name = "chunk", binary))]
+struct Chunk {
+    name: String,
+    data: Placeholder,
+}
+
+#[derive(Debug, EventRouter)]
+enum MyEvent {
+    Chunk(Event<Chunk>),
+}
+
+while let Some(event) = rx.listen::<MyEvent>().await? {
+    match event {
+        MyEvent::Chunk(Event {
+            payload: Chunk { name, data },
+            attachments, // Vec<Bytes>
+            ..
+        }) => {
+            let bytes = &attachments[data.slot()];
+            println!("chunk {name}: {} bytes", bytes.len());
         }
     }
 }

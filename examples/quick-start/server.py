@@ -23,6 +23,15 @@ async def reply(sid, data):
     print(f"[server] reply from {sid}: {data}")
 
 
+@sio.event
+async def upload(sid, name, header, body):
+    print(
+        f"[server] upload from {sid}: {name!r} header={len(header)}B body={len(body)}B"
+    )
+    chunk = b"received: " + header[:4]
+    await sio.emit("chunk", (name, chunk), to=sid)
+
+
 async def session(sid):
     await sio.emit("greeting", "Welcome to the lobby!", to=sid)
 
