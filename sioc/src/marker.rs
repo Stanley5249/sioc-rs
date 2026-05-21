@@ -180,7 +180,10 @@ mod tests {
     #[test]
     fn has_ack_format_inserts_id() {
         let id = <HasAck<()>>::parse(Some(42)).unwrap();
-        assert!(fmt_markers(|m| HasAck::<()>::format(&id, m)).contains("id"));
+        assert_eq!(
+            fmt_markers(|m| HasAck::<()>::format(&id, m)),
+            r#"{"id": 42}"#
+        );
     }
 
     #[test]
@@ -191,7 +194,10 @@ mod tests {
     #[test]
     fn has_binary_format_inserts_count() {
         let attachments = vec![Bytes::from_static(b"x"), Bytes::from_static(b"y")];
-        assert!(fmt_markers(|m| HasBinary::format(&attachments, m)).contains("count"));
+        assert_eq!(
+            fmt_markers(|m| HasBinary::format(&attachments, m)),
+            r#"{"count": 2}"#
+        );
     }
 
     #[test]

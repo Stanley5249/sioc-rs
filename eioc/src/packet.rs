@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn message_display_text() {
         let s = format!("{}", Message::Text(bss("hello")));
-        assert!(s.contains("hello"));
+        assert_eq!(s, "Text(hello)");
     }
 
     #[test]
@@ -412,7 +412,7 @@ mod tests {
             "{}",
             Message::Binary(bytes::Bytes::from_static(b"\x01\x02"))
         );
-        assert!(s.contains('2'));
+        assert_eq!(s, "Binary { len: 2 }");
     }
 
     #[test]
@@ -423,11 +423,14 @@ mod tests {
     #[test]
     fn packet_display_variants() {
         let hs = test_handshake();
-        assert!(format!("{}", Packet::Open(hs)).contains("Open"));
+        assert_eq!(format!("{}", Packet::Open(hs)), "Open(abc)");
         assert_eq!(format!("{}", Packet::Close), "Close");
-        assert!(format!("{}", Packet::Ping(bss("probe"))).contains("probe"));
-        assert!(format!("{}", Packet::Pong(bss("probe"))).contains("probe"));
-        assert!(format!("{}", Packet::Message(bss("hello"))).contains("hello"));
+        assert_eq!(format!("{}", Packet::Ping(bss("probe"))), "Ping(probe)");
+        assert_eq!(format!("{}", Packet::Pong(bss("probe"))), "Pong(probe)");
+        assert_eq!(
+            format!("{}", Packet::Message(bss("hello"))),
+            "Message(hello)"
+        );
         assert_eq!(format!("{}", Packet::Upgrade), "Upgrade");
         assert_eq!(format!("{}", Packet::Noop), "Noop");
     }

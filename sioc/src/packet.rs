@@ -942,7 +942,7 @@ mod tests {
     fn dyn_event_display_shows_payload() {
         let ev = DynEvent::new(r#"["ping"]"#, Some(3));
         let s = format!("{ev}");
-        assert!(s.contains("ping"));
+        assert_eq!(s, r#"{"payload": ["ping"], "id": 3}"#);
     }
 
     // --- DynAck ---
@@ -963,7 +963,7 @@ mod tests {
     fn dyn_ack_display_shows_payload() {
         let ack = DynAck::new("[true]");
         let s = format!("{ack}");
-        assert!(s.contains("true"));
+        assert_eq!(s, r#"{"payload": [true]}"#);
     }
 
     // --- Signal ---
@@ -1053,49 +1053,52 @@ mod tests {
     fn signal_display_variants() {
         assert_eq!(format!("{}", Signal::<u8>::Disconnect), "Disconnect");
         let ev_sig = Signal::Event(DynEvent::new("[]", None));
-        assert!(format!("{ev_sig}").contains("Event"));
+        assert_eq!(format!("{ev_sig}"), r#"Event({"payload": []})"#);
         let connect_sig: Signal<u8> = Signal::Connect(make_connect());
-        assert!(format!("{connect_sig}").contains("Connect"));
+        assert_eq!(format!("{connect_sig}"), "Connect(t)");
         let err_sig: Signal<u8> = Signal::ConnectError(make_connect_error());
-        assert!(format!("{err_sig}").contains("ConnectError"));
+        assert_eq!(format!("{err_sig}"), "ConnectError(bad)");
     }
 
     #[test]
     fn packet_display_variants() {
         assert_eq!(format!("{}", Packet::Disconnect), "Disconnect");
-        assert!(format!("{}", Packet::Connect("{}".into())).contains("Connect"));
-        assert!(
+        assert_eq!(format!("{}", Packet::Connect("{}".into())), "Connect({})");
+        assert_eq!(
             format!(
                 "{}",
                 Packet::Event {
                     payload: "[]".into(),
                     id: None
                 }
-            )
-            .contains("Event")
+            ),
+            "Event { payload: [] }"
         );
-        assert!(
+        assert_eq!(
             format!(
                 "{}",
                 Packet::Event {
                     payload: "[]".into(),
                     id: Some(3)
                 }
-            )
-            .contains("id")
+            ),
+            "Event { payload: [], id: 3 }"
         );
-        assert!(
+        assert_eq!(
             format!(
                 "{}",
                 Packet::Ack {
                     payload: "[]".into(),
                     id: 5
                 }
-            )
-            .contains("Ack")
+            ),
+            "Ack { payload: [], id: 5 }"
         );
-        assert!(format!("{}", Packet::ConnectError("{}".into())).contains("ConnectError"));
-        assert!(
+        assert_eq!(
+            format!("{}", Packet::ConnectError("{}".into())),
+            "ConnectError({})"
+        );
+        assert_eq!(
             format!(
                 "{}",
                 Packet::BinaryEvent {
@@ -1103,10 +1106,10 @@ mod tests {
                     id: None,
                     count: 2
                 }
-            )
-            .contains("BinaryEvent")
+            ),
+            "BinaryEvent { payload: [], count: 2 }"
         );
-        assert!(
+        assert_eq!(
             format!(
                 "{}",
                 Packet::BinaryEvent {
@@ -1114,10 +1117,10 @@ mod tests {
                     id: Some(3),
                     count: 2
                 }
-            )
-            .contains("id")
+            ),
+            "BinaryEvent { payload: [], id: 3, count: 2 }"
         );
-        assert!(
+        assert_eq!(
             format!(
                 "{}",
                 Packet::BinaryAck {
@@ -1125,8 +1128,8 @@ mod tests {
                     id: 5,
                     count: 2
                 }
-            )
-            .contains("BinaryAck")
+            ),
+            "BinaryAck { payload: [], id: 5, count: 2 }"
         );
     }
 
@@ -1134,14 +1137,14 @@ mod tests {
     fn dyn_event_display_with_attachments() {
         let ev = DynEvent::new("[]", None).with_attachments(vec![Bytes::from_static(b"\x01")]);
         let s = format!("{ev}");
-        assert!(s.contains("count"));
+        assert_eq!(s, r#"{"payload": [], "count": 1}"#);
     }
 
     #[test]
     fn dyn_ack_display_with_attachments() {
         let ack = DynAck::new("[]").with_attachments(vec![Bytes::from_static(b"\x01")]);
         let s = format!("{ack}");
-        assert!(s.contains("count"));
+        assert_eq!(s, r#"{"payload": [], "count": 1}"#);
     }
 
     #[test]
