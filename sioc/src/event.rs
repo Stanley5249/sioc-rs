@@ -372,7 +372,7 @@ mod tests {
 
     #[test]
     fn event_handler_handle_bad_ack_fails() {
-        assert!(Event::<Ping>::handle(Ping, Some(1), None).is_err());
+        Event::<Ping>::handle(Ping, Some(1), None).unwrap_err();
     }
 
     #[test]
@@ -426,6 +426,28 @@ mod tests {
         assert!(tx.is_none());
         let att = attachments.expect("expected attachments");
         assert_eq!(att.len(), 1);
+    }
+
+    #[test]
+    fn debug_no_ack_no_binary() {
+        let ev: Event<Ping> = ping_event(None, None).try_into().unwrap();
+        let s = format!("{ev:?}");
+        assert!(s.contains("payload"));
+    }
+
+    #[test]
+    fn debug_has_ack_no_binary() {
+        let ev: Event<PingWithAck> = ping_event(Some(3), None).try_into().unwrap();
+        let s = format!("{ev:?}");
+        assert!(s.contains("id"));
+    }
+
+    #[test]
+    fn debug_no_ack_has_binary() {
+        let att = vec![Bytes::from_static(b"\xFF")];
+        let ev: Event<PingWithBinary> = ping_event(None, Some(att)).try_into().unwrap();
+        let s = format!("{ev:?}");
+        assert!(s.contains("count"));
     }
 
     #[test]

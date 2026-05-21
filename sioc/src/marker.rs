@@ -160,9 +160,43 @@ impl BinaryMarker for HasBinary {
 mod tests {
     use super::*;
 
+    fn fmt_markers<F: Fn(&mut DebugMap)>(f: F) -> String {
+        struct W<F>(F);
+        impl<F: Fn(&mut DebugMap)> std::fmt::Debug for W<F> {
+            fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let mut map = fmt.debug_map();
+                (self.0)(&mut map);
+                map.finish()
+            }
+        }
+        format!("{:?}", W(f))
+    }
+
+    #[test]
+    fn no_ack_format_is_empty() {
+        assert_eq!(fmt_markers(|m| NoAck::format(&(), m)), "{}");
+    }
+
+    #[test]
+    fn has_ack_format_inserts_id() {
+        let id = <HasAck<()>>::parse(Some(42)).unwrap();
+        assert!(fmt_markers(|m| HasAck::<()>::format(&id, m)).contains("id"));
+    }
+
+    #[test]
+    fn no_binary_format_is_empty() {
+        assert_eq!(fmt_markers(|m| NoBinary::format(&(), m)), "{}");
+    }
+
+    #[test]
+    fn has_binary_format_inserts_count() {
+        let attachments = vec![Bytes::from_static(b"x"), Bytes::from_static(b"y")];
+        assert!(fmt_markers(|m| HasBinary::format(&attachments, m)).contains("count"));
+    }
+
     #[test]
     fn no_binary_parse_none_succeeds() {
-        assert!(NoBinary::parse(None).is_ok());
+        NoBinary::parse(None).unwrap();
     }
 
     #[test]
@@ -186,7 +220,7 @@ mod tests {
 
     #[test]
     fn has_binary_parse_none_fails() {
-        assert!(HasBinary::parse(None).is_err());
+        HasBinary::parse(None).unwrap_err();
     }
 
     #[test]
@@ -198,7 +232,7 @@ mod tests {
 
     #[test]
     fn no_ack_parse_none_succeeds() {
-        assert!(NoAck::parse(None).is_ok());
+        NoAck::parse(None).unwrap();
     }
 
     #[test]
@@ -214,6 +248,6 @@ mod tests {
 
     #[test]
     fn has_ack_parse_none_fails() {
-        assert!(<HasAck<()>>::parse(None).is_err());
+        <HasAck<()>>::parse(None).unwrap_err();
     }
 }

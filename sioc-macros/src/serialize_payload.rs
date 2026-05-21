@@ -65,6 +65,25 @@ mod tests {
     #[test]
     fn enum_input_returns_error() {
         let input: syn::DeriveInput = syn::parse_str("enum Foo { A(i32) }").unwrap();
-        assert!(expand(&input).is_err());
+        expand(&input).unwrap_err();
+    }
+
+    #[test]
+    fn named_struct_succeeds() {
+        let input: syn::DeriveInput = syn::parse_str("struct Foo { x: i32, y: String }").unwrap();
+        expand(&input).unwrap();
+    }
+
+    #[test]
+    fn tuple_struct_succeeds() {
+        let input: syn::DeriveInput = syn::parse_str("struct Foo(i32, String);").unwrap();
+        expand(&input).unwrap();
+    }
+
+    #[test]
+    fn flatten_field_succeeds() {
+        let input: syn::DeriveInput =
+            syn::parse_str("struct Foo { x: i32, #[sioc(flatten)] rest: Vec<i32> }").unwrap();
+        expand(&input).unwrap();
     }
 }

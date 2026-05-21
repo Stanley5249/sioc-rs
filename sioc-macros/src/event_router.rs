@@ -161,6 +161,31 @@ mod tests {
     #[test]
     fn struct_input_returns_error() {
         let input: syn::DeriveInput = syn::parse_str("struct Foo { x: i32 }").unwrap();
-        assert!(expand(&input).is_err());
+        expand(&input).unwrap_err();
+    }
+
+    #[test]
+    fn valid_newtype_enum_succeeds() {
+        let input: syn::DeriveInput =
+            syn::parse_str("enum MyRouter { Foo(FooEvent), Bar(BarEvent) }").unwrap();
+        expand(&input).unwrap();
+    }
+
+    #[test]
+    fn named_field_variant_returns_error() {
+        let input: syn::DeriveInput = syn::parse_str("enum MyRouter { Foo { x: i32 } }").unwrap();
+        expand(&input).unwrap_err();
+    }
+
+    #[test]
+    fn unit_variant_returns_error() {
+        let input: syn::DeriveInput = syn::parse_str("enum MyRouter { Foo }").unwrap();
+        expand(&input).unwrap_err();
+    }
+
+    #[test]
+    fn multi_field_tuple_variant_returns_error() {
+        let input: syn::DeriveInput = syn::parse_str("enum MyRouter { Foo(i32, String) }").unwrap();
+        expand(&input).unwrap_err();
     }
 }

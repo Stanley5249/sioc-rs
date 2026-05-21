@@ -71,6 +71,11 @@ impl TransportStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::FrameSender;
+    use crate::error::TransportError;
+    use tokio::sync::{mpsc, oneshot};
+    use tokio_tungstenite::tungstenite::Error as TungsteniteError;
+    use url::Url;
 
     #[test]
     fn transport_strategy_default_is_polling() {
@@ -78,5 +83,31 @@ mod tests {
             TransportStrategy::default(),
             TransportStrategy::Polling
         ));
+    }
+
+    #[tokio::test]
+    async fn websocket_strategy_propagates_connector_error() {
+        let base_url = Url::parse("ws://127.0.0.1:1/").unwrap();
+        let http_client = reqwest::Client::new();
+        let connector = async |_| Err(TungsteniteError::ConnectionClosed);
+        let (handshake_tx, _handshake_rx) = oneshot::channel();
+        let (engine_tx, _engine_rx) = mpsc::channel(1);
+        let frame_tx = FrameSender(engine_tx);
+        let (_transport_tx, transport_rx) = mpsc::channel(1);
+        let token = CancellationToken::new();
+
+        let result = TransportStrategy::WebSocket
+            .run(
+                base_url,
+                http_client,
+                connector,
+                handshake_tx,
+                frame_tx,
+                transport_rx,
+                token,
+            )
+            .await;
+
+        assert!(matches!(result, Err(TransportError::WebSocket(_))));
     }
 }

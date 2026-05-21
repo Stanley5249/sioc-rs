@@ -297,7 +297,7 @@ mod tests {
             attachments: None,
         };
         let result: Result<Ack<BinaryUnitAck>, _> = ack.try_into();
-        assert!(result.is_err());
+        result.unwrap_err();
     }
 
     #[test]
@@ -307,7 +307,7 @@ mod tests {
             attachments: Some(vec![Bytes::from_static(b"x")]),
         };
         let result: Result<Ack<()>, _> = ack.try_into();
-        assert!(result.is_err());
+        result.unwrap_err();
     }
     #[test]
     fn send_ack_into_directive_binary() {
@@ -342,7 +342,7 @@ mod tests {
         drop(tx);
 
         let result: Result<Ack<()>, _> = handle.await;
-        assert!(result.is_err());
+        result.unwrap_err();
     }
 
     #[test]
@@ -371,7 +371,7 @@ mod tests {
         })
         .unwrap();
         let result: Result<Ack<()>, _> = handle.await;
-        assert!(result.is_ok());
+        result.unwrap();
     }
 
     #[tokio::test]
@@ -394,7 +394,7 @@ mod tests {
         })
         .unwrap();
         let result = handle.timeout(Duration::from_secs(5)).await;
-        assert!(result.is_ok());
+        result.unwrap();
     }
 
     #[tokio::test]
@@ -410,6 +410,37 @@ mod tests {
         .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         let result = handle.timeout_at(deadline).await;
-        assert!(result.is_ok());
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ack_handle_timeout_at_past_deadline_times_out() {
+        use std::time::Duration;
+        use tokio::time::Instant;
+        let (_tx, rx) = oneshot::channel::<DynAck>();
+        let handle = AckHandle::<()>::new(rx);
+        let deadline = Instant::now() - Duration::from_secs(1);
+        let result = handle.timeout_at(deadline).await;
+        assert!(matches!(result, Err(AckError::Timeout(_))));
+    }
+
+    #[test]
+    fn ack_no_binary_debug() {
+        let ack = Ack::<()> {
+            payload: (),
+            attachments: (),
+        };
+        let s = format!("{ack:?}");
+        assert!(s.contains("payload"));
+    }
+
+    #[test]
+    fn ack_has_binary_debug() {
+        let ack = Ack::<BinaryUnitAck> {
+            payload: BinaryUnitAck,
+            attachments: vec![Bytes::from_static(b"x")],
+        };
+        let s = format!("{ack:?}");
+        assert!(s.contains("count"));
     }
 }
