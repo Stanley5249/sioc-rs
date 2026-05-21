@@ -3,13 +3,13 @@ resolver = "3"
 members = ["eioc", "examples/*", "sioc", "sioc-macros"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1"
 rust-version = "1.88"
 
 [workspace.dependencies]
-eioc = { path = "./eioc", version = "0.3.0" }
-sioc = { path = "./sioc", version = "0.3.0" }
-sioc-macros = { path = "./sioc-macros", version = "0.3.0" }
+eioc = { path = "./eioc", version = "0.3.1" }
+sioc = { path = "./sioc", version = "0.3.1" }
+sioc-macros = { path = "./sioc-macros", version = "0.3.1" }
 
 # Async runtime
 futures-util = { version = "0.3", features = ["sink"] }
