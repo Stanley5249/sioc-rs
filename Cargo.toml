@@ -12,25 +12,24 @@ sioc = { path = "./sioc", version = "0.4.0" }
 sioc-macros = { path = "./sioc-macros", version = "0.4.0" }
 
 # Async runtime
-futures-util = { version = "0.3", default-features = false, features = [
-  "sink",
-  "std"
-] }
+futures-util = {
+  version = "0.3",
+  default-features = false,
+  features = ["sink", "std"]
+}
 pin-project = "1"
-tokio = { version = "1", default-features = false, features = [
-  "macros",
-  "net",
-  "rt",
-  "sync",
-  "time"
-] }
+tokio = {
+  version = "1",
+  default-features = false,
+  features = ["macros", "net", "rt", "sync", "time"]
+}
 tokio-util = "0.7"
 
 # HTTP and WebSocket
 base64 = "0.22"
 http = "1"
 reqwest = { version = "0.13", default-features = false, features = ["charset"] }
-tokio-tungstenite = { version = "0.29", features = ["url"] }
+tokio-tungstenite = { version = "0.30", features = ["url"] }
 url = "2"
 
 # Serialization
