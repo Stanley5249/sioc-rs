@@ -30,7 +30,11 @@ Re-export public surface through `prelude`. Never put `Result` or `Error` aliase
 
 Variable names should be descriptive and avoid unnecessary abbreviations. Prefer `packet` and `event` over `pkt` and `evt`. For short-lived variables, single-letter names like `p` and `e` are acceptable.
 
-Tasks shut down by half-close: a task stops by dropping its senders and finishes only when its receivers return `None`. A send never fails during a graceful shutdown, so every send error is a real error.
+## Async
+
+- Run each direction of a bidirectional pipe as its own loop and `join!` them. A loop that awaits a send to one output stops serving every other input.
+- Use `select!` only to merge inputs that feed one output, or to race waiting against a stop signal. Every branch future must be cancel-safe: tokio channel `recv`, `recv_many`, and `CancellationToken::cancelled` are. Prove cancel safety before selecting on anything else.
+- Shut down by half-close: a task stops by dropping its senders and finishes only when its receivers return `None`. A send never fails during a graceful shutdown, so every send error is a real error.
 
 ## Commits
 
