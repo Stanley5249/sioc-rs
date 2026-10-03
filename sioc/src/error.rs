@@ -259,13 +259,13 @@ pub enum ManagerError {
     #[diagnostic(transparent)]
     Packet(#[from] PacketError),
 
-    /// Sending a message to the engine layer failed because the channel is closed.
-    #[error("engine message channel closed")]
+    /// Sending a client message to the engine failed because the channel is closed.
+    #[error("client message channel closed")]
     #[diagnostic(
-        code(sioc::manager::send_engine),
+        code(sioc::manager::send_client_message),
         help("the receiver was dropped; the socket is probably shut down")
     )]
-    SendEngine(#[from] mpsc::error::SendError<Message>),
+    SendClientMessage(#[from] mpsc::error::SendError<Message>),
 
     /// Received a text frame while a binary reassembly was in progress.
     #[error("unexpected text frame: {0:?}")]
@@ -295,11 +295,11 @@ pub enum ManagerError {
     )]
     NamespaceConflict { ns: ByteString },
 
-    /// The manager loops stopped talking to each other before the session ended.
-    #[error("manager control channel closed")]
+    /// Sending a namespace status between the manager loops failed because the channel is closed.
+    #[error("namespace status channel closed")]
     #[diagnostic(
-        code(sioc::manager::control_closed),
+        code(sioc::manager::send_namespace_status),
         help("a manager loop exited early; check for prior manager errors")
     )]
-    ControlClosed,
+    SendNamespaceStatus,
 }

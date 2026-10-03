@@ -3,7 +3,7 @@
 use crate::ack::AckType;
 use crate::error::ManagerError;
 use crate::error::{ClientBuilderError, ClientError, PayloadError, SocketError};
-use crate::manager::{self, NewSocket};
+use crate::manager::{self, ConnectRequest};
 use crate::marker::{AckId, AckMarker, BinaryMarker};
 use crate::packet::{Directive, DynEvent, Signal};
 use bytestring::ByteString;
@@ -208,15 +208,15 @@ where
         let websocket_connector = self.websocket_connector;
         let url = self.url.join(&self.path)?;
 
-        let (new_socket_tx, new_socket_rx) = mpsc::channel(self.channels.manager);
+        let (connect_request_tx, connect_request_rx) = mpsc::channel(self.channels.manager);
 
         let (server_message_tx, server_message_rx) = mpsc::channel(self.channels.manager);
 
         let (client_message_tx, client_message_rx) = mpsc::channel(self.channels.engine);
 
-        let sio_future = manager::run(new_socket_rx, server_message_rx, client_message_tx);
+        let manager_future = manager::run(connect_request_rx, server_message_rx, client_message_tx);
 
-        let eio_future = eioc::engine::connect(
+        let engine_future = eioc::engine::connect(
             url,
             http_client,
             websocket_connector,
@@ -227,16 +227,16 @@ where
             self.channels.transport,
         );
 
-        let eio_future = eio_future.map_err(ManagerError::Engine);
+        let engine_future = engine_future.map_err(ManagerError::Engine);
 
-        let handle = tokio::spawn(async {
-            tokio::try_join!(sio_future, eio_future)?;
+        let task = tokio::spawn(async {
+            tokio::try_join!(manager_future, engine_future)?;
             Ok(())
         });
 
         Ok(Client {
-            new_socket_tx,
-            handle,
+            connect_request_tx,
+            task,
             channels: self.channels,
         })
     }
@@ -245,8 +245,8 @@ where
 /// A connected Socket.IO client.
 #[derive(Debug)]
 pub struct Client {
-    new_socket_tx: mpsc::Sender<NewSocket>,
-    handle: JoinHandle<Result<(), ManagerError>>,
+    connect_request_tx: mpsc::Sender<ConnectRequest>,
+    task: JoinHandle<Result<(), ManagerError>>,
     channels: ChannelConfig,
 }
 
@@ -288,22 +288,19 @@ impl Client {
 
         let (signal_tx, signal_rx) = mpsc::channel(self.channels.socket);
 
-        let new_socket = NewSocket {
+        let connect_request = ConnectRequest {
             ns: ns.into(),
             payload: payload.into(),
             directive_rx,
             signal_tx,
         };
 
-        self.new_socket_tx
-            .send(new_socket)
+        self.connect_request_tx
+            .send(connect_request)
             .await
             .map_err(|_| SocketError::Closed)?;
 
-        Ok((
-            SocketSender { directive_tx },
-            SocketReceiver { rx: signal_rx },
-        ))
+        Ok((SocketSender { directive_tx }, SocketReceiver { signal_rx }))
     }
 
     /// Drops the client handle and waits for the session to end.
@@ -315,8 +312,8 @@ impl Client {
     ///
     /// Returns an error if the manager task fails or panics.
     pub async fn join(self) -> Result<(), ClientError> {
-        drop(self.new_socket_tx);
-        self.handle.await??;
+        drop(self.connect_request_tx);
+        self.task.await??;
         Ok(())
     }
 }
@@ -381,7 +378,7 @@ impl SocketSender {
 /// Receiver for a Socket.IO namespace.
 #[derive(Debug)]
 pub struct SocketReceiver {
-    rx: mpsc::Receiver<Signal>,
+    signal_rx: mpsc::Receiver<Signal>,
 }
 
 impl SocketReceiver {
@@ -400,7 +397,7 @@ impl SocketReceiver {
         E: TryFrom<DynEvent>,
     {
         loop {
-            match self.rx.recv().await {
+            match self.signal_rx.recv().await {
                 None => return Ok(None),
                 Some(Signal::Event(e)) => return E::try_from(e).map(Some),
                 Some(_) => {}
@@ -413,13 +410,13 @@ impl std::ops::Deref for SocketReceiver {
     type Target = mpsc::Receiver<Signal>;
 
     fn deref(&self) -> &Self::Target {
-        &self.rx
+        &self.signal_rx
     }
 }
 
 impl std::ops::DerefMut for SocketReceiver {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.rx
+        &mut self.signal_rx
     }
 }
 
@@ -491,7 +488,7 @@ mod tests {
     #[tokio::test]
     async fn listen_skips_protocol_signals() {
         let (tx, rx) = mpsc::channel(8);
-        let mut receiver = SocketReceiver { rx };
+        let mut receiver = SocketReceiver { signal_rx: rx };
         tx.send(Signal::Connect(Connect {
             sid: ByteString::default(),
             extra: Map::default(),
@@ -515,7 +512,7 @@ mod tests {
     #[tokio::test]
     async fn listen_returns_none_on_closed_channel() {
         let (tx, rx) = mpsc::channel::<Signal>(4);
-        let mut receiver = SocketReceiver { rx };
+        let mut receiver = SocketReceiver { signal_rx: rx };
         drop(tx);
         assert!(receiver.listen::<Pass>().await.unwrap().is_none());
     }
@@ -610,7 +607,7 @@ mod tests {
     #[test]
     fn socket_receiver_deref_gives_inner_receiver() {
         let (_tx, rx) = mpsc::channel::<Signal>(4);
-        let receiver = SocketReceiver { rx };
+        let receiver = SocketReceiver { signal_rx: rx };
         let _ = &*receiver;
     }
 }

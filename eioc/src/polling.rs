@@ -93,7 +93,7 @@ impl PollingClient {
         decode_frames(&ByteString::from(response))
     }
 
-    async fn get_one(&self, url: &Url) -> Result<Frame, PollingError> {
+    async fn get_frame(&self, url: &Url) -> Result<Frame, PollingError> {
         let response = self
             .0
             .get(url.as_str())
@@ -129,12 +129,12 @@ impl PollingClient {
         Ok(())
     }
 
-    /// Batches client frames into POST requests until `pause` fires or the engine closes `rx`.
+    /// Batches client frames into POST requests until `pause` fires or the engine closes `client_frame_rx`.
     #[tracing::instrument(level = "debug", skip_all, err)]
-    async fn post_until(
+    async fn post_client_frames(
         &self,
         url: &Url,
-        rx: &mut mpsc::Receiver<Frame>,
+        client_frame_rx: &mut mpsc::Receiver<Frame>,
         pause: &CancellationToken,
     ) -> Result<Stop, TransportError> {
         let mut buffer = Vec::with_capacity(8);
@@ -146,7 +146,7 @@ impl PollingClient {
                     tracing::debug!("paused polling POST");
                     return Ok(Stop::Paused);
                 }
-                count = rx.recv_many(&mut buffer, 8) => count,
+                count = client_frame_rx.recv_many(&mut buffer, 8) => count,
             };
 
             if count == 0 {
@@ -160,7 +160,7 @@ impl PollingClient {
 
     /// Forwards server frames to the engine until `pause` fires or the server sends `Close`.
     #[tracing::instrument(level = "debug", skip_all, err)]
-    async fn get_until(
+    async fn get_server_frames(
         &self,
         url: &Url,
         server_frame_tx: &mpsc::Sender<Frame>,
@@ -193,8 +193,8 @@ impl PollingClient {
         client_frame_rx: &mut mpsc::Receiver<Frame>,
         pause: &CancellationToken,
     ) -> Result<Stop, TransportError> {
-        let mut get = pin!(self.get_until(url, server_frame_tx, pause));
-        let mut post = pin!(self.post_until(url, client_frame_rx, pause));
+        let mut get = pin!(self.get_server_frames(url, server_frame_tx, pause));
+        let mut post = pin!(self.post_client_frames(url, client_frame_rx, pause));
 
         // A pause lets the other loop finish its request. An ended session
         // abandons it, because its result no longer matters.
@@ -273,20 +273,20 @@ impl PollingClient {
 
         let span = tracing::debug_span!("connect", %url);
 
-        let handshake = match self.get_one(&url).instrument(span).await? {
+        let handshake = match self.get_frame(&url).instrument(span).await? {
             Frame::Packet(Packet::Open(handshake)) => handshake,
             frame => return Err(TransportError::Open(frame)),
         };
 
         url.query_pairs_mut().append_pair("sid", &handshake.sid);
-        let do_upgrade = handshake.can_upgrade_to_websocket();
+        let can_upgrade = handshake.can_upgrade_to_websocket();
         let sid = handshake.sid.clone();
 
         handshake_tx
             .send(handshake)
             .map_err(TransportError::SendHandshake)?;
 
-        let stream = if do_upgrade {
+        let stream = if can_upgrade {
             let upgrade = WebSocketStream::connect(base_url, Some(&sid), connector);
 
             self.poll_until_upgraded(&url, &server_frame_tx, &mut client_frame_rx, upgrade)
@@ -377,7 +377,7 @@ mod tests {
         });
         let client = PollingClient(Client::new());
         let stop = client
-            .get_until(&url, &server_frame_tx, &pause)
+            .get_server_frames(&url, &server_frame_tx, &pause)
             .await
             .unwrap();
         assert!(matches!(stop, Stop::Paused));
@@ -393,7 +393,7 @@ mod tests {
         let (server_frame_tx, mut server_frame_rx) = mpsc::channel(4);
         let client = PollingClient(Client::new());
         let stop = client
-            .get_until(&url, &server_frame_tx, &CancellationToken::new())
+            .get_server_frames(&url, &server_frame_tx, &CancellationToken::new())
             .await
             .unwrap();
         assert!(matches!(stop, Stop::Ended));

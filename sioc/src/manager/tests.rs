@@ -12,19 +12,23 @@ const CONNECT_RESPONSE: &str = "0{\"sid\":\"test\"}";
 
 /// A running manager with the client handle and both engine ends of its channels.
 struct Harness {
-    new_socket_tx: mpsc::Sender<NewSocket>,
+    connect_request_tx: mpsc::Sender<ConnectRequest>,
     server_message_tx: mpsc::Sender<Message>,
     client_message_rx: mpsc::Receiver<Message>,
     manager: JoinHandle<Result<(), ManagerError>>,
 }
 
 fn spawn() -> Harness {
-    let (new_socket_tx, new_socket_rx) = mpsc::channel(32);
+    let (connect_request_tx, connect_request_rx) = mpsc::channel(32);
     let (server_message_tx, server_message_rx) = mpsc::channel(32);
     let (client_message_tx, client_message_rx) = mpsc::channel(32);
-    let manager = tokio::spawn(run(new_socket_rx, server_message_rx, client_message_tx));
+    let manager = tokio::spawn(run(
+        connect_request_rx,
+        server_message_rx,
+        client_message_tx,
+    ));
     Harness {
-        new_socket_tx,
+        connect_request_tx,
         server_message_tx,
         client_message_rx,
         manager,
@@ -58,13 +62,13 @@ impl Harness {
     ) -> (mpsc::Sender<Directive>, mpsc::Receiver<Signal>) {
         let (directive_tx, directive_rx) = mpsc::channel(32);
         let (signal_tx, signal_rx) = mpsc::channel(signal_capacity);
-        let new_socket = NewSocket {
+        let connect_request = ConnectRequest {
             ns: ns.into(),
             payload: ByteString::new(),
             directive_rx,
             signal_tx,
         };
-        self.new_socket_tx.send(new_socket).await.unwrap();
+        self.connect_request_tx.send(connect_request).await.unwrap();
         assert!(self.text().await.starts_with('0'));
         (directive_tx, signal_rx)
     }
@@ -118,7 +122,7 @@ async fn stays_open_with_no_namespace() {
 #[tokio::test]
 async fn closes_when_client_handle_drops_with_no_namespace() {
     let mut h = spawn();
-    drop(h.new_socket_tx);
+    drop(h.connect_request_tx);
     assert!(h.client_message_rx.recv().await.is_none());
     drop(h.server_message_tx);
     h.manager.await.unwrap().unwrap();
@@ -136,7 +140,7 @@ async fn stays_open_after_last_namespace_while_client_handle_lives() {
         Err(TryRecvError::Empty)
     ));
 
-    drop(h.new_socket_tx);
+    drop(h.connect_request_tx);
     assert!(h.client_message_rx.recv().await.is_none());
     drop(h.server_message_tx);
     h.manager.await.unwrap().unwrap();
@@ -146,7 +150,7 @@ async fn stays_open_after_last_namespace_while_client_handle_lives() {
 async fn closes_after_client_handle_and_last_namespace_drop() {
     let mut h = spawn();
     let (directive_tx, _signal_rx) = h.open("/").await;
-    drop(h.new_socket_tx);
+    drop(h.connect_request_tx);
     assert_quiet(&mut h.client_message_rx).await;
 
     drop(directive_tx);
@@ -343,13 +347,13 @@ async fn duplicate_namespace_is_conflict() {
     let (_directive_tx, _signal_rx) = h.open("/").await;
     let (_, directive_rx) = mpsc::channel(1);
     let (signal_tx, _) = mpsc::channel(1);
-    let new_socket = NewSocket {
+    let connect_request = ConnectRequest {
         ns: "/".into(),
         payload: ByteString::new(),
         directive_rx,
         signal_tx,
     };
-    h.new_socket_tx.send(new_socket).await.unwrap();
+    h.connect_request_tx.send(connect_request).await.unwrap();
     assert!(matches!(
         h.manager.await.unwrap(),
         Err(ManagerError::NamespaceConflict { .. })

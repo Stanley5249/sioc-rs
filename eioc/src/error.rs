@@ -21,13 +21,13 @@ pub enum Error {
 /// Errors that occur during an active Engine.IO session.
 #[derive(Debug, Error, Diagnostic)]
 pub enum EngineError {
-    /// Outbound frame channel to the transport task is closed.
+    /// Sending a client frame to the transport task failed because the channel is closed.
     #[error("client frame channel closed")]
     #[diagnostic(
-        code(eioc::engine::send_transport),
+        code(eioc::engine::send_client_frame),
         help("the transport task exited; check for prior transport errors")
     )]
-    SendTransport(#[from] mpsc::error::SendError<Frame>),
+    SendClientFrame(#[from] mpsc::error::SendError<Frame>),
 
     /// Delivering a server message to the upper layer failed because its receiver is gone.
     #[error("server message channel closed")]
@@ -79,13 +79,13 @@ pub enum TransportError {
     #[diagnostic(transparent)]
     Polling(#[from] PollingError),
 
-    /// Sending a frame to the engine task failed because the channel is closed.
-    #[error("engine frame channel closed")]
+    /// Sending a server frame to the engine task failed because the channel is closed.
+    #[error("server frame channel closed")]
     #[diagnostic(
-        code(eioc::transport::send_engine),
+        code(eioc::transport::send_server_frame),
         help("the engine task exited; check for prior engine errors")
     )]
-    SendEngine(#[from] mpsc::error::SendError<Frame>),
+    SendServerFrame(#[from] mpsc::error::SendError<Frame>),
 
     /// Handshake data could not be forwarded to the engine task.
     #[error("failed to send handshake to engine task")]

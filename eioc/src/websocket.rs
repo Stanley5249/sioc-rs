@@ -47,7 +47,7 @@ impl WebSocketConnector for () {
     }
 }
 
-type Connection = tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>;
+type TungsteniteStream = tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// An open WebSocket connection that carries Engine.IO [`Frame`]s.
 pub struct WebSocketStream(pub tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>);
@@ -62,7 +62,7 @@ fn bytestring_from_utf8_bytes(utf8: tokio_tungstenite::tungstenite::Utf8Bytes) -
 ///
 /// Returns `None` at the peer's close frame, so the transport stops before it
 /// sends into a closing socket.
-async fn next_frame<S>(stream: &mut S) -> Result<Option<Frame>, WebSocketError>
+async fn next_server_frame<S>(stream: &mut S) -> Result<Option<Frame>, WebSocketError>
 where
     S: Stream<Item = Result<WebSocketMessage, TungsteniteError>> + Unpin,
 {
@@ -93,7 +93,7 @@ where
 }
 
 /// Encodes a frame as a WebSocket message.
-fn encode(frame: Frame) -> WebSocketMessage {
+fn encode_frame(frame: Frame) -> WebSocketMessage {
     match frame {
         Frame::Packet(packet) => {
             let text = packet.encode();
@@ -166,12 +166,14 @@ impl WebSocketStream {
 
     /// Waits for the next frame, returning an error if the stream is closed.
     async fn recv(&mut self) -> Result<Frame, WebSocketError> {
-        next_frame(&mut self.0).await?.ok_or(WebSocketError::Closed)
+        next_server_frame(&mut self.0)
+            .await?
+            .ok_or(WebSocketError::Closed)
     }
 
     /// Sends one frame.
     async fn send(&mut self, frame: Frame) -> Result<(), WebSocketError> {
-        Ok(self.0.send(encode(frame)).await?)
+        Ok(self.0.send(encode_frame(frame)).await?)
     }
 
     /// Sends a probe `Ping` and expects a matching `Pong`, confirming the WebSocket path is live.
@@ -235,8 +237,8 @@ impl WebSocketStream {
         // Each direction runs on its own, so a slow engine never stalls
         // client frames and a slow socket never stalls server ones.
         tokio::try_join!(
-            read_server_frames(stream, server_frame_tx, stream_closed.clone()),
-            write_client_frames(sink, client_frame_rx, stream_closed),
+            websocket_to_server_frames(stream, server_frame_tx, stream_closed.clone()),
+            client_frames_to_websocket(sink, client_frame_rx, stream_closed),
         )?;
 
         Ok(())
@@ -246,14 +248,14 @@ impl WebSocketStream {
 /// Forwards server frames to the engine until the stream ends.
 ///
 /// Returning drops `server_frame_tx`, which tells the engine the transport has finished.
-async fn read_server_frames(
-    mut stream: SplitStream<Connection>,
+async fn websocket_to_server_frames(
+    mut stream: SplitStream<TungsteniteStream>,
     server_frame_tx: mpsc::Sender<Frame>,
     stream_closed: CancellationToken,
 ) -> Result<(), TransportError> {
     let _guard = stream_closed.drop_guard();
 
-    while let Some(frame) = next_frame(&mut stream).await? {
+    while let Some(frame) = next_server_frame(&mut stream).await? {
         server_frame_tx.send(frame).await?;
     }
 
@@ -266,8 +268,8 @@ async fn read_server_frames(
 ///
 /// If the stream ends first, discards frames until the engine closes `client_frame_rx`,
 /// because the closed socket cannot send them.
-async fn write_client_frames(
-    mut sink: SplitSink<Connection, WebSocketMessage>,
+async fn client_frames_to_websocket(
+    mut sink: SplitSink<TungsteniteStream, WebSocketMessage>,
     mut client_frame_rx: mpsc::Receiver<Frame>,
     stream_closed: CancellationToken,
 ) -> Result<(), TransportError> {
@@ -279,7 +281,7 @@ async fn write_client_frames(
                     break;
                 };
 
-                sink.send(encode(frame))
+                sink.send(encode_frame(frame))
                     .await
                     .map_err(WebSocketError::from)?;
             }
@@ -384,7 +386,7 @@ mod tests {
     async fn stream_ends_at_peer_close_frame() {
         let (mut client, mut server) = ws_pair().await;
         server.send(WsMsg::Close(None)).await.unwrap();
-        assert!(next_frame(&mut client.0).await.unwrap().is_none());
+        assert!(next_server_frame(&mut client.0).await.unwrap().is_none());
     }
 
     #[tokio::test]

@@ -41,7 +41,7 @@ where
 
     let (handshake_tx, handshake_rx) = oneshot::channel();
 
-    let eio_future = engine_io(
+    let protocol_future = run_protocol(
         server_frame_rx,
         server_message_tx,
         client_message_rx,
@@ -59,7 +59,7 @@ where
     );
 
     tokio::try_join!(
-        eio_future.map_err(Error::Engine),
+        protocol_future.map_err(Error::Engine),
         transport_future.map_err(Error::Transport),
     )?;
 
@@ -84,7 +84,7 @@ impl Heartbeat {
     }
 
     /// Receives the next frame, failing once the server misses its ping window.
-    async fn recv(
+    async fn next_server_frame(
         &self,
         server_frame_rx: &mut mpsc::Receiver<Frame>,
     ) -> Result<Option<Frame>, EngineError> {
@@ -95,7 +95,7 @@ impl Heartbeat {
 }
 
 #[tracing::instrument(skip_all, err)]
-async fn engine_io(
+async fn run_protocol(
     server_frame_rx: mpsc::Receiver<Frame>,
     server_message_tx: mpsc::Sender<Message>,
     client_message_rx: mpsc::Receiver<Message>,
@@ -110,13 +110,13 @@ async fn engine_io(
     // Each direction runs on its own, so a slow consumer on one side never
     // stalls the other.
     tokio::try_join!(
-        forward_server_frames(
+        server_frames_to_messages(
             server_frame_rx,
             server_message_tx,
             pong_tx,
             handshake.ping_window()
         ),
-        forward_client_messages(client_message_rx, pong_rx, client_frame_tx),
+        client_messages_to_frames(client_message_rx, pong_rx, client_frame_tx),
     )?;
 
     Ok(())
@@ -126,7 +126,7 @@ async fn engine_io(
 ///
 /// Then drops `server_message_tx` to end the message stream, whichever side
 /// closed, and waits for the transport to finish.
-async fn forward_server_frames(
+async fn server_frames_to_messages(
     mut server_frame_rx: mpsc::Receiver<Frame>,
     server_message_tx: mpsc::Sender<Message>,
     pong_tx: mpsc::Sender<Frame>,
@@ -134,7 +134,7 @@ async fn forward_server_frames(
 ) -> Result<(), EngineError> {
     let mut heartbeat = Heartbeat::new(ping_window);
 
-    while let Some(frame) = heartbeat.recv(&mut server_frame_rx).await? {
+    while let Some(frame) = heartbeat.next_server_frame(&mut server_frame_rx).await? {
         match frame {
             Frame::Packet(packet) => {
                 tracing::trace!(%packet, "<- packet");
@@ -172,7 +172,11 @@ async fn forward_server_frames(
     drop(pong_tx);
     drop(server_message_tx);
 
-    while heartbeat.recv(&mut server_frame_rx).await?.is_some() {}
+    while heartbeat
+        .next_server_frame(&mut server_frame_rx)
+        .await?
+        .is_some()
+    {}
 
     Ok(())
 }
@@ -180,7 +184,7 @@ async fn forward_server_frames(
 /// Forwards client messages and pongs as frames until either side ends the session.
 ///
 /// Then drops `client_frame_tx` and drains both inputs until their senders hang up.
-async fn forward_client_messages(
+async fn client_messages_to_frames(
     mut client_message_rx: mpsc::Receiver<Message>,
     mut pong_rx: mpsc::Receiver<Frame>,
     client_frame_tx: mpsc::Sender<Frame>,
@@ -272,7 +276,7 @@ mod tests {
         let (client_frame_tx, client_frame_rx) = mpsc::channel(4);
         let (handshake_tx, handshake_rx) = oneshot::channel();
         handshake_tx.send(handshake).unwrap();
-        let engine = tokio::spawn(engine_io(
+        let engine = tokio::spawn(run_protocol(
             server_frame_rx,
             server_message_tx,
             client_message_rx,
@@ -309,14 +313,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn engine_io_handshake_dropped_is_error() {
+    async fn protocol_handshake_dropped_is_error() {
         let (_server_frame_tx, server_frame_rx) = mpsc::channel(4);
         let (server_message_tx, _server_message_rx) = mpsc::channel(4);
         let (_client_message_tx, client_message_rx) = mpsc::channel(4);
         let (client_frame_tx, _) = mpsc::channel(4);
         let (handshake_tx, handshake_rx) = oneshot::channel::<Handshake>();
         drop(handshake_tx);
-        let result = engine_io(
+        let result = run_protocol(
             server_frame_rx,
             server_message_tx,
             client_message_rx,
@@ -328,7 +332,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn engine_io_server_close_ends_message_stream() {
+    async fn protocol_server_close_ends_message_stream() {
         let mut h = spawn(make_handshake(), 4);
         h.server_frame_tx.send(Packet::Close.into()).await.unwrap();
         assert!(h.server_message_rx.recv().await.is_none());
@@ -338,7 +342,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn engine_io_transport_closed_ends_message_stream() {
+    async fn protocol_transport_closed_ends_message_stream() {
         let Harness {
             server_frame_tx,
             mut server_message_rx,
@@ -354,7 +358,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn engine_io_client_close_sends_close_packet() {
+    async fn protocol_client_close_sends_close_packet() {
         let Harness {
             server_frame_tx,
             mut server_message_rx,
@@ -384,7 +388,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn engine_io_accepts_client_messages_until_sender_dropped() {
+    async fn protocol_accepts_client_messages_until_sender_dropped() {
         let Harness {
             server_frame_tx,
             mut server_message_rx,
@@ -405,7 +409,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn engine_io_client_messages_flow_while_upper_layer_is_full() {
+    async fn protocol_client_messages_flow_while_upper_layer_is_full() {
         let h = spawn(make_handshake(), 1);
         for text in ["fills", "blocks"] {
             h.server_frame_tx
@@ -428,7 +432,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn engine_io_ping_triggers_pong() {
+    async fn protocol_ping_triggers_pong() {
         let h = spawn(make_handshake(), 4);
         h.server_frame_tx
             .send(Packet::Ping("probe".into()).into())
@@ -441,7 +445,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn engine_io_noop_is_ignored() {
+    async fn protocol_noop_is_ignored() {
         let h = spawn(make_handshake(), 4);
         h.server_frame_tx.send(Packet::Noop.into()).await.unwrap();
         h.server_frame_tx.send(Packet::Close.into()).await.unwrap();
@@ -452,7 +456,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn engine_io_unexpected_packet_is_server_error() {
+    async fn protocol_unexpected_packet_is_server_error() {
         let h = spawn(make_handshake(), 4);
         h.server_frame_tx
             .send(Packet::Upgrade.into())
@@ -463,7 +467,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn engine_io_server_messages_forwarded() {
+    async fn protocol_server_messages_forwarded() {
         let h = spawn(make_handshake(), 4);
         h.server_frame_tx
             .send(Packet::Message("hello".into()).into())
@@ -483,7 +487,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn engine_io_client_messages_sent_to_transport() {
+    async fn protocol_client_messages_sent_to_transport() {
         let Harness {
             server_frame_tx,
             server_message_rx: _server_message_rx,
@@ -517,7 +521,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn engine_io_heartbeat_timeout_fires() {
+    async fn protocol_heartbeat_timeout_fires() {
         let handshake = Handshake {
             ping_interval: 1,
             ping_timeout: 1,
@@ -529,7 +533,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn engine_io_closed_message_receiver_is_error() {
+    async fn protocol_closed_message_receiver_is_error() {
         let Harness {
             server_frame_tx,
             server_message_rx,

@@ -1,6 +1,6 @@
 //! Delivers what the server sends to each namespace.
 
-use super::{Control, Routes};
+use super::{NamespaceStatus, Routes};
 use crate::error::{ManagerError, PacketError};
 use crate::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Packet, Signal};
 use bytes::Bytes;
@@ -11,17 +11,17 @@ use tokio::sync::mpsc;
 /// Delivers server packets to the namespace receivers until the engine closes `server_message_rx`.
 ///
 /// Waiting on a full receiver holds up only this direction.
-pub(super) async fn route_server_messages(
+pub(super) async fn server_messages_to_signals(
     mut server_message_rx: mpsc::Receiver<Message>,
     routes: &Routes,
-    control_tx: mpsc::UnboundedSender<Control>,
+    namespace_status_tx: mpsc::UnboundedSender<NamespaceStatus>,
 ) -> Result<(), ManagerError> {
     let mut reconstructor = Reconstructor::new();
 
     while let Some(message) = server_message_rx.recv().await {
         match message {
             Message::Text(text) => {
-                route_text(text, routes, &control_tx, &mut reconstructor).await?;
+                route_text(text, routes, &namespace_status_tx, &mut reconstructor).await?;
             }
             Message::Binary(attachment) => {
                 route_binary(attachment, routes, &mut reconstructor).await?;
@@ -39,7 +39,7 @@ pub(super) async fn route_server_messages(
 async fn route_text(
     text: ByteString,
     routes: &Routes,
-    control_tx: &mpsc::UnboundedSender<Control>,
+    namespace_status_tx: &mpsc::UnboundedSender<NamespaceStatus>,
     reconstructor: &mut Reconstructor,
 ) -> Result<(), ManagerError> {
     if reconstructor.is_pending() {
@@ -56,23 +56,26 @@ async fn route_text(
 
             tracing::debug!(%ns, sid = %connect.sid, "connected");
 
-            if routes.connect(&ns) {
-                send_control(control_tx, Control::Connected(ns.clone()))?;
+            if routes.mark_connected(&ns) {
+                send_namespace_status(namespace_status_tx, NamespaceStatus::Connected(ns.clone()))?;
             }
-            deliver(routes.signal_tx(&ns), &ns, Signal::Connect(connect)).await;
+            deliver_signal(routes.signal_tx(&ns), &ns, Signal::Connect(connect)).await;
         }
         Packet::Disconnect => {
             tracing::debug!(%ns, "disconnected");
 
             let signal_tx = routes.remove(&ns);
             if signal_tx.is_some() {
-                send_control(control_tx, Control::Disconnected(ns.clone()))?;
+                send_namespace_status(
+                    namespace_status_tx,
+                    NamespaceStatus::Disconnected(ns.clone()),
+                )?;
             }
-            deliver(signal_tx, &ns, Signal::Disconnect).await;
+            deliver_signal(signal_tx, &ns, Signal::Disconnect).await;
         }
         Packet::Event { payload, id } => {
             let signal = Signal::Event(DynEvent::new(payload, id));
-            deliver(routes.signal_tx(&ns), &ns, signal).await;
+            deliver_signal(routes.signal_tx(&ns), &ns, signal).await;
         }
         Packet::Ack { payload, id } => {
             resolve_ack(routes, &ns, id, DynAck::new(payload));
@@ -82,7 +85,7 @@ async fn route_text(
 
             tracing::error!(%ns, %error, "connect error");
 
-            deliver(routes.signal_tx(&ns), &ns, Signal::ConnectError(error)).await;
+            deliver_signal(routes.signal_tx(&ns), &ns, Signal::ConnectError(error)).await;
         }
         Packet::BinaryEvent { payload, id, count } => {
             reconstructor.insert(ns, BinaryPacket::event(payload, id, count));
@@ -117,7 +120,7 @@ async fn route_binary(
             ..
         } => {
             let event = DynEvent::new(payload, id).with_attachments(attachments);
-            deliver(routes.signal_tx(&ns), &ns, Signal::Event(event)).await;
+            deliver_signal(routes.signal_tx(&ns), &ns, Signal::Event(event)).await;
         }
         BinaryPacket::Ack {
             payload,
@@ -137,7 +140,7 @@ async fn route_binary(
 ///
 /// The server may still send packets for a namespace the client already left,
 /// and the caller may drop a receiver it no longer reads, so both are discarded.
-async fn deliver(signal_tx: Option<mpsc::Sender<Signal>>, ns: &ByteString, signal: Signal) {
+async fn deliver_signal(signal_tx: Option<mpsc::Sender<Signal>>, ns: &ByteString, signal: Signal) {
     let Some(signal_tx) = signal_tx else {
         tracing::debug!(%ns, "discarded signal for a closed namespace");
         return;
@@ -160,13 +163,13 @@ fn resolve_ack(routes: &Routes, ns: &ByteString, id: u64, ack: DynAck) {
     }
 }
 
-fn send_control(
-    control_tx: &mpsc::UnboundedSender<Control>,
-    control: Control,
+fn send_namespace_status(
+    namespace_status_tx: &mpsc::UnboundedSender<NamespaceStatus>,
+    namespace_status: NamespaceStatus,
 ) -> Result<(), ManagerError> {
-    control_tx
-        .send(control)
-        .map_err(|_| ManagerError::ControlClosed)
+    namespace_status_tx
+        .send(namespace_status)
+        .map_err(|_| ManagerError::SendNamespaceStatus)
 }
 
 enum BinaryPacket {

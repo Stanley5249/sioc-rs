@@ -1,6 +1,6 @@
 //! Sends what the namespace handles ask for.
 
-use super::{Control, NewSocket, Routes};
+use super::{ConnectRequest, NamespaceStatus, Routes};
 use crate::error::ManagerError;
 use crate::packet::{Directive, Packet};
 use bytes::Bytes;
@@ -14,10 +14,10 @@ use tokio::sync::mpsc;
 /// The directive loop's view of an open namespace.
 struct Namespace {
     /// Tells a reopened namespace apart from the handles of the one before it.
-    id: u64,
-    /// Set by the server's CONNECT response; events wait in `buffer` until then.
+    generation: u64,
+    /// Set by the server's CONNECT response; events wait in `send_buffer` until then.
     connected: bool,
-    buffer: Vec<Message>,
+    send_buffer: Vec<Message>,
     next_ack_id: u64,
 }
 
@@ -25,7 +25,7 @@ struct Namespace {
 ///
 /// Hands the receiver back, so the caller decides whether to keep listening.
 async fn recv_directive(
-    id: u64,
+    generation: u64,
     ns: ByteString,
     mut directive_rx: mpsc::Receiver<Directive>,
 ) -> (
@@ -36,30 +36,30 @@ async fn recv_directive(
 ) {
     let directive = directive_rx.recv().await;
 
-    (id, ns, directive, directive_rx)
+    (generation, ns, directive, directive_rx)
 }
 
 /// Sends what the namespace handles ask for until the session closes.
 ///
 /// Closes the session once the client handle and every namespace are gone, so
 /// having no namespace at startup or between namespaces keeps it open.
-pub(super) async fn route_directives(
-    mut new_socket_rx: mpsc::Receiver<NewSocket>,
-    mut control_rx: mpsc::UnboundedReceiver<Control>,
+pub(super) async fn directives_to_client_messages(
+    mut connect_request_rx: mpsc::Receiver<ConnectRequest>,
+    mut namespace_status_rx: mpsc::UnboundedReceiver<NamespaceStatus>,
     routes: &Routes,
     client_message_tx: mpsc::Sender<Message>,
 ) -> Result<(), ManagerError> {
     let mut namespaces = HashMap::<ByteString, Namespace>::new();
     let mut directives = FuturesUnordered::new();
-    let mut ids = 0..;
+    let mut generations = 0..;
     let mut client_open = true;
 
     while client_open || !namespaces.is_empty() {
         // Every handler sends only to `client_message_tx`, so waiting there holds
         // up only this direction, which no other arm could serve anyway.
         tokio::select! {
-            new_socket = new_socket_rx.recv(), if client_open => {
-                let Some(NewSocket { ns, payload, directive_rx, signal_tx }) = new_socket else {
+            connect_request = connect_request_rx.recv(), if client_open => {
+                let Some(ConnectRequest { ns, payload, directive_rx, signal_tx }) = connect_request else {
                     client_open = false;
                     continue;
                 };
@@ -68,24 +68,24 @@ pub(super) async fn route_directives(
                     return Err(ManagerError::NamespaceConflict { ns });
                 }
 
-                let id = ids.next().unwrap_or_default();
+                let generation = generations.next().unwrap_or_default();
                 let namespace = Namespace {
-                    id,
+                    generation,
                     connected: false,
-                    buffer: Vec::new(),
+                    send_buffer: Vec::new(),
                     next_ack_id: 0,
                 };
 
                 namespaces.insert(ns.clone(), namespace);
-                directives.push(recv_directive(id, ns.clone(), directive_rx));
+                directives.push(recv_directive(generation, ns.clone(), directive_rx));
 
                 send_packet(&client_message_tx, &ns, Packet::Connect(payload), None).await?;
             }
 
-            Some((id, ns, directive, directive_rx)) = directives.next() => {
+            Some((generation, ns, directive, directive_rx)) = directives.next() => {
                 // Handles of a namespace that closed, or closed and reopened, no
                 // longer apply, and dropping their receiver tells them so.
-                let Some(namespace) = namespaces.get_mut(&ns).filter(|n| n.id == id) else {
+                let Some(namespace) = namespaces.get_mut(&ns).filter(|n| n.generation == generation) else {
                     continue;
                 };
 
@@ -95,7 +95,7 @@ pub(super) async fn route_directives(
                     }
                     Some(directive) => {
                         send_directive(namespace, routes, &client_message_tx, &ns, directive).await?;
-                        directives.push(recv_directive(id, ns, directive_rx));
+                        directives.push(recv_directive(generation, ns, directive_rx));
                     }
                     None => {
                         tracing::warn!(%ns, "dropped while connected");
@@ -104,21 +104,21 @@ pub(super) async fn route_directives(
                 }
             }
 
-            control = control_rx.recv() => match control {
-                Some(Control::Connected(ns)) => {
+            namespace_status = namespace_status_rx.recv() => match namespace_status {
+                Some(NamespaceStatus::Connected(ns)) => {
                     if let Some(namespace) = namespaces.get_mut(&ns) {
                         namespace.connected = true;
 
-                        if !namespace.buffer.is_empty() {
-                            tracing::trace!(%ns, count = namespace.buffer.len(), "flushed buffer");
+                        if !namespace.send_buffer.is_empty() {
+                            tracing::trace!(%ns, count = namespace.send_buffer.len(), "flushed send buffer");
                         }
 
-                        for message in namespace.buffer.drain(..) {
+                        for message in namespace.send_buffer.drain(..) {
                             client_message_tx.send(message).await?;
                         }
                     }
                 }
-                Some(Control::Disconnected(ns)) => {
+                Some(NamespaceStatus::Disconnected(ns)) => {
                     namespaces.remove(&ns);
                 }
                 // The server-message loop ended, so the engine closed the session.
@@ -134,8 +134,8 @@ pub(super) async fn route_directives(
     drop(directives);
 
     // Wait for the server-message loop to end, so it never sends into a
-    // closed control channel.
-    while control_rx.recv().await.is_some() {}
+    // closed namespace status channel.
+    while namespace_status_rx.recv().await.is_some() {}
 
     Ok(())
 }
@@ -188,7 +188,9 @@ async fn send_directive(
             } else {
                 tracing::trace!(%ns, %packet, "buffering messages");
 
-                namespace.buffer.extend(encode(ns, &packet, attachments));
+                namespace
+                    .send_buffer
+                    .extend(encode_packet(ns, &packet, attachments));
 
                 Ok(())
             }
@@ -222,7 +224,7 @@ async fn send_packet(
 ) -> Result<(), ManagerError> {
     tracing::trace!(%ns, %packet, "-> packet");
 
-    for message in encode(ns, &packet, attachments) {
+    for message in encode_packet(ns, &packet, attachments) {
         client_message_tx.send(message).await?;
     }
 
@@ -230,7 +232,7 @@ async fn send_packet(
 }
 
 /// Encodes a packet as one text message followed by its binary attachments.
-fn encode(
+fn encode_packet(
     ns: &ByteString,
     packet: &Packet,
     attachments: Option<Vec<Bytes>>,

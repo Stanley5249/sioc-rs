@@ -19,7 +19,7 @@ use tokio::sync::{mpsc, oneshot};
 
 /// A namespace opened by [`Client::connect`](crate::client::Client::connect).
 #[derive(Debug)]
-pub(crate) struct NewSocket {
+pub(crate) struct ConnectRequest {
     pub ns: ByteString,
     pub payload: ByteString,
     pub directive_rx: mpsc::Receiver<Directive>,
@@ -36,16 +36,21 @@ pub(crate) struct NewSocket {
 ///
 /// Returns an error if the engine channel closes early or the server breaks the protocol.
 pub(crate) async fn run(
-    new_socket_rx: mpsc::Receiver<NewSocket>,
+    connect_request_rx: mpsc::Receiver<ConnectRequest>,
     server_message_rx: mpsc::Receiver<Message>,
     client_message_tx: mpsc::Sender<Message>,
 ) -> Result<(), ManagerError> {
     let routes = Routes::default();
-    let (control_tx, control_rx) = mpsc::unbounded_channel();
+    let (namespace_status_tx, namespace_status_rx) = mpsc::unbounded_channel();
 
     tokio::try_join!(
-        server_message::route_server_messages(server_message_rx, &routes, control_tx),
-        directive::route_directives(new_socket_rx, control_rx, &routes, client_message_tx),
+        server_message::server_messages_to_signals(server_message_rx, &routes, namespace_status_tx),
+        directive::directives_to_client_messages(
+            connect_request_rx,
+            namespace_status_rx,
+            &routes,
+            client_message_tx
+        ),
     )?;
 
     Ok(())
@@ -58,7 +63,7 @@ pub(crate) async fn run(
 /// changes of namespaces the client opened travel on it: at most one of each
 /// per open.
 #[derive(Debug)]
-enum Control {
+enum NamespaceStatus {
     /// The server confirmed the namespace, so buffered events can go out.
     Connected(ByteString),
     /// The server closed the namespace.
@@ -108,7 +113,7 @@ impl Routes {
     }
 
     /// Marks a route connected, returning `true` only the first time.
-    fn connect(&self, ns: &str) -> bool {
+    fn mark_connected(&self, ns: &str) -> bool {
         self.lock()
             .get_mut(ns)
             .is_some_and(|route| !std::mem::replace(&mut route.connected, true))
