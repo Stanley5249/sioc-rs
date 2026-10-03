@@ -1,10 +1,9 @@
-"""Quick-start Socket.IO server demonstrating typed events with a Rust client."""
+"""Quick-start Socket.IO chat server with a bot, paired with a Rust client."""
 
 import argparse
 import asyncio
 import logging
 import shlex
-from typing import Any
 
 import socketio
 import uvicorn
@@ -14,91 +13,67 @@ logger = logging.getLogger("quick_start_server")
 sio = socketio.AsyncServer(async_mode="asgi")
 app = socketio.ASGIApp(sio)
 
-_background_tasks: set[asyncio.Task[None]] = set()
+# The bot stands in for other room members, so a single client still sees
+# broadcasts.
+BOT = "bot"
 
 
 @sio.event
-async def connect(sid: str, _environ: dict[str, Any]) -> None:
-    """Handle incoming client connection and start the interactive session.
-
-    Args:
-        sid: Socket ID assigned to the connected client.
-        _environ: WSGI/ASGI connection environment metadata.
-    """
-    task = asyncio.create_task(session(sid))
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
-
-
-@sio.event
-async def join(sid: str, data: str) -> tuple[int]:
-    """Handle room join request from a client.
+async def join(sid: str, room: str, name: str) -> tuple[int]:
+    """Add a client to a chat room and announce it.
 
     Args:
         sid: Socket ID of the client joining the room.
-        data: Name of the room to join.
+        room: Name of the room to join.
+        name: Display name of the client.
 
     Returns:
-        A 1-tuple containing the initial member count acknowledgment.
+        A 1-tuple with the member count, including the bot.
     """
-    logger.info("%s joined room %r", sid, data)
-    return (1,)
+    await sio.save_session(sid, {"room": room, "name": name})
+    await sio.enter_room(sid, room)
+    await sio.emit("notice", f"{name} joined {room}", room=room)
+    logger.info('server <- join      %s wants room "%s"', name, room)
+    members = len(list(sio.manager.get_participants("/", room))) + 1
+    return (members,)
 
 
 @sio.event
-async def reply(sid: str, data: str) -> None:
-    """Handle text reply sent by a client.
+async def message(sid: str, text: str) -> None:
+    """Broadcast a chat message, let the bot reply, then ask to leave.
 
     Args:
         sid: Socket ID of the sender.
-        data: Reply message payload.
+        text: Message text.
     """
-    logger.info("reply from %s: %s", sid, data)
+    session = await sio.get_session(sid)
+    room, name = session["room"], session["name"]
+    logger.info("server <- message   %s", text)
+
+    await sio.emit("message", (name, text), room=room, skip_sid=sid)
+    await sio.emit("message", (BOT, f'hi {name}, you said "{text}"'), room=room)
+
+    leave = await sio.call("confirm", "Leave the room?", to=sid, timeout=5)
+    if not isinstance(leave, bool):
+        msg = f"expected a bool answer, got {leave!r}"
+        raise TypeError(msg)
+    logger.info("server <- ack       confirm: %s", "yes" if leave else "no")
+    if leave:
+        await sio.disconnect(sid)
 
 
 @sio.event
-async def upload(sid: str, name: str, header: bytes, body: bytes) -> None:
-    """Handle binary file upload and respond with a processed data chunk.
+async def image(sid: str, name: str, data: bytes) -> None:
+    """Broadcast an image to the whole room, sender included.
 
     Args:
-        sid: Socket ID of the uploading client.
-        name: Name of the uploaded file.
-        header: Header binary payload.
-        body: Body binary payload.
+        sid: Socket ID of the sender.
+        name: File name of the image.
+        data: Image bytes.
     """
-    logger.info(
-        "upload from %s: %r header=%dB body=%dB",
-        sid,
-        name,
-        len(header),
-        len(body),
-    )
-    chunk = b"received: " + header[:4]
-    await sio.emit("chunk", (name, chunk), to=sid)
-
-
-async def session(sid: str) -> None:
-    """Run an interactive session sequence with the connected client.
-
-    Args:
-        sid: Socket ID of the target client.
-    """
-    await sio.emit("greeting", "Welcome to the lobby!", to=sid)
-
-    options = ["Rust", "Python", "JavaScripts"]
-
-    ack = await sio.call(
-        "poll",
-        ("Favorite language?", options),
-        to=sid,
-        timeout=5,
-    )
-    if not isinstance(ack, int):
-        msg = f"expected an int vote, got {ack!r}"
-        raise TypeError(msg)
-    logger.info("poll vote from %s: option %s", sid, options[ack])
-
-    await sio.disconnect(sid)
+    session = await sio.get_session(sid)
+    logger.info("server <- image     %s (%d bytes)", name, len(data))
+    await sio.emit("image", (name, data), room=session["room"])
 
 
 async def serve_client(command: str) -> int:
@@ -113,7 +88,9 @@ async def serve_client(command: str) -> int:
     Returns:
         The client exit code, or 1 when the server fails to start.
     """
-    server = uvicorn.Server(uvicorn.Config(app, host="localhost", port=3000))
+    server = uvicorn.Server(
+        uvicorn.Config(app, host="localhost", port=3000, log_level="warning")
+    )
     serving = asyncio.create_task(server.serve())
     while not server.started:
         if serving.done():
@@ -130,7 +107,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--client", help="run this command, then exit with its code")
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     if args.client:
         raise SystemExit(asyncio.run(serve_client(args.client)))
-    uvicorn.run(app, host="localhost", port=3000)
+    logger.info("listening on http://localhost:3000")
+    uvicorn.run(app, host="localhost", port=3000, log_level="warning")

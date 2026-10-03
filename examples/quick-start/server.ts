@@ -1,53 +1,71 @@
 /**
- * Quick-start Socket.IO server on the reference JavaScript implementation,
- * serving the same events as `server.py`.
+ * Quick-start Socket.IO chat server with a bot on the reference JavaScript
+ * implementation, serving the same events as `server.py`.
  */
 
 import { createServer } from "node:http";
-import { Server, type Socket } from "socket.io";
+import { Server } from "socket.io";
 
-const options = ["Rust", "Python", "JavaScripts"];
-
-async function session(socket: Socket): Promise<void> {
-  socket.emit("greeting", "Welcome to the lobby!");
-
-  const ack: unknown = await socket
-    .timeout(5000)
-    .emitWithAck("poll", "Favorite language?", options);
-  if (typeof ack !== "number") {
-    throw new TypeError(`expected a number vote, got ${JSON.stringify(ack)}`);
-  }
-  console.info(`poll vote from ${socket.id}: option ${options[ack]}`);
-
-  // Close the whole connection, not just the namespace, so smoke tests
-  // cover the client shutting down after a server-closed transport.
-  socket.disconnect(true);
+// Typed events mirror the Rust client's structs, field order included.
+interface ClientToServer {
+  join: (room: string, name: string, ack: (members: number) => void) => void;
+  message: (text: string) => void;
+  image: (name: string, data: Buffer) => void;
 }
 
+interface ServerToClient {
+  message: (from: string, text: string) => void;
+  notice: (text: string) => void;
+  confirm: (question: string, ack: (leave: boolean) => void) => void;
+  image: (name: string, data: Buffer) => void;
+}
+
+interface SocketData {
+  room: string;
+  name: string;
+}
+
+// The bot stands in for other room members, so a single client still sees
+// broadcasts.
+const BOT = "bot";
+
 const httpServer = createServer();
-const io = new Server(httpServer);
+const io = new Server<ClientToServer, ServerToClient, Record<string, never>, SocketData>(
+  httpServer,
+);
 
 io.on("connection", (socket) => {
-  socket.on("join", (room: string, ack: (count: number) => void) => {
-    console.info(`${socket.id} joined room ${JSON.stringify(room)}`);
-    ack(1);
+  socket.on("join", async (room, name, ack) => {
+    socket.data = { room, name };
+    await socket.join(room);
+    io.to(room).emit("notice", `${name} joined ${room}`);
+    console.info(`server <- join      ${name} wants room "${room}"`);
+    const sockets = await io.in(room).fetchSockets();
+    ack(sockets.length + 1);
   });
 
-  socket.on("reply", (text: string) => {
-    console.info(`reply from ${socket.id}: ${text}`);
+  socket.on("message", async (text) => {
+    const { room, name } = socket.data;
+    console.info(`server <- message   ${text}`);
+
+    socket.to(room).emit("message", name, text);
+    io.to(room).emit("message", BOT, `hi ${name}, you said "${text}"`);
+
+    const leave: unknown = await socket.timeout(5000).emitWithAck("confirm", "Leave the room?");
+    if (typeof leave !== "boolean") {
+      throw new TypeError(`expected a bool answer, got ${JSON.stringify(leave)}`);
+    }
+    console.info(`server <- ack       confirm: ${leave ? "yes" : "no"}`);
+    if (leave) {
+      // Close the whole connection, not just the namespace, so smoke tests
+      // cover the client shutting down after a server-closed transport.
+      socket.disconnect(true);
+    }
   });
 
-  socket.on("upload", (name: string, header: Buffer, body: Buffer) => {
-    console.info(
-      `upload from ${socket.id}: ${JSON.stringify(name)} header=${header.length}B body=${body.length}B`,
-    );
-    const chunk = Buffer.concat([Buffer.from("received: "), header.subarray(0, 4)]);
-    socket.emit("chunk", name, chunk);
-  });
-
-  session(socket).catch((error: unknown) => {
-    console.error(error);
-    socket.disconnect(true);
+  socket.on("image", (name, data) => {
+    console.info(`server <- image     ${name} (${data.length} bytes)`);
+    io.to(socket.data.room).emit("image", name, data);
   });
 });
 
