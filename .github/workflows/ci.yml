@@ -32,39 +32,34 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: just
       - run: just msrv
 
-  fmt:
-    timeout-minutes: 5
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just
-      - run: just fmt-check-rs
-
-  clippy:
+  # Later steps run with `!cancelled()` so one failing check does not hide
+  # the next one's results.
+  lint:
     timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: just
-      - run: just lint
+      - run: just fmt-check-rs
+      - if: ${{ !cancelled() }}
+        run: just lint
 
-  python:
+  lint-py:
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
@@ -74,9 +69,10 @@ jobs:
         with:
           tool: just
       - run: just fmt-check-py
-      - run: just lint-py
+      - if: ${{ !cancelled() }}
+        run: just lint-py
 
-  javascript:
+  lint-js:
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
@@ -87,8 +83,10 @@ jobs:
           tool: just
       - run: bun install --frozen-lockfile
       - run: just fmt-check-js
-      - run: just lint-js
+      - if: ${{ !cancelled() }}
+        run: just lint-js
 
+  # Smoke runs here because `just test` already built the example client.
   test:
     timeout-minutes: 30
     runs-on: ${{ matrix.os }}
@@ -100,29 +98,17 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
         with:
-          tool: just
-      - run: just test
-
-  smoke:
-    timeout-minutes: 30
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: astral-sh/setup-uv@v7
       - uses: oven-sh/setup-bun@v2
       - uses: taiki-e/install-action@v2
         with:
           tool: just
       - run: bun install --frozen-lockfile
-      - run: just smoke
+      - run: just test
+      - if: ${{ !cancelled() }}
+        run: just smoke
 
   coverage:
     timeout-minutes: 30
@@ -133,6 +119,8 @@ jobs:
         with:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: just, cargo-llvm-cov
@@ -149,6 +137,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: just
@@ -156,7 +146,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [deny, msrv, fmt, clippy, python, javascript, test, smoke, doc]
+    needs: [deny, msrv, lint, lint-py, lint-js, test, doc]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -168,6 +158,8 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo publish -p eioc
       - run: cargo publish -p sioc-macros
       - run: cargo publish -p sioc
