@@ -7,3 +7,12 @@ dependencies = [
   "python-socketio",
   "uvicorn",
 ]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  "COM812", # conflicts with the formatter
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
