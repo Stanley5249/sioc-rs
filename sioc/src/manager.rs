@@ -2,15 +2,15 @@
 //!
 //! Two loops share the work, so neither direction waits on the other:
 //! [`server_message`] delivers what the server sends to each namespace, and
-//! [`directive`] sends what the namespace handles ask for.
+//! [`client_packet`] sends what the namespace handles ask for.
 
-mod directive;
+mod client_packet;
 mod server_message;
 #[cfg(test)]
 mod tests;
 
 use crate::error::ManagerError;
-use crate::packet::{Directive, DynAck, Signal};
+use crate::packet::{ClientPacket, DynAck, ServerPacket};
 use bytestring::ByteString;
 use eioc::prelude::Message;
 use std::collections::HashMap;
@@ -22,8 +22,8 @@ use tokio::sync::{mpsc, oneshot};
 pub(crate) struct ConnectRequest {
     pub ns: ByteString,
     pub payload: ByteString,
-    pub directive_rx: mpsc::Receiver<Directive>,
-    pub signal_tx: mpsc::Sender<Signal>,
+    pub client_packet_rx: mpsc::Receiver<ClientPacket>,
+    pub server_packet_tx: mpsc::Sender<ServerPacket>,
 }
 
 /// Routes packets between the namespace handles and the engine until the session ends.
@@ -44,8 +44,8 @@ pub(crate) async fn run(
     let (namespace_status_tx, namespace_status_rx) = mpsc::unbounded_channel();
 
     tokio::try_join!(
-        server_message::server_messages_to_signals(server_message_rx, &routes, namespace_status_tx),
-        directive::directives_to_client_messages(
+        server_message::server_messages_to_packets(server_message_rx, &routes, namespace_status_tx),
+        client_packet::client_packets_to_messages(
             connect_request_rx,
             namespace_status_rx,
             &routes,
@@ -56,7 +56,7 @@ pub(crate) async fn run(
     Ok(())
 }
 
-/// What the server-message loop tells the directive loop about a namespace.
+/// What the server-message loop tells the client-packet loop about a namespace.
 ///
 /// The channel is unbounded so that delivering server packets never waits on
 /// the client's sending direction. It stays short because only real state
@@ -78,7 +78,7 @@ enum NamespaceStatus {
 struct Routes(Mutex<HashMap<ByteString, Route>>);
 
 struct Route {
-    signal_tx: mpsc::Sender<Signal>,
+    server_packet_tx: mpsc::Sender<ServerPacket>,
     ack_txs: HashMap<u64, oneshot::Sender<DynAck>>,
     connected: bool,
 }
@@ -90,7 +90,7 @@ impl Routes {
     }
 
     /// Adds a route, returning `false` if the namespace is already open.
-    fn insert(&self, ns: ByteString, signal_tx: mpsc::Sender<Signal>) -> bool {
+    fn insert(&self, ns: ByteString, server_packet_tx: mpsc::Sender<ServerPacket>) -> bool {
         let mut routes = self.lock();
 
         if routes.contains_key(&ns) {
@@ -98,7 +98,7 @@ impl Routes {
         }
 
         let route = Route {
-            signal_tx,
+            server_packet_tx,
             ack_txs: HashMap::new(),
             connected: false,
         };
@@ -108,8 +108,8 @@ impl Routes {
     }
 
     /// Removes a route. Dropping it ends the namespace receiver and fails its pending acks.
-    fn remove(&self, ns: &str) -> Option<mpsc::Sender<Signal>> {
-        self.lock().remove(ns).map(|route| route.signal_tx)
+    fn remove(&self, ns: &str) -> Option<mpsc::Sender<ServerPacket>> {
+        self.lock().remove(ns).map(|route| route.server_packet_tx)
     }
 
     /// Marks a route connected, returning `true` only the first time.
@@ -119,8 +119,10 @@ impl Routes {
             .is_some_and(|route| !std::mem::replace(&mut route.connected, true))
     }
 
-    fn signal_tx(&self, ns: &str) -> Option<mpsc::Sender<Signal>> {
-        self.lock().get(ns).map(|route| route.signal_tx.clone())
+    fn server_packet_tx(&self, ns: &str) -> Option<mpsc::Sender<ServerPacket>> {
+        self.lock()
+            .get(ns)
+            .map(|route| route.server_packet_tx.clone())
     }
 
     /// Registers an ack receiver. Without a route it is dropped, which fails the [`AckHandle`](crate::ack::AckHandle).

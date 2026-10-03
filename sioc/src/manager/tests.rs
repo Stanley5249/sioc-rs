@@ -1,5 +1,5 @@
 use super::*;
-use crate::packet::{Directive, DynAck, Signal};
+use crate::packet::{ClientPacket, DynAck, ServerPacket};
 use bytes::Bytes;
 use bytestring::ByteString;
 use eioc::prelude::Message;
@@ -41,8 +41,8 @@ async fn assert_quiet(client_message_rx: &mut mpsc::Receiver<Message>) {
     assert!(result.is_err(), "unexpected message {result:?}");
 }
 
-fn event(payload: &'static str, ack_tx: Option<oneshot::Sender<DynAck>>) -> Directive {
-    Directive::Event {
+fn event(payload: &'static str, ack_tx: Option<oneshot::Sender<DynAck>>) -> ClientPacket {
+    ClientPacket::Event {
         payload: ByteString::from_static(payload),
         ack_tx,
         attachments: None,
@@ -51,7 +51,10 @@ fn event(payload: &'static str, ack_tx: Option<oneshot::Sender<DynAck>>) -> Dire
 
 impl Harness {
     /// Opens a namespace and consumes its CONNECT packet.
-    async fn open(&mut self, ns: &str) -> (mpsc::Sender<Directive>, mpsc::Receiver<Signal>) {
+    async fn open(
+        &mut self,
+        ns: &str,
+    ) -> (mpsc::Sender<ClientPacket>, mpsc::Receiver<ServerPacket>) {
         self.open_with(ns, 32).await
     }
 
@@ -59,18 +62,18 @@ impl Harness {
         &mut self,
         ns: &str,
         signal_capacity: usize,
-    ) -> (mpsc::Sender<Directive>, mpsc::Receiver<Signal>) {
-        let (directive_tx, directive_rx) = mpsc::channel(32);
-        let (signal_tx, signal_rx) = mpsc::channel(signal_capacity);
+    ) -> (mpsc::Sender<ClientPacket>, mpsc::Receiver<ServerPacket>) {
+        let (client_packet_tx, client_packet_rx) = mpsc::channel(32);
+        let (server_packet_tx, server_packet_rx) = mpsc::channel(signal_capacity);
         let connect_request = ConnectRequest {
             ns: ns.into(),
             payload: ByteString::new(),
-            directive_rx,
-            signal_tx,
+            client_packet_rx,
+            server_packet_tx,
         };
         self.connect_request_tx.send(connect_request).await.unwrap();
         assert!(self.text().await.starts_with('0'));
-        (directive_tx, signal_rx)
+        (client_packet_tx, server_packet_rx)
     }
 
     async fn server(&self, text: &'static str) {
@@ -131,8 +134,11 @@ async fn closes_when_client_handle_drops_with_no_namespace() {
 #[tokio::test]
 async fn stays_open_after_last_namespace_while_client_handle_lives() {
     let mut h = spawn();
-    let (directive_tx, _signal_rx) = h.open("/").await;
-    directive_tx.send(Directive::Disconnect).await.unwrap();
+    let (client_packet_tx, _signal_rx) = h.open("/").await;
+    client_packet_tx
+        .send(ClientPacket::Disconnect)
+        .await
+        .unwrap();
     assert_eq!(&*h.text().await, "1");
     assert_quiet(&mut h.client_message_rx).await;
     assert!(matches!(
@@ -149,11 +155,11 @@ async fn stays_open_after_last_namespace_while_client_handle_lives() {
 #[tokio::test]
 async fn closes_after_client_handle_and_last_namespace_drop() {
     let mut h = spawn();
-    let (directive_tx, _signal_rx) = h.open("/").await;
+    let (client_packet_tx, _signal_rx) = h.open("/").await;
     drop(h.connect_request_tx);
     assert_quiet(&mut h.client_message_rx).await;
 
-    drop(directive_tx);
+    drop(client_packet_tx);
     assert!(matches!(
         h.client_message_rx.recv().await,
         Some(Message::Text(text)) if text == "1"
@@ -166,9 +172,9 @@ async fn closes_after_client_handle_and_last_namespace_drop() {
 #[tokio::test]
 async fn dropping_handles_disconnects_only_that_namespace() {
     let mut h = spawn();
-    let (directive_tx, _signal_rx) = h.open("/").await;
+    let (client_packet_tx, _signal_rx) = h.open("/").await;
     let (_other_tx, _other_rx) = h.open("/other").await;
-    drop(directive_tx);
+    drop(client_packet_tx);
     assert_eq!(&*h.text().await, "1");
     assert_quiet(&mut h.client_message_rx).await;
     h.close_server().await.unwrap();
@@ -177,17 +183,29 @@ async fn dropping_handles_disconnects_only_that_namespace() {
 #[tokio::test]
 async fn events_wait_for_server_connect_in_order() {
     let mut h = spawn();
-    let (directive_tx, mut signal_rx) = h.open("/").await;
-    directive_tx.send(event(r#"["a"]"#, None)).await.unwrap();
-    directive_tx.send(event(r#"["b"]"#, None)).await.unwrap();
+    let (client_packet_tx, mut server_packet_rx) = h.open("/").await;
+    client_packet_tx
+        .send(event(r#"["a"]"#, None))
+        .await
+        .unwrap();
+    client_packet_tx
+        .send(event(r#"["b"]"#, None))
+        .await
+        .unwrap();
     assert_quiet(&mut h.client_message_rx).await;
 
     h.server(CONNECT_RESPONSE).await;
-    assert!(matches!(signal_rx.recv().await, Some(Signal::Connect(_))));
+    assert!(matches!(
+        server_packet_rx.recv().await,
+        Some(ServerPacket::Connect(_))
+    ));
     assert_eq!(&*h.text().await, r#"2["a"]"#);
     assert_eq!(&*h.text().await, r#"2["b"]"#);
 
-    directive_tx.send(event(r#"["c"]"#, None)).await.unwrap();
+    client_packet_tx
+        .send(event(r#"["c"]"#, None))
+        .await
+        .unwrap();
     assert_eq!(&*h.text().await, r#"2["c"]"#);
     h.close_server().await.unwrap();
 }
@@ -195,12 +213,12 @@ async fn events_wait_for_server_connect_in_order() {
 #[tokio::test]
 async fn ack_roundtrip() {
     let mut h = spawn();
-    let (directive_tx, mut signal_rx) = h.open("/").await;
+    let (client_packet_tx, mut server_packet_rx) = h.open("/").await;
     h.server(CONNECT_RESPONSE).await;
-    signal_rx.recv().await.unwrap();
+    server_packet_rx.recv().await.unwrap();
 
     let (ack_tx, ack_rx) = oneshot::channel();
-    directive_tx
+    client_packet_tx
         .send(event(r#"["greet"]"#, Some(ack_tx)))
         .await
         .unwrap();
@@ -214,12 +232,12 @@ async fn ack_roundtrip() {
 #[tokio::test]
 async fn binary_ack_reassembly() {
     let mut h = spawn();
-    let (directive_tx, mut signal_rx) = h.open("/").await;
+    let (client_packet_tx, mut server_packet_rx) = h.open("/").await;
     h.server(CONNECT_RESPONSE).await;
-    signal_rx.recv().await.unwrap();
+    server_packet_rx.recv().await.unwrap();
 
     let (ack_tx, ack_rx) = oneshot::channel();
-    directive_tx
+    client_packet_tx
         .send(event(r#"["greet"]"#, Some(ack_tx)))
         .await
         .unwrap();
@@ -239,17 +257,17 @@ async fn binary_ack_reassembly() {
 #[tokio::test]
 async fn binary_event_waits_for_every_attachment() {
     let mut h = spawn();
-    let (_directive_tx, mut signal_rx) = h.open("/").await;
+    let (_directive_tx, mut server_packet_rx) = h.open("/").await;
     h.server(CONNECT_RESPONSE).await;
-    signal_rx.recv().await.unwrap();
+    server_packet_rx.recv().await.unwrap();
 
     h.server(r#"52-["img"]"#).await;
     h.server_binary(b"\x01\x02").await;
     tokio::time::sleep(Duration::from_millis(20)).await;
-    signal_rx.try_recv().unwrap_err();
+    server_packet_rx.try_recv().unwrap_err();
 
     h.server_binary(b"\x03\x04").await;
-    let Some(Signal::Event(event)) = signal_rx.recv().await else {
+    let Some(ServerPacket::Event(event)) = server_packet_rx.recv().await else {
         panic!("expected an event");
     };
     assert_eq!(event.attachments.unwrap().len(), 2);
@@ -259,16 +277,16 @@ async fn binary_event_waits_for_every_attachment() {
 #[tokio::test]
 async fn binary_event_directive_sends_attachments() {
     let mut h = spawn();
-    let (directive_tx, mut signal_rx) = h.open("/").await;
+    let (client_packet_tx, mut server_packet_rx) = h.open("/").await;
     h.server(CONNECT_RESPONSE).await;
-    signal_rx.recv().await.unwrap();
+    server_packet_rx.recv().await.unwrap();
 
-    let directive = Directive::Event {
+    let client_packet = ClientPacket::Event {
         payload: ByteString::from_static(r#"["img"]"#),
         ack_tx: None,
         attachments: Some(vec![Bytes::from_static(b"\x01\x02")]),
     };
-    directive_tx.send(directive).await.unwrap();
+    client_packet_tx.send(client_packet).await.unwrap();
     assert_eq!(&*h.text().await, r#"51-["img"]"#);
     assert_eq!(h.binary().await, Bytes::from_static(b"\x01\x02"));
     h.close_server().await.unwrap();
@@ -277,13 +295,13 @@ async fn binary_event_directive_sends_attachments() {
 #[tokio::test]
 async fn ack_directive_is_not_buffered() {
     let mut h = spawn();
-    let (directive_tx, _signal_rx) = h.open("/").await;
-    let directive = Directive::Ack {
+    let (client_packet_tx, _signal_rx) = h.open("/").await;
+    let client_packet = ClientPacket::Ack {
         payload: ByteString::from_static("[true]"),
         id: 42,
         attachments: None,
     };
-    directive_tx.send(directive).await.unwrap();
+    client_packet_tx.send(client_packet).await.unwrap();
     assert_eq!(&*h.text().await, "342[true]");
     h.close_server().await.unwrap();
 }
@@ -291,13 +309,13 @@ async fn ack_directive_is_not_buffered() {
 #[tokio::test]
 async fn binary_ack_directive_sends_attachments() {
     let mut h = spawn();
-    let (directive_tx, _signal_rx) = h.open("/").await;
-    let directive = Directive::Ack {
+    let (client_packet_tx, _signal_rx) = h.open("/").await;
+    let client_packet = ClientPacket::Ack {
         payload: ByteString::from_static("[true]"),
         id: 7,
         attachments: Some(vec![Bytes::from_static(b"\xCA\xFE")]),
     };
-    directive_tx.send(directive).await.unwrap();
+    client_packet_tx.send(client_packet).await.unwrap();
     assert_eq!(&*h.text().await, "61-7[true]");
     assert_eq!(h.binary().await, Bytes::from_static(b"\xCA\xFE"));
     h.close_server().await.unwrap();
@@ -306,17 +324,23 @@ async fn binary_ack_directive_sends_attachments() {
 #[tokio::test]
 async fn server_disconnect_ends_receiver_and_handles() {
     let mut h = spawn();
-    let (directive_tx, mut signal_rx) = h.open("/").await;
+    let (client_packet_tx, mut server_packet_rx) = h.open("/").await;
     h.server(CONNECT_RESPONSE).await;
-    signal_rx.recv().await.unwrap();
+    server_packet_rx.recv().await.unwrap();
 
     h.server("1").await;
-    assert!(matches!(signal_rx.recv().await, Some(Signal::Disconnect)));
-    assert!(signal_rx.recv().await.is_none());
+    assert!(matches!(
+        server_packet_rx.recv().await,
+        Some(ServerPacket::Disconnect)
+    ));
+    assert!(server_packet_rx.recv().await.is_none());
 
-    // The stale handle is dropped on its next directive, which closes it.
-    directive_tx.send(event(r#"["late"]"#, None)).await.unwrap();
-    directive_tx.closed().await;
+    // The stale handle is dropped on its next client packet, which closes it.
+    client_packet_tx
+        .send(event(r#"["late"]"#, None))
+        .await
+        .unwrap();
+    client_packet_tx.closed().await;
     assert_quiet(&mut h.client_message_rx).await;
     h.close_server().await.unwrap();
 }
@@ -345,13 +369,13 @@ async fn reopened_namespace_ignores_old_handles() {
 async fn duplicate_namespace_is_conflict() {
     let mut h = spawn();
     let (_directive_tx, _signal_rx) = h.open("/").await;
-    let (_, directive_rx) = mpsc::channel(1);
-    let (signal_tx, _) = mpsc::channel(1);
+    let (_, client_packet_rx) = mpsc::channel(1);
+    let (server_packet_tx, _) = mpsc::channel(1);
     let connect_request = ConnectRequest {
         ns: "/".into(),
         payload: ByteString::new(),
-        directive_rx,
-        signal_tx,
+        client_packet_rx,
+        server_packet_tx,
     };
     h.connect_request_tx.send(connect_request).await.unwrap();
     assert!(matches!(
@@ -367,21 +391,24 @@ async fn late_server_packets_are_discarded() {
     h.server(r#"30["late"]"#).await;
     h.server("1/gone,").await;
 
-    let (_directive_tx, mut signal_rx) = h.open("/").await;
+    let (_directive_tx, mut server_packet_rx) = h.open("/").await;
     h.server(CONNECT_RESPONSE).await;
-    assert!(matches!(signal_rx.recv().await, Some(Signal::Connect(_))));
+    assert!(matches!(
+        server_packet_rx.recv().await,
+        Some(ServerPacket::Connect(_))
+    ));
     h.close_server().await.unwrap();
 }
 
 #[tokio::test]
 async fn dropped_receiver_discards_events() {
     let mut h = spawn();
-    let (directive_tx, signal_rx) = h.open("/").await;
-    drop(signal_rx);
+    let (client_packet_tx, server_packet_rx) = h.open("/").await;
+    drop(server_packet_rx);
     h.server(CONNECT_RESPONSE).await;
     h.server(r#"2["ignored"]"#).await;
 
-    directive_tx
+    client_packet_tx
         .send(event(r#"["still"]"#, None))
         .await
         .unwrap();
@@ -402,9 +429,9 @@ async fn unexpected_binary_is_error() {
 #[tokio::test]
 async fn text_during_binary_reassembly_is_error() {
     let mut h = spawn();
-    let (_directive_tx, mut signal_rx) = h.open("/").await;
+    let (_directive_tx, mut server_packet_rx) = h.open("/").await;
     h.server(CONNECT_RESPONSE).await;
-    signal_rx.recv().await.unwrap();
+    server_packet_rx.recv().await.unwrap();
 
     h.server(r#"51-["img"]"#).await;
     h.server(r#"2["oops"]"#).await;
@@ -417,45 +444,54 @@ async fn text_during_binary_reassembly_is_error() {
 #[tokio::test]
 async fn engine_close_ends_receivers_and_pending_acks() {
     let mut h = spawn();
-    let (directive_tx, mut signal_rx) = h.open("/").await;
+    let (client_packet_tx, mut server_packet_rx) = h.open("/").await;
     h.server(CONNECT_RESPONSE).await;
-    signal_rx.recv().await.unwrap();
+    server_packet_rx.recv().await.unwrap();
 
     let (ack_tx, ack_rx) = oneshot::channel();
-    directive_tx
+    client_packet_tx
         .send(event(r#"["greet"]"#, Some(ack_tx)))
         .await
         .unwrap();
     h.text().await;
 
     h.close_server().await.unwrap();
-    assert!(signal_rx.recv().await.is_none());
+    assert!(server_packet_rx.recv().await.is_none());
     ack_rx.await.unwrap_err();
 }
 
 #[tokio::test]
 async fn emits_flow_while_receiver_is_full() {
     let mut h = spawn();
-    let (directive_tx, mut signal_rx) = h.open_with("/", 1).await;
+    let (client_packet_tx, mut server_packet_rx) = h.open_with("/", 1).await;
     h.server(CONNECT_RESPONSE).await;
     for _ in 0..4 {
         h.server(r#"2["flood"]"#).await;
     }
 
-    directive_tx.send(event(r#"["out"]"#, None)).await.unwrap();
+    client_packet_tx
+        .send(event(r#"["out"]"#, None))
+        .await
+        .unwrap();
     let text = tokio::time::timeout(Duration::from_secs(5), h.text())
         .await
         .expect("emit stalled behind a full receiver");
     assert_eq!(&*text, r#"2["out"]"#);
 
-    assert!(matches!(signal_rx.recv().await, Some(Signal::Connect(_))));
+    assert!(matches!(
+        server_packet_rx.recv().await,
+        Some(ServerPacket::Connect(_))
+    ));
 }
 
 #[tokio::test]
 async fn repeated_server_connect_flushes_once() {
     let mut h = spawn();
-    let (directive_tx, _signal_rx) = h.open("/").await;
-    directive_tx.send(event(r#"["a"]"#, None)).await.unwrap();
+    let (client_packet_tx, _signal_rx) = h.open("/").await;
+    client_packet_tx
+        .send(event(r#"["a"]"#, None))
+        .await
+        .unwrap();
     for _ in 0..3 {
         h.server(CONNECT_RESPONSE).await;
     }

@@ -5,7 +5,7 @@ use crate::error::ManagerError;
 use crate::error::{ClientBuilderError, ClientError, PayloadError, SocketError};
 use crate::manager::{self, ConnectRequest};
 use crate::marker::{AckId, AckMarker, BinaryMarker};
-use crate::packet::{Directive, DynEvent, Signal};
+use crate::packet::{ClientPacket, DynEvent, ServerPacket};
 use bytestring::ByteString;
 use eioc::transport::TransportStrategy;
 use eioc::websocket::WebSocketConnector;
@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use url::Url;
 
-/// Converts a typed event into a [`Directive`] for emission.
+/// Converts a typed event into a [`ClientPacket`] for emission.
 ///
 /// `Output` is `()` for fire-and-forget events and [`AckHandle`](crate::ack::AckHandle)
 /// for events that expect an acknowledgement.
@@ -23,29 +23,29 @@ where
     A: AckMarker,
     B: BinaryMarker,
 {
-    /// Return value after the directive is sent.
+    /// Return value after the packet is sent.
     type Output;
 
-    /// Serializes into a [`Directive`] and the output handle.
+    /// Serializes into a [`ClientPacket`] and the output handle.
     ///
     /// # Errors
     ///
     /// Returns an error if payload serialization fails.
-    fn prepare(self) -> Result<(Directive, Self::Output), PayloadError>;
+    fn prepare(self) -> Result<(ClientPacket, Self::Output), PayloadError>;
 }
 
-/// Converts a typed acknowledgement into an ack [`Directive`].
+/// Converts a typed acknowledgement into an ack [`ClientPacket`].
 pub trait Acknowledge<A, B>
 where
     A: AckType,
     B: BinaryMarker,
 {
-    /// Serializes into an ack [`Directive`].
+    /// Serializes into an ack [`ClientPacket`].
     ///
     /// # Errors
     ///
     /// Returns an error if payload serialization fails.
-    fn into_directive(self, id: u64) -> Result<Directive, PayloadError>;
+    fn into_client_packet(self, id: u64) -> Result<ClientPacket, PayloadError>;
 }
 
 /// Channel buffer capacities for each internal MPSC queue.
@@ -58,9 +58,9 @@ pub struct ChannelConfig {
     pub engine: usize,
     /// Transport channel: encoded frames to send to the transport.
     pub transport: usize,
-    /// Manager inboxes: messages from the engine, new namespaces, and each namespace's directives.
+    /// Manager inboxes: messages from the engine, new namespaces, and each namespace's client packets.
     pub manager: usize,
-    /// Per-namespace inbox: signals delivered to each [`SocketReceiver`].
+    /// Per-namespace inbox: server packets delivered to each [`SocketReceiver`].
     pub socket: usize,
 }
 
@@ -258,7 +258,7 @@ impl Client {
 
     /// Opens a namespace and returns a sender/receiver pair.
     ///
-    /// The namespace is not confirmed until a [`Signal::Connect`] arrives on the [`SocketReceiver`].
+    /// The namespace is not confirmed until a [`ServerPacket::Connect`] arrives on the [`SocketReceiver`].
     ///
     /// # Errors
     ///
@@ -284,15 +284,15 @@ impl Client {
         S: Into<ByteString>,
         B: Into<ByteString>,
     {
-        let (directive_tx, directive_rx) = mpsc::channel(self.channels.manager);
+        let (client_packet_tx, client_packet_rx) = mpsc::channel(self.channels.manager);
 
-        let (signal_tx, signal_rx) = mpsc::channel(self.channels.socket);
+        let (server_packet_tx, server_packet_rx) = mpsc::channel(self.channels.socket);
 
         let connect_request = ConnectRequest {
             ns: ns.into(),
             payload: payload.into(),
-            directive_rx,
-            signal_tx,
+            client_packet_rx,
+            server_packet_tx,
         };
 
         self.connect_request_tx
@@ -300,7 +300,10 @@ impl Client {
             .await
             .map_err(|_| SocketError::Closed)?;
 
-        Ok((SocketSender { directive_tx }, SocketReceiver { signal_rx }))
+        Ok((
+            SocketSender { client_packet_tx },
+            SocketReceiver { server_packet_rx },
+        ))
     }
 
     /// Drops the client handle and waits for the session to end.
@@ -324,13 +327,13 @@ impl Client {
 /// disconnects when the last clone is dropped.
 #[derive(Clone, Debug)]
 pub struct SocketSender {
-    directive_tx: mpsc::Sender<Directive>,
+    client_packet_tx: mpsc::Sender<ClientPacket>,
 }
 
 impl SocketSender {
-    async fn send(&self, directive: Directive) -> Result<(), SocketError> {
-        self.directive_tx
-            .send(directive)
+    async fn send(&self, client_packet: ClientPacket) -> Result<(), SocketError> {
+        self.client_packet_tx
+            .send(client_packet)
             .await
             .map_err(|_| SocketError::Closed)
     }
@@ -346,8 +349,8 @@ impl SocketSender {
         A: AckMarker,
         B: BinaryMarker,
     {
-        let (directive, output) = event.prepare()?;
-        self.send(directive).await?;
+        let (client_packet, output) = event.prepare()?;
+        self.send(client_packet).await?;
         Ok(output)
     }
 
@@ -362,8 +365,8 @@ impl SocketSender {
         A: AckType,
         B: BinaryMarker,
     {
-        let directive = payload.into_directive(id.get())?;
-        self.send(directive).await
+        let client_packet = payload.into_client_packet(id.get())?;
+        self.send(client_packet).await
     }
 
     /// Sends a graceful disconnect packet for the namespace.
@@ -371,22 +374,22 @@ impl SocketSender {
     /// Idempotent: once the namespace has closed, by either side, the call returns immediately.
     pub async fn disconnect(&self) {
         // A closed channel means the namespace has already closed.
-        let _ = self.send(Directive::Disconnect).await;
+        let _ = self.send(ClientPacket::Disconnect).await;
     }
 }
 
 /// Receiver for a Socket.IO namespace.
 #[derive(Debug)]
 pub struct SocketReceiver {
-    signal_rx: mpsc::Receiver<Signal>,
+    server_packet_rx: mpsc::Receiver<ServerPacket>,
 }
 
 impl SocketReceiver {
-    /// Returns the next application event. [`Signal::Connect`], [`Signal::Disconnect`], and
-    /// [`Signal::ConnectError`] are silently dropped; they do not close the receiver.
+    /// Returns the next application event. [`ServerPacket::Connect`], [`ServerPacket::Disconnect`], and
+    /// [`ServerPacket::ConnectError`] are silently dropped; they do not close the receiver.
     /// Returns `None` only when the channel closes (router shut down).
     ///
-    /// Cancel safe: the only suspend point is `recv`; skipped protocol signals have no
+    /// Cancel safe: the only suspend point is `recv`; skipped protocol packets have no
     /// suspend point after consumption, so no events are lost on cancellation.
     ///
     /// # Errors
@@ -397,9 +400,9 @@ impl SocketReceiver {
         E: TryFrom<DynEvent>,
     {
         loop {
-            match self.signal_rx.recv().await {
+            match self.server_packet_rx.recv().await {
                 None => return Ok(None),
-                Some(Signal::Event(e)) => return E::try_from(e).map(Some),
+                Some(ServerPacket::Event(e)) => return E::try_from(e).map(Some),
                 Some(_) => {}
             }
         }
@@ -407,16 +410,16 @@ impl SocketReceiver {
 }
 
 impl std::ops::Deref for SocketReceiver {
-    type Target = mpsc::Receiver<Signal>;
+    type Target = mpsc::Receiver<ServerPacket>;
 
     fn deref(&self) -> &Self::Target {
-        &self.signal_rx
+        &self.server_packet_rx
     }
 }
 
 impl std::ops::DerefMut for SocketReceiver {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.signal_rx
+        &mut self.server_packet_rx
     }
 }
 
@@ -425,7 +428,7 @@ mod tests {
     use super::*;
     use crate::error::PayloadError;
     use crate::marker::{HasAck, NoAck, NoBinary};
-    use crate::packet::{Connect, ConnectError, Directive, DynEvent, Signal};
+    use crate::packet::{ClientPacket, Connect, ConnectError, DynEvent, ServerPacket};
     use eioc::transport::TransportStrategy;
     use serde_json::Map;
     use tokio::sync::mpsc;
@@ -436,9 +439,9 @@ mod tests {
     impl Emit<NoAck, NoBinary> for TestEmit {
         type Output = ();
 
-        fn prepare(self) -> Result<(Directive, ()), PayloadError> {
+        fn prepare(self) -> Result<(ClientPacket, ()), PayloadError> {
             Ok((
-                Directive::Event {
+                ClientPacket::Event {
                     payload: r#"["test"]"#.into(),
                     ack_tx: None,
                     attachments: None,
@@ -448,9 +451,9 @@ mod tests {
         }
     }
 
-    fn socket_sender() -> (SocketSender, mpsc::Receiver<Directive>) {
-        let (directive_tx, directive_rx) = mpsc::channel(8);
-        (SocketSender { directive_tx }, directive_rx)
+    fn socket_sender() -> (SocketSender, mpsc::Receiver<ClientPacket>) {
+        let (client_packet_tx, client_packet_rx) = mpsc::channel(8);
+        (SocketSender { client_packet_tx }, client_packet_rx)
     }
 
     struct Pass(DynEvent);
@@ -488,21 +491,23 @@ mod tests {
     #[tokio::test]
     async fn listen_skips_protocol_signals() {
         let (tx, rx) = mpsc::channel(8);
-        let mut receiver = SocketReceiver { signal_rx: rx };
-        tx.send(Signal::Connect(Connect {
+        let mut receiver = SocketReceiver {
+            server_packet_rx: rx,
+        };
+        tx.send(ServerPacket::Connect(Connect {
             sid: ByteString::default(),
             extra: Map::default(),
         }))
         .await
         .unwrap();
-        tx.send(Signal::Disconnect).await.unwrap();
-        tx.send(Signal::ConnectError(ConnectError {
+        tx.send(ServerPacket::Disconnect).await.unwrap();
+        tx.send(ServerPacket::ConnectError(ConnectError {
             message: "err".into(),
             extra: Map::default(),
         }))
         .await
         .unwrap();
-        tx.send(Signal::Event(DynEvent::new(r#"["hi"]"#, None)))
+        tx.send(ServerPacket::Event(DynEvent::new(r#"["hi"]"#, None)))
             .await
             .unwrap();
         let Pass(event) = receiver.listen::<Pass>().await.unwrap().unwrap();
@@ -511,36 +516,38 @@ mod tests {
 
     #[tokio::test]
     async fn listen_returns_none_on_closed_channel() {
-        let (tx, rx) = mpsc::channel::<Signal>(4);
-        let mut receiver = SocketReceiver { signal_rx: rx };
+        let (tx, rx) = mpsc::channel::<ServerPacket>(4);
+        let mut receiver = SocketReceiver {
+            server_packet_rx: rx,
+        };
         drop(tx);
         assert!(receiver.listen::<Pass>().await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn dropping_last_clone_closes_directive_channel() {
-        let (sender, mut directive_rx) = socket_sender();
+        let (sender, mut client_packet_rx) = socket_sender();
         let clone = sender.clone();
         drop(sender);
-        directive_rx.try_recv().unwrap_err();
+        client_packet_rx.try_recv().unwrap_err();
         drop(clone);
-        assert!(directive_rx.recv().await.is_none());
+        assert!(client_packet_rx.recv().await.is_none());
     }
 
     #[tokio::test]
     async fn disconnect_sends_disconnect_directive() {
-        let (sender, mut directive_rx) = socket_sender();
+        let (sender, mut client_packet_rx) = socket_sender();
         sender.disconnect().await;
         assert!(matches!(
-            directive_rx.try_recv().unwrap(),
-            Directive::Disconnect
+            client_packet_rx.try_recv().unwrap(),
+            ClientPacket::Disconnect
         ));
     }
 
     #[tokio::test]
     async fn disconnect_after_close_returns() {
-        let (sender, directive_rx) = socket_sender();
-        drop(directive_rx);
+        let (sender, client_packet_rx) = socket_sender();
+        drop(client_packet_rx);
         sender.disconnect().await;
     }
 
@@ -580,7 +587,7 @@ mod tests {
     async fn emit_sends_event_directive() {
         let (sender, mut rx) = socket_sender();
         sender.emit(TestEmit).await.unwrap();
-        assert!(matches!(rx.try_recv().unwrap(), Directive::Event { .. }));
+        assert!(matches!(rx.try_recv().unwrap(), ClientPacket::Event { .. }));
     }
 
     #[tokio::test]
@@ -598,16 +605,18 @@ mod tests {
         let (sender, mut rx) = socket_sender();
         let id = HasAck::<()>::parse(Some(5)).unwrap();
         sender.acknowledge(id, ()).await.unwrap();
-        let Directive::Ack { id, .. } = rx.try_recv().unwrap() else {
-            panic!("expected Ack directive");
+        let ClientPacket::Ack { id, .. } = rx.try_recv().unwrap() else {
+            panic!("expected Ack packet");
         };
         assert_eq!(id, 5);
     }
 
     #[test]
     fn socket_receiver_deref_gives_inner_receiver() {
-        let (_tx, rx) = mpsc::channel::<Signal>(4);
-        let receiver = SocketReceiver { signal_rx: rx };
+        let (_tx, rx) = mpsc::channel::<ServerPacket>(4);
+        let receiver = SocketReceiver {
+            server_packet_rx: rx,
+        };
         let _ = &*receiver;
     }
 }

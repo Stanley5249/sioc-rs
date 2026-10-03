@@ -129,12 +129,15 @@ impl DynAck {
     }
 }
 
-/// A fully decoded inbound packet.
+/// A packet the server sent to one namespace, as delivered to its [`SocketReceiver`](crate::client::SocketReceiver).
+///
+/// Unlike the wire [`Packet`], acks are already resolved into their
+/// [`AckHandle`](crate::ack::AckHandle) and binary attachments are reassembled.
 #[derive(Debug)]
-pub enum Signal<E = DynEvent> {
+pub enum ServerPacket<E = DynEvent> {
     /// The server confirmed the namespace connection.
     Connect(Connect),
-    /// The namespace was disconnected. Does not close the receiver; a reconnect delivers a new [`Signal::Connect`].
+    /// The namespace was disconnected. Does not close the receiver; a reconnect delivers a new [`ServerPacket::Connect`].
     Disconnect,
     /// The server rejected a namespace connection attempt. Does not close the receiver.
     ConnectError(ConnectError),
@@ -142,7 +145,7 @@ pub enum Signal<E = DynEvent> {
     Event(E),
 }
 
-impl<E> std::fmt::Display for Signal<E>
+impl<E> std::fmt::Display for ServerPacket<E>
 where
     E: std::fmt::Display,
 {
@@ -162,8 +165,8 @@ where
     }
 }
 
-impl<E> Signal<E> {
-    /// Returns the inner event if this is [`Event`](Signal::Event), otherwise `None`.
+impl<E> ServerPacket<E> {
+    /// Returns the inner event if this is [`Event`](ServerPacket::Event), otherwise `None`.
     pub fn take_event(self) -> Option<E> {
         match self {
             Self::Event(e) => Some(e),
@@ -171,7 +174,7 @@ impl<E> Signal<E> {
         }
     }
 
-    /// Applies `f` to the inner event if this is [`Event`](Signal::Event), otherwise returns `None`.
+    /// Applies `f` to the inner event if this is [`Event`](ServerPacket::Event), otherwise returns `None`.
     pub fn and_then<F, T>(self, f: F) -> Option<T>
     where
         F: FnOnce(E) -> Option<T>,
@@ -182,24 +185,24 @@ impl<E> Signal<E> {
         }
     }
 
-    /// Applies `f` to the event in [`Event`](Signal::Event), passing other variants through unchanged.
-    pub fn map<F, U>(self, f: F) -> Signal<U>
+    /// Applies `f` to the event in [`Event`](ServerPacket::Event), passing other variants through unchanged.
+    pub fn map<F, U>(self, f: F) -> ServerPacket<U>
     where
         F: FnOnce(E) -> U,
     {
         match self {
-            Self::Connect(c) => Signal::Connect(c),
-            Self::Disconnect => Signal::Disconnect,
-            Self::ConnectError(e) => Signal::ConnectError(e),
-            Self::Event(e) => Signal::Event(f(e)),
+            Self::Connect(c) => ServerPacket::Connect(c),
+            Self::Disconnect => ServerPacket::Disconnect,
+            Self::ConnectError(e) => ServerPacket::ConnectError(e),
+            Self::Event(e) => ServerPacket::Event(f(e)),
         }
     }
 }
 
-/// An outbound packet to be encoded and sent to the server.
+/// A packet this client sends to one namespace, before it is encoded as a wire [`Packet`].
 #[derive(Debug)]
 #[allow(missing_docs)]
-pub enum Directive {
+pub enum ClientPacket {
     /// Closes the namespace.
     Disconnect,
     /// Emits an event; if `ack_tx` is set, an ack ID is assigned and the response routed to it.
@@ -219,7 +222,7 @@ pub enum Directive {
 /// A wire-level packet decoded from a single text frame.
 ///
 /// Binary variants carry an attachment count; the socket router collects
-/// the follow-up binary frames and reassembles them into a [`Signal`].
+/// the follow-up binary frames and reassembles them into a [`ServerPacket`].
 #[derive(Debug)]
 #[allow(missing_docs)]
 pub enum Packet {
@@ -959,7 +962,7 @@ mod tests {
         assert_eq!(s, r#"{"payload": [true]}"#);
     }
 
-    // --- Signal ---
+    // --- ServerPacket ---
 
     fn make_connect() -> Connect {
         Connect {
@@ -977,16 +980,20 @@ mod tests {
 
     #[test]
     fn signal_take_event_returns_some() {
-        let sig = Signal::Event(DynEvent::new("[]", None));
+        let sig = ServerPacket::Event(DynEvent::new("[]", None));
         assert!(sig.take_event().is_some());
     }
 
     #[test]
     fn signal_take_event_on_non_event_returns_none() {
-        assert!(Signal::<u8>::Disconnect.take_event().is_none());
-        assert!(Signal::<u8>::Connect(make_connect()).take_event().is_none());
+        assert!(ServerPacket::<u8>::Disconnect.take_event().is_none());
         assert!(
-            Signal::<u8>::ConnectError(make_connect_error())
+            ServerPacket::<u8>::Connect(make_connect())
+                .take_event()
+                .is_none()
+        );
+        assert!(
+            ServerPacket::<u8>::ConnectError(make_connect_error())
                 .take_event()
                 .is_none()
         );
@@ -994,29 +1001,29 @@ mod tests {
 
     #[test]
     fn signal_map_transforms_event() {
-        let sig: Signal<u8> = Signal::Event(3u8);
-        assert!(matches!(sig.map(|x| x * 2), Signal::Event(6)));
+        let sig: ServerPacket<u8> = ServerPacket::Event(3u8);
+        assert!(matches!(sig.map(|x| x * 2), ServerPacket::Event(6)));
     }
 
     #[test]
     fn signal_map_passes_non_event_through() {
         assert!(matches!(
-            Signal::<u8>::Disconnect.map(|x: u8| x * 2),
-            Signal::Disconnect
+            ServerPacket::<u8>::Disconnect.map(|x: u8| x * 2),
+            ServerPacket::Disconnect
         ));
         assert!(matches!(
-            Signal::<u8>::Connect(make_connect()).map(|x: u8| x * 2),
-            Signal::Connect(_)
+            ServerPacket::<u8>::Connect(make_connect()).map(|x: u8| x * 2),
+            ServerPacket::Connect(_)
         ));
         assert!(matches!(
-            Signal::<u8>::ConnectError(make_connect_error()).map(|x: u8| x * 2),
-            Signal::ConnectError(_)
+            ServerPacket::<u8>::ConnectError(make_connect_error()).map(|x: u8| x * 2),
+            ServerPacket::ConnectError(_)
         ));
     }
 
     #[test]
     fn signal_and_then_returns_some_on_event() {
-        let sig: Signal<u8> = Signal::Event(3u8);
+        let sig: ServerPacket<u8> = ServerPacket::Event(3u8);
         assert_eq!(
             sig.and_then(|x| if x > 0 { Some(x) } else { None }),
             Some(3)
@@ -1025,7 +1032,7 @@ mod tests {
 
     #[test]
     fn signal_and_then_returns_none_when_f_returns_none() {
-        let sig: Signal<u8> = Signal::Event(0u8);
+        let sig: ServerPacket<u8> = ServerPacket::Event(0u8);
         assert!(
             sig.and_then(|x| if x > 0 { Some(x) } else { None })
                 .is_none()
@@ -1034,9 +1041,13 @@ mod tests {
 
     #[test]
     fn signal_and_then_returns_none_on_non_event() {
-        assert!(Signal::<u8>::Disconnect.and_then(|x: u8| Some(x)).is_none());
         assert!(
-            Signal::<u8>::Connect(make_connect())
+            ServerPacket::<u8>::Disconnect
+                .and_then(|x: u8| Some(x))
+                .is_none()
+        );
+        assert!(
+            ServerPacket::<u8>::Connect(make_connect())
                 .and_then(|x: u8| Some(x))
                 .is_none()
         );
@@ -1044,12 +1055,12 @@ mod tests {
 
     #[test]
     fn signal_display_variants() {
-        assert_eq!(format!("{}", Signal::<u8>::Disconnect), "Disconnect");
-        let ev_sig = Signal::Event(DynEvent::new("[]", None));
+        assert_eq!(format!("{}", ServerPacket::<u8>::Disconnect), "Disconnect");
+        let ev_sig = ServerPacket::Event(DynEvent::new("[]", None));
         assert_eq!(format!("{ev_sig}"), r#"Event({"payload": []})"#);
-        let connect_sig: Signal<u8> = Signal::Connect(make_connect());
+        let connect_sig: ServerPacket<u8> = ServerPacket::Connect(make_connect());
         assert_eq!(format!("{connect_sig}"), "Connect(t)");
-        let err_sig: Signal<u8> = Signal::ConnectError(make_connect_error());
+        let err_sig: ServerPacket<u8> = ServerPacket::ConnectError(make_connect_error());
         assert_eq!(format!("{err_sig}"), "ConnectError(bad)");
     }
 

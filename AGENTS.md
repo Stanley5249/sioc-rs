@@ -30,7 +30,7 @@ Re-export public surface through `prelude`. Never put `Result` or `Error` aliase
 
 Variable names should be descriptive and avoid unnecessary abbreviations. Prefer `packet` and `event` over `pkt` and `evt`. For short-lived variables, single-letter names like `p` and `e` are acceptable.
 
-Name a channel's ends after the items it carries, such as `frame_tx` and `directive_rx`. When two channels carry the same item type, prefix the side that produced the items: `server_` for what the server sent and `client_` for what this client sends. Avoid names that depend on the reader's position, such as `inbound` and `outbound`.
+Name a channel's ends after the items it carries, such as `frame_tx` and `client_packet_rx`. When two channels carry the same item type, prefix the side that produced the items: `server_` for what the server sent and `client_` for what this client sends. Avoid names that depend on the reader's position, such as `inbound` and `outbound`.
 
 ## Async
 

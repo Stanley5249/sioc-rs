@@ -2,7 +2,7 @@
 
 use super::{NamespaceStatus, Routes};
 use crate::error::{ManagerError, PacketError};
-use crate::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Packet, Signal};
+use crate::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Packet, ServerPacket};
 use bytes::Bytes;
 use bytestring::ByteString;
 use eioc::prelude::Message;
@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 /// Delivers server packets to the namespace receivers until the engine closes `server_message_rx`.
 ///
 /// Waiting on a full receiver holds up only this direction.
-pub(super) async fn server_messages_to_signals(
+pub(super) async fn server_messages_to_packets(
     mut server_message_rx: mpsc::Receiver<Message>,
     routes: &Routes,
     namespace_status_tx: mpsc::UnboundedSender<NamespaceStatus>,
@@ -59,23 +59,28 @@ async fn route_text(
             if routes.mark_connected(&ns) {
                 send_namespace_status(namespace_status_tx, NamespaceStatus::Connected(ns.clone()))?;
             }
-            deliver_signal(routes.signal_tx(&ns), &ns, Signal::Connect(connect)).await;
+            send_server_packet(
+                routes.server_packet_tx(&ns),
+                &ns,
+                ServerPacket::Connect(connect),
+            )
+            .await;
         }
         Packet::Disconnect => {
             tracing::debug!(%ns, "disconnected");
 
-            let signal_tx = routes.remove(&ns);
-            if signal_tx.is_some() {
+            let server_packet_tx = routes.remove(&ns);
+            if server_packet_tx.is_some() {
                 send_namespace_status(
                     namespace_status_tx,
                     NamespaceStatus::Disconnected(ns.clone()),
                 )?;
             }
-            deliver_signal(signal_tx, &ns, Signal::Disconnect).await;
+            send_server_packet(server_packet_tx, &ns, ServerPacket::Disconnect).await;
         }
         Packet::Event { payload, id } => {
-            let signal = Signal::Event(DynEvent::new(payload, id));
-            deliver_signal(routes.signal_tx(&ns), &ns, signal).await;
+            let server_packet = ServerPacket::Event(DynEvent::new(payload, id));
+            send_server_packet(routes.server_packet_tx(&ns), &ns, server_packet).await;
         }
         Packet::Ack { payload, id } => {
             resolve_ack(routes, &ns, id, DynAck::new(payload));
@@ -85,7 +90,12 @@ async fn route_text(
 
             tracing::error!(%ns, %error, "connect error");
 
-            deliver_signal(routes.signal_tx(&ns), &ns, Signal::ConnectError(error)).await;
+            send_server_packet(
+                routes.server_packet_tx(&ns),
+                &ns,
+                ServerPacket::ConnectError(error),
+            )
+            .await;
         }
         Packet::BinaryEvent { payload, id, count } => {
             reconstructor.insert(ns, BinaryPacket::event(payload, id, count));
@@ -120,7 +130,12 @@ async fn route_binary(
             ..
         } => {
             let event = DynEvent::new(payload, id).with_attachments(attachments);
-            deliver_signal(routes.signal_tx(&ns), &ns, Signal::Event(event)).await;
+            send_server_packet(
+                routes.server_packet_tx(&ns),
+                &ns,
+                ServerPacket::Event(event),
+            )
+            .await;
         }
         BinaryPacket::Ack {
             payload,
@@ -136,18 +151,22 @@ async fn route_binary(
     Ok(())
 }
 
-/// Delivers a signal to a namespace receiver.
+/// Sends a server packet to a namespace receiver.
 ///
 /// The server may still send packets for a namespace the client already left,
 /// and the caller may drop a receiver it no longer reads, so both are discarded.
-async fn deliver_signal(signal_tx: Option<mpsc::Sender<Signal>>, ns: &ByteString, signal: Signal) {
-    let Some(signal_tx) = signal_tx else {
-        tracing::debug!(%ns, "discarded signal for a closed namespace");
+async fn send_server_packet(
+    server_packet_tx: Option<mpsc::Sender<ServerPacket>>,
+    ns: &ByteString,
+    server_packet: ServerPacket,
+) {
+    let Some(server_packet_tx) = server_packet_tx else {
+        tracing::debug!(%ns, "discarded server packet for a closed namespace");
         return;
     };
 
-    if signal_tx.send(signal).await.is_err() {
-        tracing::debug!(%ns, "discarded signal for a dropped receiver");
+    if server_packet_tx.send(server_packet).await.is_err() {
+        tracing::debug!(%ns, "discarded server packet for a dropped receiver");
     }
 }
 

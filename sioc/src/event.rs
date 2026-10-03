@@ -26,7 +26,7 @@ use crate::binary::AttachmentsBuilder;
 use crate::client::Emit;
 use crate::error::{EventError, PayloadError};
 use crate::marker::{AckMarker, BinaryMarker, HasAck, HasBinary, NoAck, NoBinary};
-use crate::packet::{Directive, DynEvent};
+use crate::packet::{ClientPacket, DynEvent};
 use crate::payload::{DeserializePayload, SerializePayload, event_from_json, event_to_json};
 use bytes::Bytes;
 use tokio::sync::oneshot;
@@ -148,11 +148,11 @@ where
 {
     type Output = ();
 
-    fn prepare(self) -> Result<(Directive, ()), PayloadError> {
+    fn prepare(self) -> Result<(ClientPacket, ()), PayloadError> {
         let payload = event_to_json(&self)?;
 
         Ok((
-            Directive::Event {
+            ClientPacket::Event {
                 payload: payload.into(),
                 ack_tx: None,
                 attachments: None,
@@ -169,11 +169,11 @@ where
 {
     type Output = AckHandle<A>;
 
-    fn prepare(self) -> Result<(Directive, AckHandle<A>), PayloadError> {
+    fn prepare(self) -> Result<(ClientPacket, AckHandle<A>), PayloadError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         let payload = event_to_json(&self)?.into();
         Ok((
-            Directive::Event {
+            ClientPacket::Event {
                 payload,
                 ack_tx: Some(ack_tx),
                 attachments: None,
@@ -190,11 +190,11 @@ where
 {
     type Output = ();
 
-    fn prepare(self) -> Result<(Directive, ()), PayloadError> {
+    fn prepare(self) -> Result<(ClientPacket, ()), PayloadError> {
         let mut builder = AttachmentsBuilder::new();
         let payload = event_to_json(&self(&mut builder))?.into();
         Ok((
-            Directive::Event {
+            ClientPacket::Event {
                 payload,
                 ack_tx: None,
                 attachments: Some(builder.finish()),
@@ -212,12 +212,12 @@ where
 {
     type Output = AckHandle<A>;
 
-    fn prepare(self) -> Result<(Directive, AckHandle<A>), PayloadError> {
+    fn prepare(self) -> Result<(ClientPacket, AckHandle<A>), PayloadError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         let mut builder = AttachmentsBuilder::new();
         let payload = event_to_json(&self(&mut builder))?.into();
         Ok((
-            Directive::Event {
+            ClientPacket::Event {
                 payload,
                 ack_tx: Some(ack_tx),
                 attachments: Some(builder.finish()),
@@ -377,14 +377,14 @@ mod tests {
 
     #[test]
     fn emit_no_ack_no_binary_prepare() {
-        let (directive, ()) = Ping.prepare().unwrap();
-        let Directive::Event {
+        let (client_packet, ()) = Ping.prepare().unwrap();
+        let ClientPacket::Event {
             payload,
             ack_tx,
             attachments,
-        } = directive
+        } = client_packet
         else {
-            panic!("expected Event directive");
+            panic!("expected Event packet");
         };
         assert_eq!(&payload[..], r#"["ping"]"#);
         assert!(ack_tx.is_none());
@@ -393,14 +393,14 @@ mod tests {
 
     #[test]
     fn emit_has_ack_no_binary_prepare() {
-        let (directive, _handle) = PingWithAck.prepare().unwrap();
-        let Directive::Event {
+        let (client_packet, _handle) = PingWithAck.prepare().unwrap();
+        let ClientPacket::Event {
             payload,
             ack_tx,
             attachments,
-        } = directive
+        } = client_packet
         else {
-            panic!("expected Event directive");
+            panic!("expected Event packet");
         };
         assert_eq!(&payload[..], r#"["ping"]"#);
         assert!(ack_tx.is_some());
@@ -413,14 +413,14 @@ mod tests {
             let _p = builder.attach(Bytes::from_static(b"\xFF"));
             PingWithBinary
         };
-        let (directive, ()) = closure.prepare().unwrap();
-        let Directive::Event {
+        let (client_packet, ()) = closure.prepare().unwrap();
+        let ClientPacket::Event {
             payload,
             ack_tx,
             attachments,
-        } = directive
+        } = client_packet
         else {
-            panic!("expected Event directive");
+            panic!("expected Event packet");
         };
         assert_eq!(&payload[..], r#"["ping"]"#);
         assert!(ack_tx.is_none());
@@ -456,14 +456,14 @@ mod tests {
             let _p = builder.attach(Bytes::from_static(b"\xFF"));
             PingWithAckAndBinary
         };
-        let (directive, _handle) = closure.prepare().unwrap();
-        let Directive::Event {
+        let (client_packet, _handle) = closure.prepare().unwrap();
+        let ClientPacket::Event {
             payload,
             ack_tx,
             attachments,
-        } = directive
+        } = client_packet
         else {
-            panic!("expected Event directive");
+            panic!("expected Event packet");
         };
         assert_eq!(&payload[..], r#"["ping"]"#);
         assert!(ack_tx.is_some());

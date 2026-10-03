@@ -17,7 +17,7 @@ use crate::binary::AttachmentsBuilder;
 use crate::client::Acknowledge;
 use crate::error::{AckError, PayloadError};
 use crate::marker::{BinaryMarker, HasBinary, NoBinary};
-use crate::packet::Directive;
+use crate::packet::ClientPacket;
 use crate::packet::DynAck;
 use crate::payload::{DeserializePayload, SerializePayload, ack_from_json, ack_to_json};
 use pin_project::pin_project;
@@ -106,9 +106,9 @@ impl<A> Acknowledge<A, NoBinary> for A
 where
     A: AckType<Binary = NoBinary> + SerializePayload,
 {
-    fn into_directive(self, id: u64) -> Result<Directive, PayloadError> {
+    fn into_client_packet(self, id: u64) -> Result<ClientPacket, PayloadError> {
         let payload = ack_to_json(&self)?.into();
-        Ok(Directive::Ack {
+        Ok(ClientPacket::Ack {
             payload,
             id,
             attachments: None,
@@ -121,10 +121,10 @@ where
     F: FnOnce(&mut AttachmentsBuilder) -> A,
     A: AckType<Binary = HasBinary> + SerializePayload,
 {
-    fn into_directive(self, id: u64) -> Result<Directive, PayloadError> {
+    fn into_client_packet(self, id: u64) -> Result<ClientPacket, PayloadError> {
         let mut builder = AttachmentsBuilder::new();
         let payload = ack_to_json(&self(&mut builder))?.into();
-        Ok(Directive::Ack {
+        Ok(ClientPacket::Ack {
             payload,
             id,
             attachments: Some(builder.finish()),
@@ -310,9 +310,9 @@ mod tests {
         result.unwrap_err();
     }
     #[test]
-    fn send_ack_into_directive_binary() {
+    fn send_ack_into_client_packet_binary() {
         let id = <HasAck<BinaryBoolAck>>::parse(Some(3)).unwrap();
-        let directive = Acknowledge::<BinaryBoolAck, HasBinary>::into_directive(
+        let client_packet = Acknowledge::<BinaryBoolAck, HasBinary>::into_client_packet(
             |builder: &mut AttachmentsBuilder| {
                 let _p = builder.attach(Bytes::from_static(b"\xCA\xFE"));
                 BinaryBoolAck(true)
@@ -320,13 +320,13 @@ mod tests {
             id.get(),
         )
         .unwrap();
-        let Directive::Ack {
+        let ClientPacket::Ack {
             payload,
             id,
             attachments,
-        } = directive
+        } = client_packet
         else {
-            panic!("expected Ack directive");
+            panic!("expected Ack packet");
         };
         assert_eq!(&payload[..], "[true]");
         assert_eq!(id, 3);
@@ -346,15 +346,15 @@ mod tests {
     }
 
     #[test]
-    fn send_ack_into_directive_no_binary() {
-        let directive = Acknowledge::<(), NoBinary>::into_directive((), 7).unwrap();
-        let Directive::Ack {
+    fn send_ack_into_client_packet_no_binary() {
+        let client_packet = Acknowledge::<(), NoBinary>::into_client_packet((), 7).unwrap();
+        let ClientPacket::Ack {
             payload,
             id,
             attachments,
-        } = directive
+        } = client_packet
         else {
-            panic!("expected Ack directive");
+            panic!("expected Ack packet");
         };
         assert_eq!(&payload[..], "[]");
         assert_eq!(id, 7);

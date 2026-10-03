@@ -52,7 +52,7 @@ async fn ws_connect() {
     let url = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
     let client = ClientBuilder::new(url).open().unwrap();
     let (_tx, mut rx) = client.connect("/").await.unwrap();
-    assert!(matches!(rx.recv().await.unwrap(), Signal::Connect(_)));
+    assert!(matches!(rx.recv().await.unwrap(), ServerPacket::Connect(_)));
 }
 
 #[tokio::test]
@@ -139,7 +139,7 @@ async fn polling_connect() {
         .open()
         .unwrap();
     let (_tx, mut rx) = client.connect("/").await.unwrap();
-    assert!(matches!(rx.recv().await.unwrap(), Signal::Connect(_)));
+    assert!(matches!(rx.recv().await.unwrap(), ServerPacket::Connect(_)));
 }
 
 #[tokio::test]
