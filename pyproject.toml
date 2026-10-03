@@ -7,6 +7,7 @@ dependencies = []
 
 [dependency-groups]
 dev = [
+  "pyrefly",
   "python-socketio",
   "ruff",
   "uvicorn",
@@ -24,3 +25,6 @@ convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 "examples/**" = ["INP001"]  # standalone scripts, not packages
+
+[tool.pyrefly]
+preset = "strict"

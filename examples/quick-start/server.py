@@ -87,12 +87,15 @@ async def session(sid: str) -> None:
 
     options = ["Rust", "Python", "JavaScripts"]
 
-    ack: int = await sio.call(
+    ack = await sio.call(
         "poll",
         ("Favorite language?", options),
         to=sid,
         timeout=5,
     )
+    if not isinstance(ack, int):
+        msg = f"expected an int vote, got {ack!r}"
+        raise TypeError(msg)
     logger.info("poll vote from %s: option %s", sid, options[ack])
 
     await sio.disconnect(sid)

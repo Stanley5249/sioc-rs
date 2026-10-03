@@ -15,6 +15,12 @@ fmt-check:
 lint:
     cargo clippy --locked --workspace --all-targets -- -D warnings
 
+# Lint, format-check, and type-check Python test servers.
+lint-py:
+    uv run --locked ruff check
+    uv run --locked ruff format --check
+    uv run --locked pyrefly check
+
 # Run all targets and documentation examples.
 test:
     cargo test --locked --workspace --all-targets
