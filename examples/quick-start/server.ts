@@ -19,9 +19,9 @@ async function session(socket: Socket): Promise<void> {
   }
   console.info(`poll vote from ${socket.id}: option ${options[ack]}`);
 
-  // Disconnect the namespace only, as server.py does; the client still
-  // treats a server-closed transport as an error.
-  socket.disconnect();
+  // Close the whole connection, not just the namespace, so smoke tests
+  // cover the client shutting down after a server-closed transport.
+  socket.disconnect(true);
 }
 
 const httpServer = createServer();

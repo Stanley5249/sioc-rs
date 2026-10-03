@@ -204,7 +204,11 @@ where
                     tracing::debug!("client closed");
                     tracing::trace!("-> CLOSE");
 
-                    transport_tx.send(Packet::Close.into()).await?;
+                    // A server may close the transport without an engine.io
+                    // CLOSE packet, so a gone transport already means closed.
+                    if transport_tx.send(Packet::Close.into()).await.is_err() {
+                        tracing::debug!("transport already closed");
+                    }
                     break;
                 }
             },
@@ -399,6 +403,22 @@ mod tests {
             transport_rx.recv().await.unwrap(),
             Frame::Packet(Packet::Close)
         ));
+    }
+
+    #[tokio::test]
+    async fn engine_io_client_close_after_transport_closed_exits_ok() {
+        let s = setup();
+        drop(s.transport_rx);
+        s.tx.send(EngineAction::Sink(Message::Close)).await.unwrap();
+        let result = engine_io(
+            sink::drain(),
+            s.rx,
+            s.transport_tx,
+            s.handshake_rx,
+            CancellationToken::new(),
+        )
+        .await;
+        result.unwrap();
     }
 
     #[tokio::test]
