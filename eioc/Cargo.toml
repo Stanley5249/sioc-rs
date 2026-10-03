@@ -1,8 +1,8 @@
 [package]
-rust-version.workspace = true
 name = "eioc"
 version.workspace = true
 edition = "2024"
+rust-version.workspace = true
 description = "Async Engine.IO client implementation for Sioc"
 documentation = "https://docs.rs/eioc"
 repository = "https://github.com/Stanley5249/sioc-rs"

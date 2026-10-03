@@ -11,7 +11,7 @@ dependencies = [
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = [
-  "COM812", # conflicts with the formatter
+  "COM812",  # conflicts with the formatter
 ]
 
 [tool.ruff.lint.pydocstyle]

@@ -1,8 +1,8 @@
 [package]
-rust-version.workspace = true
 name = "sioc"
 version.workspace = true
 edition = "2024"
+rust-version.workspace = true
 description = "Async Socket.IO client with type-safe event handling"
 documentation = "https://docs.rs/sioc"
 readme = "README.md"
