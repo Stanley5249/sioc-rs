@@ -26,16 +26,16 @@ let (tx, mut rx) = client.connect("/").await?;
 
 ### Emit
 
-Derive `EventType` and `SerializePayload` on your type. `EventType` provides the event name for routing and defaults to the struct name in snake case. `SerializePayload` serializes the fields as a JSON array to match the Socket.IO wire format: `42["reply","Hello World!"]`.
+Derive `EventType` and `SerializePayload` on your type. `EventType` provides the event name for routing and defaults to the struct name in snake case. `SerializePayload` serializes the fields as a JSON array to match the Socket.IO wire format: `42["message","Hello World!"]`.
 
 ```rust
 #[derive(Debug, EventType, SerializePayload)]
-#[sioc(event(name = "reply"))]
-struct Reply {
+#[sioc(event(name = "message"))]
+struct Say {
     text: String,
 }
 
-tx.emit(Reply { text: "Hello World!".into() }).await?;
+tx.emit(Say { text: "Hello World!".into() }).await?;
 ```
 
 ### Listen
@@ -44,20 +44,21 @@ Derive `EventType` and `DeserializePayload` on each event type, then collect the
 
 ```rust
 #[derive(Debug, EventType, DeserializePayload)]
-#[sioc(event(name = "greeting"))]
-struct Greeting {
-    message: String,
+#[sioc(event(name = "message"))]
+struct Message {
+    from: String,
+    text: String,
 }
 
 #[derive(Debug, EventRouter)]
-enum MyEvent {
-    Greeting(Event<Greeting>),
+enum ChatEvent {
+    Message(Event<Message>),
 }
 
-while let Some(event) = rx.listen::<MyEvent>().await? {
+while let Some(event) = rx.listen::<ChatEvent>().await? {
     match event {
-        MyEvent::Greeting(Event { payload: Greeting { message }, .. }) => {
-            println!("greeting: {message}");
+        ChatEvent::Message(Event { payload: Message { from, text }, .. }) => {
+            println!("{from}: {text}");
         }
     }
 }
@@ -76,45 +77,45 @@ use std::time::Duration;
 #[sioc(event(name = "join", ack = "RoomInfo"))]
 struct Join {
     room: String,
+    name: String,
 }
 
 #[derive(Debug, AckType, DeserializePayload)]
 struct RoomInfo {
-    count: u32,
+    members: u32,
 }
 
-let Ack { payload: RoomInfo { count }, .. } = tx
-    .emit(Join { room: "lobby-1".into() })
+let Ack { payload: RoomInfo { members }, .. } = tx
+    .emit(Join { room: "rust".into(), name: "ferris".into() })
     .await?
     .timeout(Duration::from_secs(5))
     .await?;
 
-println!("joined lobby-1 with {count} members");
+println!("joined rust with {members} members");
 ```
 
 **Server requests an ack.** When the server sends an event that expects a reply, the `Event<E>` carries an `AckId<A>`. Pass it to `tx.acknowledge` with a value of the expected type.
 
 ```rust
 #[derive(Debug, EventType, DeserializePayload)]
-#[sioc(event(name = "poll", ack = "Vote"))]
-struct Survey {
+#[sioc(event(name = "confirm", ack = "Answer"))]
+struct Confirm {
     question: String,
-    options: Vec<String>,
 }
 
 #[derive(Debug, AckType, SerializePayload)]
-struct Vote(usize);
+struct Answer(bool);
 
 #[derive(Debug, EventRouter)]
-enum MyEvent {
-    Survey(Event<Survey>),
+enum ChatEvent {
+    Confirm(Event<Confirm>),
 }
 
-while let Some(event) = rx.listen::<MyEvent>().await? {
+while let Some(event) = rx.listen::<ChatEvent>().await? {
     match event {
-        MyEvent::Survey(Event { payload: Survey { question, options }, id, .. }) => {
-            println!("{question}\n{options:?}");
-            tx.acknowledge(id, Vote(0)).await?;
+        ChatEvent::Confirm(Event { payload: Confirm { question }, id, .. }) => {
+            println!("? {question}");
+            tx.acknowledge(id, Answer(true)).await?;
         }
     }
 }
@@ -124,53 +125,47 @@ while let Some(event) = rx.listen::<MyEvent>().await? {
 
 JSON cannot represent binary data directly, so Socket.IO sends it as _binary attachments_, separate frames that accompany the JSON packet. The Socket.IO JS library finds and replaces binary objects automatically at runtime. `sioc` requires you to register binary data via an `AttachmentsBuilder` closure and embed the returned `Placeholder` in your struct. On the receiving side, use `data.slot()` to index into `attachments`.
 
-**Upload**
+One type can derive both `SerializePayload` and `DeserializePayload` when the event flows both ways.
 
 ```rust
 use bytes::Bytes;
 
-#[derive(Debug, EventType, SerializePayload)]
-#[sioc(event(name = "upload", binary))]
-struct Upload {
+#[derive(Debug, EventType, SerializePayload, DeserializePayload)]
+#[sioc(event(name = "image", binary))]
+struct Image {
     name: String,
-    header: Placeholder,
-    body: Placeholder,
+    data: Placeholder,
 }
+```
 
-let header = Bytes::from_static(b"PNG\r\n\x1a\n");
-let body = Bytes::from(vec![0u8; 1024]);
-tx.emit(|a: &mut AttachmentsBuilder| Upload {
-    name: "photo.png".into(),
-    header: a.attach(header), // slot 0
-    body: a.attach(body),     // slot 1
+**Send**
+
+```rust
+let png = Bytes::from_static(b"\x89PNG\r\n\x1a\n");
+tx.emit(|a: &mut AttachmentsBuilder| Image {
+    name: "crab.png".into(),
+    data: a.attach(png), // slot 0
 })
 .await?;
 ```
 
-**Download**
+**Receive**
 
 ```rust
-#[derive(Debug, EventType, DeserializePayload)]
-#[sioc(event(name = "chunk", binary))]
-struct Chunk {
-    name: String,
-    data: Placeholder,
-}
-
 #[derive(Debug, EventRouter)]
-enum MyEvent {
-    Chunk(Event<Chunk>),
+enum ChatEvent {
+    Image(Event<Image>),
 }
 
-while let Some(event) = rx.listen::<MyEvent>().await? {
+while let Some(event) = rx.listen::<ChatEvent>().await? {
     match event {
-        MyEvent::Chunk(Event {
-            payload: Chunk { name, data },
+        ChatEvent::Image(Event {
+            payload: Image { name, data },
             attachments, // Vec<Bytes>
             ..
         }) => {
             let bytes = &attachments[data.slot()];
-            println!("chunk {name}: {} bytes", bytes.len());
+            println!("image {name}: {} bytes", bytes.len());
         }
     }
 }
@@ -201,7 +196,7 @@ Server and client use fundamentally different architectures, so `socketioxide`'s
 
 ## Examples
 
-[`quick-start`](examples/quick-start) is a minimal setup paired with Python and JavaScript Socket.IO servers.
+[`quick-start`](examples/quick-start) is a minimal chat client paired with Python and JavaScript Socket.IO servers.
 
 [`generals-io`](examples/generals-io) is the client for [generals.io](https://generals.io), the online strategy game that motivated this crate.
 

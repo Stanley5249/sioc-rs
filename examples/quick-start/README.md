@@ -1,14 +1,14 @@
 # Quick Start
 
-A demo of a Rust client exchanging typed events, acknowledgements, and binary attachments with a Socket.IO server. The same client runs against two servers: `server.py` on python-socketio and `server.ts` on the reference JavaScript implementation.
+A chat client in Rust that joins a room, talks to a bot, and shares an image with a Socket.IO server. The same client runs against two servers: `server.py` on python-socketio and `server.ts` on the reference JavaScript implementation. The bot stands in for other room members, so one client still sees broadcasts.
 
 The example covers all five concepts from the main README:
 
 - **Open and Connect** — build a client and connect to the default namespace
-- **Emit** — send a `Reply` event to the server
-- **Listen** — receive `Greeting`, `Survey`, and `Chunk` events in a typed loop
-- **Acks** — request an ack from the server (`Join`) and reply to one from the server (`Survey`)
-- **Binary** — upload attachments (`Upload`) and receive one back (`Chunk`)
+- **Emit** — send a `Say` message to the room
+- **Listen** — receive `Message`, `Notice`, `Confirm`, and `Image` events in a typed loop
+- **Acks** — request an ack from the server (`Join`) and answer one from the server (`Confirm`)
+- **Binary** — send an `Image` attachment and receive it back
 
 ## Prerequisites
 
@@ -24,6 +24,20 @@ Run the client against each server in one command from the workspace root:
 ```bash
 just smoke-py
 just smoke-js
+```
+
+Each side logs only the events it receives, so every event appears once, with an arrow pointing at the receiver:
+
+```text
+server <- join      ferris wants room "rust"
+client <- ack       join: 2 members
+client <- notice    ferris joined rust
+server <- image     crab.png (8 bytes)
+server <- message   hello from Rust!
+client <- image     crab.png (8 bytes)
+client <- message   bot: hi ferris, you said "hello from Rust!"
+client <- confirm   Leave the room?
+server <- ack       confirm: yes
 ```
 
 To run them by hand, start a server from the workspace root:
@@ -50,8 +64,22 @@ $env:RUST_LOG="quick_start=info,sioc=trace"; cargo run --example quick_start
 
 ## What Happens
 
-1. The client connects and emits a `Join` event, waiting for a `RoomInfo` ack with the member count.
-2. The client uploads `photo.png` as an `Upload` event with two binary attachments. The server answers with a `Chunk` event carrying one attachment.
-3. The server sends a `Greeting` event. The client logs it and replies with a `Reply` event.
-4. The server sends a `poll` event asking for a favorite language. The client finds `"Rust"` in the options and sends back a `Vote` ack.
+```text
+ Rust client                                server (+ bot)
+     |--- join {room, name} --------------------->|
+     |<-- ack join {members} ---------------------|
+     |<-- notice "ferris joined rust" ------------|
+     |--- image {name, data} [binary] ----------->|
+     |<-- image {name, data} [binary] ------------|
+     |--- message {text} ------------------------>|
+     |<-- message {from: "bot", text} ------------|
+     |<-- confirm {question} ---------------------|
+     |--- ack confirm true ---------------------->|
+     |<-- disconnect -----------------------------|
+```
+
+1. The client emits `Join` and waits up to five seconds for a `RoomInfo` ack with the member count, which includes the bot. The server announces the newcomer with a `Notice` to the room.
+2. The client shares `crab.png` as an `Image` event with one binary attachment. The server broadcasts it to the room, so the client receives it back.
+3. The client sends a `Say` message. The server broadcasts it to other members, and the bot replies with a `Message`.
+4. The server sends `Confirm` asking whether to leave the room. The client answers with an `Answer(true)` ack.
 5. The server disconnects the client and the loop exits cleanly. `server.py` disconnects the namespace, and `server.ts` closes the whole connection.
