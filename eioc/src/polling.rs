@@ -212,7 +212,8 @@ impl PollingClient {
 
     /// Polls until the session ends, or until `upgrade` connects and polling pauses.
     ///
-    /// Returns the upgraded stream, or `None` if the session ended first.
+    /// Returns the upgraded stream, or `None` if the session ended first. A failed
+    /// upgrade falls back to long polling for the rest of the session.
     async fn poll_until_upgraded(
         &self,
         url: &Url,
@@ -228,16 +229,23 @@ impl PollingClient {
                 stop?;
                 Ok(None)
             }
-            result = upgrade => {
-                let stream = result?;
+            result = upgrade => match result {
+                Ok(stream) => {
+                    pause.cancel();
 
-                pause.cancel();
-
-                match poll.await? {
-                    Stop::Paused => Ok(Some(stream)),
-                    Stop::Ended => Ok(None),
+                    match poll.await? {
+                        Stop::Paused => Ok(Some(stream)),
+                        Stop::Ended => Ok(None),
+                    }
                 }
-            }
+                Err(error) => {
+                    tracing::warn!(%error, "upgrade failed, falling back to long polling");
+
+                    poll.await?;
+
+                    Ok(None)
+                }
+            },
         }
     }
 
@@ -404,6 +412,24 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(matches!(stop, Stop::Ended));
+    }
+
+    #[tokio::test]
+    async fn failed_upgrade_falls_back_to_long_polling() {
+        let url = http_server(Some("1"), Duration::from_millis(50)).await;
+        let (frame_tx, mut frame_rx) = mpsc::channel(4);
+        let (_transport_tx, mut transport_rx) = mpsc::channel(4);
+        let client = PollingClient(Client::new());
+        let upgrade = async { Err(WebSocketError::Closed) };
+        let stream = client
+            .poll_until_upgraded(&url, &frame_tx, &mut transport_rx, upgrade)
+            .await
+            .unwrap();
+        assert!(stream.is_none());
+        assert!(matches!(
+            frame_rx.recv().await.unwrap(),
+            Frame::Packet(Packet::Close)
+        ));
     }
 
     #[test]
