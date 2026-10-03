@@ -12,7 +12,6 @@ use eioc::websocket::WebSocketConnector;
 use futures_util::TryFutureExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tokio_util::sync::PollSender;
 use url::Url;
 
 /// Converts a typed event into a [`Directive`] for emission.
@@ -222,7 +221,7 @@ where
             http_client,
             websocket_connector,
             self.transport_strategy,
-            PollSender::new(server_message_tx),
+            server_message_tx,
             client_message_rx,
             self.channels.engine,
             self.channels.transport,

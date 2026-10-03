@@ -1,6 +1,6 @@
 //! Error types for Engine.IO operations.
 
-use crate::packet::{Frame, Handshake, Packet};
+use crate::packet::{Frame, Handshake, Message, Packet};
 use bytestring::ByteString;
 use miette::Diagnostic;
 use thiserror::Error;
@@ -22,22 +22,20 @@ pub enum Error {
 #[derive(Debug, Error, Diagnostic)]
 pub enum EngineError {
     /// Outbound frame channel to the transport task is closed.
-    #[error("outbound frame channel closed")]
+    #[error("client frame channel closed")]
     #[diagnostic(
         code(eioc::engine::send_transport),
         help("the transport task exited; check for prior transport errors")
     )]
     SendTransport(#[from] mpsc::error::SendError<Frame>),
 
-    /// Inbound message delivery to the Socket.IO layer failed.
-    #[error("inbound message sink closed")]
+    /// Delivering a server message to the upper layer failed because its receiver is gone.
+    #[error("server message channel closed")]
     #[diagnostic(
-        code(eioc::engine::send_sink),
-        help("the consumer of inbound messages was dropped")
+        code(eioc::engine::send_server_message),
+        help("the receiver of server messages was dropped before the session ended")
     )]
-    // Keep as `#[source]` (not `#[from]`) so type-erased errors do not
-    // implicitly convert into `EngineError` at unrelated call sites.
-    SendSink(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
+    SendServerMessage(#[from] mpsc::error::SendError<Message>),
 
     /// The handshake oneshot channel was dropped before the server responded.
     #[error("failed to receive Engine.IO handshake")]

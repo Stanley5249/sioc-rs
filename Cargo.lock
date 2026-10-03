@@ -1783,7 +1783,6 @@ dependencies = [
  "socketioxide",
  "thiserror",
  "tokio",
- "tokio-util",
  "tracing",
  "url",
 ]

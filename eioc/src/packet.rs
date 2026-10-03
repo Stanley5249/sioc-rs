@@ -17,8 +17,6 @@ pub enum Message {
     Text(ByteString),
     /// A raw binary payload.
     Binary(Bytes),
-    /// Signals a clean connection close.
-    Close,
 }
 
 impl std::fmt::Display for Message {
@@ -26,7 +24,6 @@ impl std::fmt::Display for Message {
         match self {
             Self::Text(s) => f.debug_tuple("Text").field(&format_args!("{s}")).finish(),
             Self::Binary(b) => f.debug_struct("Binary").field("len", &b.len()).finish(),
-            Self::Close => f.write_str("Close"),
         }
     }
 }
@@ -413,11 +410,6 @@ mod tests {
             Message::Binary(bytes::Bytes::from_static(b"\x01\x02"))
         );
         assert_eq!(s, "Binary { len: 2 }");
-    }
-
-    #[test]
-    fn message_display_close() {
-        assert_eq!(format!("{}", Message::Close), "Close");
     }
 
     #[test]

@@ -26,7 +26,6 @@ pub(super) async fn route_server_messages(
             Message::Binary(attachment) => {
                 route_binary(attachment, routes, &mut reconstructor).await?;
             }
-            Message::Close => break,
         }
     }
 
