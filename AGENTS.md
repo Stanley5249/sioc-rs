@@ -30,11 +30,15 @@ Re-export public surface through `prelude`. Never put `Result` or `Error` aliase
 
 Variable names should be descriptive and avoid unnecessary abbreviations. Prefer `packet` and `event` over `pkt` and `evt`. For short-lived variables, single-letter names like `p` and `e` are acceptable.
 
+Name a channel's ends after the items it carries, such as `frame_tx` and `directive_rx`. When two channels carry the same item type, prefix the side that produced the items: `server_` for what the server sent and `client_` for what this client sends. Avoid names that depend on the reader's position, such as `inbound` and `outbound`.
+
 ## Async
 
 - Run each direction of a bidirectional pipe as its own loop and `join!` them. A loop that awaits a send to one output stops serving every other input.
-- Use `select!` only to merge inputs that feed one output, or to race waiting against a stop signal. Every branch future must be cancel-safe: tokio channel `recv`, `recv_many`, and `CancellationToken::cancelled` are. Prove cancel safety before selecting on anything else.
-- Shut down by half-close: a task stops by dropping its senders and finishes only when its receivers return `None`. A send never fails during a graceful shutdown, so every send error is a real error.
+- Use `select!` in a loop only when every handler awaits nothing but the loop's one output, or when the arm is a stop signal. Every branch future must also be cancel-safe: tokio channel `recv`, `recv_many`, `FuturesUnordered::next`, and `CancellationToken::cancelled` are. Prove cancel safety before selecting on anything else.
+- Shut down by half-close: a task stops by dropping its senders and finishes only when its receivers return `None`. Between our tasks a send never fails during a graceful shutdown, so every send error is a real error. A receiver the caller owns may drop at any time, so delivery to it discards on a closed channel.
+- Keep every channel fed by the server bounded, so a flood slows the connection instead of growing memory.
+- Lock a `std::sync::Mutex` only inside a synchronous method that never returns the guard, so no lock is held across an `.await`.
 
 ## Commits
 
