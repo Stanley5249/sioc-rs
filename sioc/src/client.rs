@@ -3,17 +3,16 @@
 use crate::ack::AckType;
 use crate::error::ManagerError;
 use crate::error::{ClientBuilderError, ClientError, PayloadError, SocketError};
-use crate::manager::{DirectiveSender, Manager, ManagerAction, message_sink};
+use crate::manager::{self, NewSocket};
 use crate::marker::{AckId, AckMarker, BinaryMarker};
 use crate::packet::{Directive, DynEvent, Signal};
 use bytestring::ByteString;
 use eioc::transport::TransportStrategy;
 use eioc::websocket::WebSocketConnector;
 use futures_util::TryFutureExt;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_util::sync::PollSender;
 use url::Url;
 
 /// Converts a typed event into a [`Directive`] for emission.
@@ -56,11 +55,11 @@ where
 /// or build manually for per-channel control.
 #[derive(Clone, Copy, Debug)]
 pub struct ChannelConfig {
-    /// Engine task inboxes: frames from the transport and messages from the Socket.IO layer.
+    /// Engine task inboxes: frames from the transport and messages from the manager.
     pub engine: usize,
     /// Transport channel: encoded frames to send to the transport.
     pub transport: usize,
-    /// Manager task inbox: directives from all namespace senders.
+    /// Manager inboxes: messages from the engine, new namespaces, and each namespace's directives.
     pub manager: usize,
     /// Per-namespace inbox: signals delivered to each [`SocketReceiver`].
     pub socket: usize,
@@ -210,21 +209,21 @@ where
         let websocket_connector = self.websocket_connector;
         let url = self.url.join(&self.path)?;
 
-        let (manager_tx, manager_rx) = mpsc::channel::<ManagerAction>(self.channels.manager);
+        let (new_socket_tx, new_socket_rx) = mpsc::channel(self.channels.manager);
 
-        let (message_tx, message_rx) = mpsc::channel(self.channels.engine);
+        let (server_message_tx, server_message_rx) = mpsc::channel(self.channels.manager);
 
-        let manager = Manager::new(manager_rx);
+        let (client_message_tx, client_message_rx) = mpsc::channel(self.channels.engine);
 
-        let sio_future = manager.socket_io(message_tx);
+        let sio_future = manager::run(new_socket_rx, server_message_rx, client_message_tx);
 
         let eio_future = eioc::engine::connect(
             url,
             http_client,
             websocket_connector,
             self.transport_strategy,
-            message_sink(manager_tx.clone()),
-            message_rx,
+            PollSender::new(server_message_tx),
+            client_message_rx,
             self.channels.engine,
             self.channels.transport,
         );
@@ -237,9 +236,9 @@ where
         });
 
         Ok(Client {
-            tx: DirectiveSender::new(manager_tx),
+            new_socket_tx,
             handle,
-            socket_capacity: self.channels.socket,
+            channels: self.channels,
         })
     }
 }
@@ -247,9 +246,9 @@ where
 /// A connected Socket.IO client.
 #[derive(Debug)]
 pub struct Client {
-    tx: DirectiveSender,
+    new_socket_tx: mpsc::Sender<NewSocket>,
     handle: JoinHandle<Result<(), ManagerError>>,
-    socket_capacity: usize,
+    channels: ChannelConfig,
 }
 
 impl Client {
@@ -264,7 +263,7 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Returns an error if the manager channel is closed.
+    /// Returns an error if the session has ended.
     pub async fn connect<S>(&self, ns: S) -> Result<(SocketSender, SocketReceiver), SocketError>
     where
         S: Into<ByteString>,
@@ -276,7 +275,7 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Returns an error if the manager channel is closed.
+    /// Returns an error if the session has ended.
     pub async fn connect_with<S, B>(
         &self,
         ns: S,
@@ -286,81 +285,65 @@ impl Client {
         S: Into<ByteString>,
         B: Into<ByteString>,
     {
-        let (tx, rx) = mpsc::channel(self.socket_capacity);
+        let (directive_tx, directive_rx) = mpsc::channel(self.channels.manager);
 
-        let socket_tx = SocketSender::new(ns.into(), self.tx.clone());
+        let (signal_tx, signal_rx) = mpsc::channel(self.channels.socket);
 
-        let socket_rx = SocketReceiver { rx };
-
-        let directive = Directive::Connect {
-            tx,
+        let new_socket = NewSocket {
+            ns: ns.into(),
             payload: payload.into(),
+            directive_rx,
+            signal_tx,
         };
-        socket_tx.0.send(directive).await?;
 
-        Ok((socket_tx, socket_rx))
+        self.new_socket_tx
+            .send(new_socket)
+            .await
+            .map_err(|_| SocketError::Closed)?;
+
+        Ok((
+            SocketSender { directive_tx },
+            SocketReceiver { rx: signal_rx },
+        ))
     }
 
-    /// Awaits the background manager task.
+    /// Drops the client handle and waits for the session to end.
     ///
-    /// The [`SocketSender`] must be dropped or explicitly disconnected before calling this.
-    /// The manager exits only when the sender is dropped.
+    /// The session ends once every [`SocketSender`] is dropped or disconnected,
+    /// or when the server closes it.
     ///
     /// # Errors
     ///
     /// Returns an error if the manager task fails or panics.
     pub async fn join(self) -> Result<(), ClientError> {
-        drop(self.tx);
+        drop(self.new_socket_tx);
         self.handle.await??;
         Ok(())
     }
 }
 
-#[derive(Debug)]
-struct SocketSenderInner {
-    ns: ByteString,
-    tx: DirectiveSender,
-    disconnected: AtomicBool,
-}
-
-impl SocketSenderInner {
-    async fn send(&self, directive: Directive) -> Result<(), SocketError> {
-        self.tx
-            .send(self.ns.clone(), directive)
-            .await
-            .map_err(SocketError::Send)
-    }
-}
-
-impl Drop for SocketSenderInner {
-    fn drop(&mut self) {
-        if !self.disconnected.swap(true, Ordering::Relaxed) {
-            let _ = self.tx.try_send(self.ns.clone(), Directive::Dropped);
-        }
-    }
-}
-
 /// Sender for a Socket.IO namespace.
 ///
-/// Cloning is cheap — all clones share the same connection. The disconnect
-/// packet is sent automatically when the last clone is dropped.
+/// Cloning is cheap, and all clones share the namespace. The namespace
+/// disconnects when the last clone is dropped.
 #[derive(Clone, Debug)]
-pub struct SocketSender(Arc<SocketSenderInner>);
+pub struct SocketSender {
+    directive_tx: mpsc::Sender<Directive>,
+}
 
 impl SocketSender {
-    fn new(ns: ByteString, tx: DirectiveSender) -> Self {
-        Self(Arc::new(SocketSenderInner {
-            ns,
-            tx,
-            disconnected: AtomicBool::new(false),
-        }))
+    async fn send(&self, directive: Directive) -> Result<(), SocketError> {
+        self.directive_tx
+            .send(directive)
+            .await
+            .map_err(|_| SocketError::Closed)
     }
 
     /// Emits an event; returns `()` or an [`AckHandle`](crate::ack::AckHandle) depending on the ack policy.
     ///
     /// # Errors
     ///
-    /// Returns an error if serialization fails or the manager channel is closed.
+    /// Returns an error if serialization fails or the namespace has closed.
     pub async fn emit<E, A, B>(&self, event: E) -> Result<E::Output, SocketError>
     where
         E: Emit<A, B>,
@@ -368,7 +351,7 @@ impl SocketSender {
         B: BinaryMarker,
     {
         let (directive, output) = event.prepare()?;
-        self.0.send(directive).await?;
+        self.send(directive).await?;
         Ok(output)
     }
 
@@ -376,7 +359,7 @@ impl SocketSender {
     ///
     /// # Errors
     ///
-    /// Returns an error if serialization fails or the manager channel is closed.
+    /// Returns an error if serialization fails or the namespace has closed.
     pub async fn acknowledge<T, A, B>(&self, id: AckId<A>, payload: T) -> Result<(), SocketError>
     where
         T: Acknowledge<A, B>,
@@ -384,20 +367,15 @@ impl SocketSender {
         B: BinaryMarker,
     {
         let directive = payload.into_directive(id.get())?;
-        self.0.send(directive).await
+        self.send(directive).await
     }
 
-    /// Sends a graceful disconnect packet and marks this sender as disconnected.
+    /// Sends a graceful disconnect packet for the namespace.
     ///
-    /// Idempotent: subsequent calls and calls made after a server-initiated disconnect
-    /// both return immediately. Prefer this over dropping when you need a guaranteed
-    /// async send rather than the fire-and-forget `try_send` in `Drop`.
+    /// Idempotent: once the namespace has closed, by either side, the call returns immediately.
     pub async fn disconnect(&self) {
-        if !self.0.disconnected.swap(true, Ordering::Relaxed) {
-            // Ignore SendError: a closed channel means the manager already handled
-            // the disconnect (server-initiated), so we are already disconnected.
-            let _ = self.0.send(Directive::Disconnect).await;
-        }
+        // A closed channel means the namespace has already closed.
+        let _ = self.send(Directive::Disconnect).await;
     }
 }
 
@@ -450,9 +428,8 @@ impl std::ops::DerefMut for SocketReceiver {
 mod tests {
     use super::*;
     use crate::error::PayloadError;
-    use crate::manager::ManagerAction;
     use crate::marker::{HasAck, NoAck, NoBinary};
-    use crate::packet::{Connect, ConnectError, Directive, DynEvent, Ns, Signal};
+    use crate::packet::{Connect, ConnectError, Directive, DynEvent, Signal};
     use eioc::transport::TransportStrategy;
     use serde_json::Map;
     use tokio::sync::mpsc;
@@ -475,9 +452,9 @@ mod tests {
         }
     }
 
-    fn make_directive_sender() -> (DirectiveSender, mpsc::Receiver<ManagerAction>) {
-        let (tx, rx) = mpsc::channel(8);
-        (DirectiveSender::new(tx), rx)
+    fn socket_sender() -> (SocketSender, mpsc::Receiver<Directive>) {
+        let (directive_tx, directive_rx) = mpsc::channel(8);
+        (SocketSender { directive_tx }, directive_rx)
     }
 
     struct Pass(DynEvent);
@@ -544,49 +521,31 @@ mod tests {
         assert!(receiver.listen::<Pass>().await.unwrap().is_none());
     }
 
-    #[test]
-    fn drop_sends_dropped_when_not_disconnected() {
-        let (directive_tx, mut rx) = make_directive_sender();
-        let sender = SocketSender::new("ns".into(), directive_tx);
-        drop(sender);
-        assert!(matches!(
-            rx.try_recv().unwrap(),
-            ManagerAction::Socket(Ns(_, Directive::Dropped))
-        ));
-    }
-
     #[tokio::test]
-    async fn drop_is_no_op_after_disconnect() {
-        let (directive_tx, mut rx) = make_directive_sender();
-        let sender = SocketSender::new("ns".into(), directive_tx);
-        sender.disconnect().await;
+    async fn dropping_last_clone_closes_directive_channel() {
+        let (sender, mut directive_rx) = socket_sender();
+        let clone = sender.clone();
         drop(sender);
-        assert!(matches!(
-            rx.try_recv().unwrap(),
-            ManagerAction::Socket(Ns(_, Directive::Disconnect))
-        ));
-        rx.try_recv().unwrap_err();
+        directive_rx.try_recv().unwrap_err();
+        drop(clone);
+        assert!(directive_rx.recv().await.is_none());
     }
 
     #[tokio::test]
     async fn disconnect_sends_disconnect_directive() {
-        let (directive_tx, mut rx) = make_directive_sender();
-        let sender = SocketSender::new("ns".into(), directive_tx);
+        let (sender, mut directive_rx) = socket_sender();
         sender.disconnect().await;
         assert!(matches!(
-            rx.try_recv().unwrap(),
-            ManagerAction::Socket(Ns(_, Directive::Disconnect))
+            directive_rx.try_recv().unwrap(),
+            Directive::Disconnect
         ));
     }
 
     #[tokio::test]
-    async fn disconnect_is_idempotent() {
-        let (directive_tx, mut rx) = make_directive_sender();
-        let sender = SocketSender::new("ns".into(), directive_tx);
+    async fn disconnect_after_close_returns() {
+        let (sender, directive_rx) = socket_sender();
+        drop(directive_rx);
         sender.disconnect().await;
-        sender.disconnect().await;
-        rx.try_recv().unwrap();
-        rx.try_recv().unwrap_err();
     }
 
     #[tokio::test]
@@ -623,30 +582,27 @@ mod tests {
 
     #[tokio::test]
     async fn emit_sends_event_directive() {
-        let (directive_tx, mut rx) = make_directive_sender();
-        let sender = SocketSender::new("ns".into(), directive_tx);
+        let (sender, mut rx) = socket_sender();
         sender.emit(TestEmit).await.unwrap();
-        assert!(matches!(
-            rx.try_recv().unwrap(),
-            ManagerAction::Socket(Ns(_, Directive::Event { .. }))
-        ));
+        assert!(matches!(rx.try_recv().unwrap(), Directive::Event { .. }));
     }
 
     #[tokio::test]
     async fn emit_returns_error_on_closed_channel() {
-        let (directive_tx, rx) = make_directive_sender();
+        let (sender, rx) = socket_sender();
         drop(rx);
-        let sender = SocketSender::new("ns".into(), directive_tx);
-        assert!(sender.emit(TestEmit).await.is_err());
+        assert!(matches!(
+            sender.emit(TestEmit).await,
+            Err(SocketError::Closed)
+        ));
     }
 
     #[tokio::test]
     async fn acknowledge_sends_ack_directive_with_correct_id() {
-        let (directive_tx, mut rx) = make_directive_sender();
-        let sender = SocketSender::new("ns".into(), directive_tx);
+        let (sender, mut rx) = socket_sender();
         let id = HasAck::<()>::parse(Some(5)).unwrap();
         sender.acknowledge(id, ()).await.unwrap();
-        let ManagerAction::Socket(Ns(_, Directive::Ack { id, .. })) = rx.try_recv().unwrap() else {
+        let Directive::Ack { id, .. } = rx.try_recv().unwrap() else {
             panic!("expected Ack directive");
         };
         assert_eq!(id, 5);

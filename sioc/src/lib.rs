@@ -8,7 +8,7 @@ pub mod binary;
 pub mod client;
 pub mod error;
 pub mod event;
-pub mod manager;
+mod manager;
 pub mod marker;
 pub mod packet;
 pub mod payload;

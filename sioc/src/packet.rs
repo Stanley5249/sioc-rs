@@ -7,7 +7,7 @@ use miette::Diagnostic;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
 /// A value tagged with a Socket.IO namespace path (e.g. `"/chat"`).
 #[derive(Debug)]
@@ -200,11 +200,6 @@ impl<E> Signal<E> {
 #[derive(Debug)]
 #[allow(missing_docs)]
 pub enum Directive {
-    /// Opens a namespace; `data` is an optional authentication payload.
-    Connect {
-        tx: mpsc::Sender<Signal>,
-        payload: ByteString,
-    },
     /// Closes the namespace.
     Disconnect,
     /// Emits an event; if `tx` is set, an ack ID is assigned and the response routed to it.
@@ -219,8 +214,6 @@ pub enum Directive {
         id: u64,
         attachments: Option<Vec<Bytes>>,
     },
-    /// Sent by `SocketSenderInner::drop`; the manager warns if the namespace is still live.
-    Dropped,
 }
 
 /// A wire-level packet decoded from a single text frame.

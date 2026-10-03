@@ -4,8 +4,6 @@
 //! top-level convenience wrapper that aggregates all of them via [`From`] impls,
 //! intended for application-level code that wants a single error type.
 
-use crate::manager::ManagerAction;
-use crate::packet::{DynAck, Signal};
 use bytes::Bytes;
 use bytestring::ByteString;
 use eioc::prelude::Message;
@@ -82,10 +80,13 @@ pub enum ClientError {
 /// Error returned by [`SocketSender`](crate::client::SocketSender) operations.
 #[derive(Debug, Error, Diagnostic)]
 pub enum SocketError {
-    /// Directive channel to the socket manager is closed.
-    #[error("failed to send directive to socket manager")]
-    #[diagnostic(code(sioc::socket::send))]
-    Send(#[from] mpsc::error::SendError<ManagerAction>),
+    /// The namespace or the whole session has closed.
+    #[error("socket closed")]
+    #[diagnostic(
+        code(sioc::socket::closed),
+        help("the namespace was disconnected or the client session ended")
+    )]
+    Closed,
 
     /// Event payload serialization failed.
     #[error("failed to serialize payload")]
@@ -266,26 +267,6 @@ pub enum ManagerError {
     )]
     SendEngine(#[from] mpsc::error::SendError<Message>),
 
-    /// Inbound packet delivery to a namespace channel failed.
-    #[error("manager send failed for namespace `{ns}`")]
-    #[diagnostic(
-        code(sioc::manager::send_socket),
-        help("the receiver was dropped; the socket is probably shut down")
-    )]
-    SendSocket {
-        ns: ByteString,
-        #[source]
-        source: mpsc::error::SendError<Signal>,
-    },
-
-    /// Server ack arrived but the caller's receiver was already dropped.
-    #[error("ack channel closed for namespace `{ns}`")]
-    #[diagnostic(
-        code(sioc::manager::send_ack),
-        help("the ack receiver was dropped; the namespace may have disconnected")
-    )]
-    SendAck { ns: ByteString, ack: DynAck },
-
     /// Received a text frame while a binary reassembly was in progress.
     #[error("unexpected text frame: {0:?}")]
     #[diagnostic(
@@ -306,24 +287,6 @@ pub enum ManagerError {
     )]
     UnexpectedBinary(Bytes),
 
-    /// Operation on a namespace that is not open.
-    #[error("unknown namespace `{ns}`")]
-    #[diagnostic(
-        code(sioc::manager::unknown_namespace),
-        help("connect the namespace before sending or receiving on it")
-    )]
-    UnknownNamespace { ns: ByteString },
-
-    /// Ack ID in a server response has no registered handler.
-    #[error("ack for unknown ID {id} in namespace `{ns}`")]
-    #[diagnostic(
-        code(sioc::manager::unknown_ack_id),
-        help(
-            "the server sent an ack for an unregistered ID; the server may be replying to an already-acknowledged event"
-        )
-    )]
-    UnknownAckId { ns: ByteString, id: u64 },
-
     /// Attempted to open a namespace that is already open.
     #[error("namespace conflict: `{ns}`")]
     #[diagnostic(
@@ -331,4 +294,12 @@ pub enum ManagerError {
         help("the namespace is already open; drop the existing handle before reconnecting")
     )]
     NamespaceConflict { ns: ByteString },
+
+    /// The manager loops stopped talking to each other before the session ended.
+    #[error("manager control channel closed")]
+    #[diagnostic(
+        code(sioc::manager::control_closed),
+        help("a manager loop exited early; check for prior manager errors")
+    )]
+    ControlClosed,
 }
