@@ -53,8 +53,8 @@ commit_preprocessors = [
 ]
 protect_breaking_commits = false
 commit_parsers = [
-  { message = ".*security", group = "<!-- 00 -->🛡️ Security" },
-  { body = ".*security", group = "<!-- 00 -->🛡️ Security" },
+  # `.` stops at the newline, so only the subject line can match.
+  { message = "^.*security", group = "<!-- 00 -->🛡️ Security" },
   { message = "^feat", group = "<!-- 01 -->🚀 Features" },
   { message = "^fix", group = "<!-- 02 -->🐛 Bug Fixes" },
   { message = '^build\(deps\)', group = "<!-- 03 -->📦 Dependencies" },
