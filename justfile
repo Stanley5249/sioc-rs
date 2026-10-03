@@ -3,29 +3,49 @@ set windows-shell := ["pwsh", "-NoLogo", "-NoProfile", "-Command"]
 
 quick_start := "cargo run --locked -p quick-start --example quick_start"
 
+# Format all sources.
+fmt: fmt-rs fmt-py fmt-js
+
 # Format Rust sources and this justfile.
-fmt:
+fmt-rs:
     cargo fmt --all
     just --fmt
 
-# Check formatting without rewriting sources.
-fmt-check:
+# Format Python test servers.
+fmt-py:
+    uv run --locked ruff format -q
+
+# Format JS, TS, JSON, YAML, and Markdown.
+fmt-js:
+    bunx oxfmt
+
+# Check formatting of all sources without rewriting them.
+fmt-check: fmt-check-rs fmt-check-py fmt-check-js
+
+# Check Rust and justfile formatting.
+fmt-check-rs:
     cargo fmt --all --check
     just --fmt --check
+
+# Check Python formatting.
+fmt-check-py:
+    uv run --locked ruff format --check -q
+
+# Check JS, TS, JSON, YAML, and Markdown formatting.
+fmt-check-js:
+    bunx oxfmt --check
 
 # Lint libraries, examples, and tests with warnings denied.
 lint:
     cargo clippy --locked --workspace --all-targets -- -D warnings
 
-# Lint, format-check, and type-check Python test servers.
+# Lint and type-check Python test servers.
 lint-py:
-    uv run --locked ruff check
-    uv run --locked ruff format --check
-    uv run --locked pyrefly check
+    uv run --locked ruff check -q
+    uv run --locked pyrefly check --summary=none
 
-# Format-check JS, JSON, YAML, and Markdown, and lint TypeScript test servers.
+# Lint TypeScript test servers with type-aware rules.
 lint-js:
-    bunx oxfmt --check
     bunx oxlint
 
 # Run all targets and documentation examples.
