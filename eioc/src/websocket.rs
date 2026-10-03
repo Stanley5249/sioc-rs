@@ -78,6 +78,13 @@ impl Stream for WebSocketStream {
 
                             Some(Ok(Frame::Binary(binary)))
                         }
+                        // End the stream at the peer's close frame. Otherwise the
+                        // transport may send into a closing socket and fail.
+                        WebSocketMessage::Close(_) => {
+                            tracing::trace!("<- CLOSE");
+
+                            None
+                        }
                         _ => continue,
                     },
                     Err(e) => Some(Err(e.into())),
@@ -355,6 +362,13 @@ mod tests {
         server.send(WsMsg::text("4hello")).await.unwrap();
         let frame = client.next().await.unwrap().unwrap();
         assert!(matches!(frame, Frame::Packet(Packet::Message(m)) if m == "hello"));
+    }
+
+    #[tokio::test]
+    async fn stream_ends_at_peer_close_frame() {
+        let (mut client, mut server) = ws_pair().await;
+        server.send(WsMsg::Close(None)).await.unwrap();
+        assert!(client.next().await.is_none());
     }
 
     #[tokio::test]
