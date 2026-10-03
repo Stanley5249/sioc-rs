@@ -1,0 +1,48 @@
+{
+  "prettier": {
+    "allowed": false
+  },
+  "languages": {
+    "JSON": {
+      "formatter": {
+        "language_server": {
+          "name": "oxfmt"
+        }
+      }
+    },
+    "Markdown": {
+      "formatter": {
+        "language_server": {
+          "name": "oxfmt"
+        }
+      }
+    },
+    "TOML": {
+      "formatter": {
+        "language_server": {
+          "name": "tombi"
+        }
+      },
+      "language_servers": [
+        "!oxfmt",
+        "..."
+      ]
+    },
+    "YAML": {
+      "formatter": {
+        "language_server": {
+          "name": "oxfmt"
+        }
+      }
+    }
+  },
+  "lsp": {
+    "rust-analyzer": {
+      "initialization_options": {
+        "check": {
+          "command": "clippy"
+        }
+      }
+    }
+  }
+}

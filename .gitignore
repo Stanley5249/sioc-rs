@@ -1,7 +1,6 @@
 # IDE
 .vscode/
 .idea/
-.zed/
 
 # Rust Artifacts
 target/
