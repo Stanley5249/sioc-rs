@@ -92,7 +92,9 @@ async fn update_username(
             tx.set_username(user_id, new.clone()).await?;
             Ok(new)
         }
-        (None, None) => bail!("username not set"),
+        (None, None) => {
+            bail!("username not set");
+        }
     }
 }
 
