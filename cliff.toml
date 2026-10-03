@@ -53,8 +53,9 @@ commit_preprocessors = [
 ]
 protect_breaking_commits = false
 commit_parsers = [
-  # `.` stops at the newline, so only the subject line can match.
-  { message = "^.*security", group = "<!-- 00 -->🛡️ Security" },
+  # Only fixes and dependency updates can be security fixes, and `.` stops at
+  # the newline, so commits that merely mention the word stay in their group.
+  { message = '^(fix|build\(deps\))(\(.*?\))?!?:.*security', group = "<!-- 00 -->🛡️ Security" },
   { message = "^feat", group = "<!-- 01 -->🚀 Features" },
   { message = "^fix", group = "<!-- 02 -->🐛 Bug Fixes" },
   { message = '^build\(deps\)', group = "<!-- 03 -->📦 Dependencies" },
