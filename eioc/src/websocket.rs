@@ -5,10 +5,8 @@ use crate::error::{TransportError, WebSocketError};
 use crate::packet::{Frame, Handshake, PROBE, Packet};
 use bytestring::ByteString;
 use futures_util::stream::{SplitSink, SplitStream};
-use futures_util::{Sink, SinkExt, Stream, StreamExt, TryStreamExt};
+use futures_util::{SinkExt, Stream, StreamExt, TryStreamExt};
 use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll, ready};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Error as TungsteniteError;
@@ -49,7 +47,9 @@ impl WebSocketConnector for () {
     }
 }
 
-/// Framed WebSocket stream that speaks [`Frame`] instead of raw [`WebSocketMessage`].
+type Connection = tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+/// An open WebSocket connection that carries Engine.IO [`Frame`]s.
 pub struct WebSocketStream(pub tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>);
 
 /// Converts an inbound WebSocket text frame into a [`ByteString`] without copying.
@@ -58,85 +58,55 @@ fn bytestring_from_utf8_bytes(utf8: tokio_tungstenite::tungstenite::Utf8Bytes) -
     unsafe { ByteString::from_bytes_unchecked(utf8.into()) }
 }
 
-impl Stream for WebSocketStream {
-    type Item = Result<Frame, WebSocketError>;
+/// Reads the next frame, skipping WebSocket control messages.
+///
+/// Returns `None` at the peer's close frame, so the transport stops before it
+/// sends into a closing socket.
+async fn next_frame<S>(stream: &mut S) -> Result<Option<Frame>, WebSocketError>
+where
+    S: Stream<Item = Result<WebSocketMessage, TungsteniteError>> + Unpin,
+{
+    while let Some(message) = stream.try_next().await? {
+        match message {
+            WebSocketMessage::Text(text) => {
+                tracing::trace!(bytes = text.len(), "<- TEXT");
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            let frame = match ready!(self.0.poll_next_unpin(cx)) {
-                Some(result) => match result {
-                    Ok(message) => match message {
-                        WebSocketMessage::Text(text) => {
-                            tracing::trace!(bytes = text.len(), "<- TEXT");
+                let bytes = bytestring_from_utf8_bytes(text);
 
-                            let bytes = bytestring_from_utf8_bytes(text);
-                            let packet = Packet::decode(&bytes)?;
+                return Ok(Some(Frame::Packet(Packet::decode(&bytes)?)));
+            }
+            WebSocketMessage::Binary(binary) => {
+                tracing::trace!(bytes = binary.len(), "<- BINARY");
 
-                            Some(Ok(Frame::Packet(packet)))
-                        }
-                        WebSocketMessage::Binary(binary) => {
-                            tracing::trace!(bytes = binary.len(), "<- BINARY");
+                return Ok(Some(Frame::Binary(binary)));
+            }
+            WebSocketMessage::Close(_) => {
+                tracing::trace!("<- CLOSE");
 
-                            Some(Ok(Frame::Binary(binary)))
-                        }
-                        // End the stream at the peer's close frame. Otherwise the
-                        // transport may send into a closing socket and fail.
-                        WebSocketMessage::Close(_) => {
-                            tracing::trace!("<- CLOSE");
-
-                            None
-                        }
-                        _ => continue,
-                    },
-                    Err(e) => Some(Err(e.into())),
-                },
-                None => None,
-            };
-
-            return Poll::Ready(frame);
+                return Ok(None);
+            }
+            _ => {}
         }
     }
+
+    Ok(None)
 }
 
-impl Sink<Frame> for WebSocketStream {
-    type Error = WebSocketError;
+/// Encodes a frame as a WebSocket message.
+fn encode(frame: Frame) -> WebSocketMessage {
+    match frame {
+        Frame::Packet(packet) => {
+            let text = packet.encode();
 
-    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.0
-            .poll_ready_unpin(cx)
-            .map_err(WebSocketError::Tungstenite)
-    }
+            tracing::trace!(bytes = text.len(), "-> TEXT");
 
-    fn start_send(mut self: Pin<&mut Self>, frame: Frame) -> Result<(), Self::Error> {
-        let message = match frame {
-            Frame::Packet(packet) => {
-                let text = packet.encode();
+            WebSocketMessage::text(text)
+        }
+        Frame::Binary(bytes) => {
+            tracing::trace!(bytes = bytes.len(), "-> BINARY");
 
-                tracing::trace!(bytes = text.len(), "-> TEXT");
-
-                WebSocketMessage::text(text)
-            }
-            Frame::Binary(bytes) => {
-                tracing::trace!(bytes = bytes.len(), "-> BINARY");
-
-                WebSocketMessage::binary(bytes)
-            }
-        };
-        self.0
-            .start_send_unpin(message)
-            .map_err(WebSocketError::Tungstenite)
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.0
-            .poll_flush_unpin(cx)
-            .map_err(WebSocketError::Tungstenite)
-    }
-
-    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.0
-            .poll_close_unpin(cx)
-            .map_err(WebSocketError::Tungstenite)
+            WebSocketMessage::binary(bytes)
+        }
     }
 }
 
@@ -196,10 +166,12 @@ impl WebSocketStream {
 
     /// Waits for the next frame, returning an error if the stream is closed.
     async fn recv(&mut self) -> Result<Frame, WebSocketError> {
-        self.next()
-            .await
-            .ok_or(WebSocketError::Closed)
-            .and_then(|r| r)
+        next_frame(&mut self.0).await?.ok_or(WebSocketError::Closed)
+    }
+
+    /// Sends one frame.
+    async fn send(&mut self, frame: Frame) -> Result<(), WebSocketError> {
+        Ok(self.0.send(encode(frame)).await?)
     }
 
     /// Sends a probe `Ping` and expects a matching `Pong`, confirming the WebSocket path is live.
@@ -257,7 +229,7 @@ impl WebSocketStream {
             self.send(Packet::Upgrade.into()).await?;
         }
 
-        let (sink, stream) = self.split();
+        let (sink, stream) = self.0.split();
         let stream_closed = CancellationToken::new();
 
         // Each direction runs on its own, so a slow engine never stalls
@@ -275,13 +247,13 @@ impl WebSocketStream {
 ///
 /// Returning drops `frame_tx`, which tells the engine the transport has finished.
 async fn inbound(
-    mut stream: SplitStream<WebSocketStream>,
+    mut stream: SplitStream<Connection>,
     frame_tx: mpsc::Sender<Frame>,
     stream_closed: CancellationToken,
 ) -> Result<(), TransportError> {
     let _guard = stream_closed.drop_guard();
 
-    while let Some(frame) = stream.try_next().await? {
+    while let Some(frame) = next_frame(&mut stream).await? {
         frame_tx.send(frame).await?;
     }
 
@@ -295,7 +267,7 @@ async fn inbound(
 /// If the stream ends first, discards frames until the engine closes `transport_rx`,
 /// because the closed socket cannot send them.
 async fn outbound(
-    mut sink: SplitSink<WebSocketStream, Frame>,
+    mut sink: SplitSink<Connection, WebSocketMessage>,
     mut transport_rx: mpsc::Receiver<Frame>,
     stream_closed: CancellationToken,
 ) -> Result<(), TransportError> {
@@ -307,7 +279,9 @@ async fn outbound(
                     break;
                 };
 
-                sink.send(frame).await?;
+                sink.send(encode(frame))
+                    .await
+                    .map_err(WebSocketError::from)?;
             }
 
             () = stream_closed.cancelled() => {
@@ -317,7 +291,7 @@ async fn outbound(
         }
     }
 
-    sink.close().await?;
+    sink.close().await.map_err(WebSocketError::from)?;
 
     Ok(())
 }
@@ -402,7 +376,7 @@ mod tests {
     async fn stream_decodes_text_frame_as_packet() {
         let (mut client, mut server) = ws_pair().await;
         server.send(WsMsg::text("4hello")).await.unwrap();
-        let frame = client.next().await.unwrap().unwrap();
+        let frame = client.recv().await.unwrap();
         assert!(matches!(frame, Frame::Packet(Packet::Message(m)) if m == "hello"));
     }
 
@@ -410,14 +384,14 @@ mod tests {
     async fn stream_ends_at_peer_close_frame() {
         let (mut client, mut server) = ws_pair().await;
         server.send(WsMsg::Close(None)).await.unwrap();
-        assert!(client.next().await.is_none());
+        assert!(next_frame(&mut client.0).await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn stream_decodes_binary_frame() {
         let (mut client, mut server) = ws_pair().await;
         server.send(WsMsg::binary(b"data".as_ref())).await.unwrap();
-        let frame = client.next().await.unwrap().unwrap();
+        let frame = client.recv().await.unwrap();
         assert!(matches!(frame, Frame::Binary(b) if b.as_ref() == b"data"));
     }
 
@@ -425,7 +399,7 @@ mod tests {
     async fn stream_invalid_packet_id_is_error() {
         let (mut client, mut server) = ws_pair().await;
         server.send(WsMsg::text("9bad")).await.unwrap();
-        client.next().await.unwrap().unwrap_err();
+        client.recv().await.unwrap_err();
     }
 
     #[tokio::test]
