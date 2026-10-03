@@ -80,6 +80,23 @@ jobs:
           tool: just
       - run: just test
 
+  smoke:
+    timeout-minutes: 30
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v7
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just smoke
+
   coverage:
     timeout-minutes: 30
     runs-on: ubuntu-latest
@@ -112,7 +129,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [deny, msrv, fmt, clippy, test, doc]
+    needs: [deny, msrv, fmt, clippy, test, smoke, doc]
     runs-on: ubuntu-latest
     permissions:
       contents: write
