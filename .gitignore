@@ -9,6 +9,3 @@ target/
 # Python
 .venv/
 __pycache__/
-
-# Agents
-CLAUDE.md
