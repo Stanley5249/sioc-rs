@@ -51,7 +51,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 
 # Proc-macro utilities
-darling = "0.23"
+darling = "0.24"
 heck = "0.5"
 proc-macro2 = "1"
 quote = "1"
