@@ -7,11 +7,12 @@ Always use `--workspace --all-targets` for cargo checks and tests. The only exce
 ```sh
 just lint
 just lint-py
+just lint-js
 just test
 just smoke
 ```
 
-Python test servers share the root `pyproject.toml`; `just smoke` runs the example clients against them.
+Python and TypeScript test servers share the root `pyproject.toml` and `package.json`; `just smoke` runs the example clients against them.
 
 ## Running examples
 

@@ -21,6 +21,11 @@ lint-py:
     uv run --locked ruff format --check
     uv run --locked pyrefly check
 
+# Format-check JS, JSON, YAML, and Markdown, and lint TypeScript test servers.
+lint-js:
+    bunx oxfmt --check
+    bunx oxlint
+
 # Run all targets and documentation examples.
 test:
     cargo test --locked --workspace --all-targets
@@ -44,9 +49,14 @@ coverage:
     cargo llvm-cov --locked --workspace --all-targets --lcov --output-path lcov.info
 
 # Run every smoke test against a real Socket.IO server.
-smoke: smoke-py
+smoke: smoke-py smoke-js
 
 # Run the quick-start client against the python-socketio server.
 smoke-py:
     cargo build --locked -p quick-start --example quick_start
     uv run --locked python examples/quick-start/server.py --client "cargo run --locked -p quick-start --example quick_start"
+
+# Run the quick-start client against the reference socket.io server.
+smoke-js:
+    cargo build --locked -p quick-start --example quick_start
+    bun examples/quick-start/server.ts --client cargo run --locked -p quick-start --example quick_start

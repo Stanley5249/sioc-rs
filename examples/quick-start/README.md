@@ -11,7 +11,7 @@ The example covers all four concepts from the main README:
 
 ## Prerequisites
 
-- uv
+- uv, or Bun for the reference JavaScript server
 
 ## Running
 
@@ -19,6 +19,7 @@ Start the server:
 
 ```bash
 uv run examples/quick-start/server.py
+# or: bun install && bun examples/quick-start/server.ts
 ```
 
 Then in a second terminal, run the client.
