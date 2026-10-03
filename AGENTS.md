@@ -5,6 +5,7 @@
 Always use `--workspace --all-targets` for cargo checks and tests. The only exception is the MSRV check, which omits `--all-targets` so dev-dependencies do not gate the supported compiler version.
 
 ```sh
+just ci
 just lint
 just lint-py
 just lint-js

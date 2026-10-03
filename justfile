@@ -3,6 +3,9 @@ set windows-shell := ["pwsh", "-NoLogo", "-NoProfile", "-Command"]
 
 quick_start := "cargo run --locked -p quick-start --example quick_start"
 
+# Run the local merge gate.
+ci: fmt-check lint lint-py lint-js test smoke doc deny
+
 # Format all sources.
 fmt: fmt-rs fmt-py fmt-js
 
