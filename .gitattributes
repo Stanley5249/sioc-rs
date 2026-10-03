@@ -1,2 +1,4 @@
+* text=auto eol=lf
+
 Cargo.lock merge=binary linguist-language=TOML linguist-generated=true -diff
 uv.lock    merge=binary linguist-language=TOML linguist-generated=true -diff
