@@ -7,8 +7,6 @@ updates:
       day: monday
       time: "09:00"
       timezone: Asia/Taipei
-    cooldown:
-      default-days: 0
     open-pull-requests-limit: 3
     commit-message:
       prefix: build
@@ -25,12 +23,12 @@ updates:
       day: monday
       time: "09:00"
       timezone: Asia/Taipei
-    cooldown:
-      default-days: 0
     open-pull-requests-limit: 3
     commit-message:
       prefix: ci
       include: scope
+    ignore:
+      - dependency-name: dtolnay/rust-toolchain
     groups:
       actions-minor-patch:
         patterns: ["*"]
@@ -43,8 +41,6 @@ updates:
       day: monday
       time: "09:00"
       timezone: Asia/Taipei
-    cooldown:
-      default-days: 0
     open-pull-requests-limit: 3
     commit-message:
       prefix: build
