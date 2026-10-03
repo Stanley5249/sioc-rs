@@ -30,10 +30,10 @@ async def join(sid: str, room: str, name: str) -> tuple[int]:
     Returns:
         A 1-tuple with the member count, including the bot.
     """
+    logger.info('server <- join      %s wants room "%s"', name, room)
     await sio.save_session(sid, {"room": room, "name": name})
     await sio.enter_room(sid, room)
     await sio.emit("notice", f"{name} joined {room}", room=room)
-    logger.info('server <- join      %s wants room "%s"', name, room)
     members = len(list(sio.manager.get_participants("/", room))) + 1
     return (members,)
 
@@ -46,9 +46,9 @@ async def message(sid: str, text: str) -> None:
         sid: Socket ID of the sender.
         text: Message text.
     """
+    logger.info("server <- message   %s", text)
     session = await sio.get_session(sid)
     room, name = session["room"], session["name"]
-    logger.info("server <- message   %s", text)
 
     await sio.emit("message", (name, text), room=room, skip_sid=sid)
     await sio.emit("message", (BOT, f'hi {name}, you said "{text}"'), room=room)
@@ -71,9 +71,10 @@ async def image(sid: str, name: str, data: bytes) -> None:
         name: File name of the image.
         data: Image bytes.
     """
-    session = await sio.get_session(sid)
     logger.info("server <- image     %s (%d bytes)", name, len(data))
-    await sio.emit("image", (name, data), room=session["room"])
+    session = await sio.get_session(sid)
+    room = session["room"]
+    await sio.emit("image", (name, data), room=room)
 
 
 async def serve_client(command: str) -> int:
@@ -103,7 +104,8 @@ async def serve_client(command: str) -> int:
     return code
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Serve forever, or serve one client command with `--client`."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--client", help="run this command, then exit with its code")
     args = parser.parse_args()
@@ -112,3 +114,7 @@ if __name__ == "__main__":
         raise SystemExit(asyncio.run(serve_client(args.client)))
     logger.info("listening on http://localhost:3000")
     uvicorn.run(app, host="localhost", port=3000, log_level="warning")
+
+
+if __name__ == "__main__":
+    main()

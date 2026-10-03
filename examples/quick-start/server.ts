@@ -29,27 +29,25 @@ interface SocketData {
 // broadcasts.
 const BOT = "bot";
 
-const httpServer = createServer();
-const io = new Server<ClientToServer, ServerToClient, Record<string, never>, SocketData>(
-  httpServer,
-);
+const app = createServer();
+const sio = new Server<ClientToServer, ServerToClient, Record<string, never>, SocketData>(app);
 
-io.on("connection", (socket) => {
+sio.on("connection", (socket) => {
   socket.on("join", async (room, name, ack) => {
+    console.info(`server <- join      ${name} wants room "${room}"`);
     socket.data = { room, name };
     await socket.join(room);
-    io.to(room).emit("notice", `${name} joined ${room}`);
-    console.info(`server <- join      ${name} wants room "${room}"`);
-    const sockets = await io.in(room).fetchSockets();
-    ack(sockets.length + 1);
+    sio.to(room).emit("notice", `${name} joined ${room}`);
+    const members = (await sio.in(room).fetchSockets()).length + 1;
+    ack(members);
   });
 
   socket.on("message", async (text) => {
-    const { room, name } = socket.data;
     console.info(`server <- message   ${text}`);
+    const { room, name } = socket.data;
 
     socket.to(room).emit("message", name, text);
-    io.to(room).emit("message", BOT, `hi ${name}, you said "${text}"`);
+    sio.to(room).emit("message", BOT, `hi ${name}, you said "${text}"`);
 
     const leave: unknown = await socket.timeout(5000).emitWithAck("confirm", "Leave the room?");
     if (typeof leave !== "boolean") {
@@ -65,13 +63,14 @@ io.on("connection", (socket) => {
 
   socket.on("image", (name, data) => {
     console.info(`server <- image     ${name} (${data.length} bytes)`);
-    io.to(socket.data.room).emit("image", name, data);
+    const { room } = socket.data;
+    sio.to(room).emit("image", name, data);
   });
 });
 
 function listen(): Promise<void> {
   return new Promise((resolve) => {
-    httpServer.listen(3000, "localhost", resolve);
+    app.listen(3000, "localhost", resolve);
   });
 }
 
@@ -85,7 +84,7 @@ async function serveClient(command: string[]): Promise<number> {
   await listen();
   const child = Bun.spawn(command, { stdio: ["inherit", "inherit", "inherit"] });
   const code = await child.exited;
-  await io.close();
+  await sio.close();
   return code;
 }
 
