@@ -1,7 +1,7 @@
 //! Engine.IO transport coordination.
 //!
 //! Manages the transport lifecycle: HTTP long-polling handshake, optional
-//! upgrade to WebSocket, and clean shutdown via cancellation.
+//! upgrade to WebSocket, and shutdown once the engine closes the transport channel.
 
 use crate::engine::FrameSender;
 use crate::error::TransportError;
@@ -9,7 +9,6 @@ use crate::packet::{Frame, Handshake};
 use crate::polling::PollingClient;
 use crate::websocket::{WebSocketConnector, WebSocketStream};
 use tokio::sync::{mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
 use url::Url;
 
 /// Selects which transport to use when opening an Engine.IO connection.
@@ -37,7 +36,6 @@ impl TransportStrategy {
         handshake_tx: oneshot::Sender<Handshake>,
         frame_tx: FrameSender,
         transport_rx: mpsc::Receiver<Frame>,
-        token: CancellationToken,
     ) -> Result<(), TransportError>
     where
         C: WebSocketConnector + Send + 'static,
@@ -45,14 +43,7 @@ impl TransportStrategy {
         match self {
             TransportStrategy::Polling => {
                 PollingClient(http_client)
-                    .transport(
-                        base_url,
-                        connector,
-                        handshake_tx,
-                        frame_tx,
-                        transport_rx,
-                        token,
-                    )
+                    .transport(base_url, connector, handshake_tx, frame_tx, transport_rx)
                     .await
             }
             TransportStrategy::WebSocket => {
@@ -94,7 +85,6 @@ mod tests {
         let (engine_tx, _engine_rx) = mpsc::channel(1);
         let frame_tx = FrameSender(engine_tx);
         let (_transport_tx, transport_rx) = mpsc::channel(1);
-        let token = CancellationToken::new();
 
         let result = TransportStrategy::WebSocket
             .run(
@@ -104,7 +94,6 @@ mod tests {
                 handshake_tx,
                 frame_tx,
                 transport_rx,
-                token,
             )
             .await;
 

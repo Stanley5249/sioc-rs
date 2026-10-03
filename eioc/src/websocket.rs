@@ -219,10 +219,13 @@ impl WebSocketStream {
         Ok(())
     }
 
-    /// Drives the WebSocket I/O loop until the stream or either channel closes.
+    /// Drives the WebSocket I/O loop until the engine closes `transport_rx`.
     ///
     /// When `handshake_tx` is `Some`, reads the first `Open` frame and forwards the handshake
     /// (direct WebSocket transport). When `None`, sends `Upgrade` immediately (polling upgrade path).
+    ///
+    /// If the server ends the stream first, drops `frame_tx` and discards outbound frames
+    /// until the engine closes `transport_rx`.
     ///
     /// # Errors
     ///
@@ -256,6 +259,11 @@ impl WebSocketStream {
                 result = self.try_next() => {
                     let Some(frame) = result? else {
                         tracing::debug!("websocket stream closed");
+
+                        // The engine may queue frames before it learns the session
+                        // ended, and the closed stream cannot send them.
+                        drop(frame_tx);
+                        while transport_rx.recv().await.is_some() {}
                         break;
                     };
 
@@ -518,17 +526,35 @@ mod tests {
             while let Some(Ok(_)) = server.next().await {}
         });
         let (engine_tx, mut engine_rx) = mpsc::channel(4);
-        // Keep transport_tx alive so the select always drains the WS stream first.
         let (transport_tx, transport_rx) = mpsc::channel::<Frame>(4);
-        client
-            .transport(None, FrameSender(engine_tx), transport_rx)
-            .await
-            .unwrap();
-        drop(transport_tx);
+        let transport = tokio::spawn(client.transport(None, FrameSender(engine_tx), transport_rx));
         let action = engine_rx.recv().await.unwrap();
         assert!(
             matches!(action, crate::engine::EngineAction::Transport(Frame::Packet(Packet::Message(m))) if m == "data")
         );
+        drop(transport_tx);
+        transport.await.unwrap().unwrap();
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn transport_discards_outbound_after_server_close() {
+        let (client, mut server) = ws_pair().await;
+        let server_task = tokio::spawn(async move {
+            let _ = server.next().await; // consume Upgrade
+            server.close(None).await.unwrap();
+            while let Some(Ok(_)) = server.next().await {}
+        });
+        let (engine_tx, mut engine_rx) = mpsc::channel(4);
+        let (transport_tx, transport_rx) = mpsc::channel::<Frame>(4);
+        let transport = tokio::spawn(client.transport(None, FrameSender(engine_tx), transport_rx));
+        assert!(engine_rx.recv().await.is_none());
+        transport_tx
+            .send(Frame::Packet(Packet::Close))
+            .await
+            .unwrap();
+        drop(transport_tx);
+        transport.await.unwrap().unwrap();
         server_task.await.unwrap();
     }
 

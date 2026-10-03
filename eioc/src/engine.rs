@@ -7,7 +7,6 @@ use crate::websocket::WebSocketConnector;
 use futures_util::{Sink, SinkExt, TryFutureExt};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
 use url::Url;
 
 /// Data exchanged between the engine task and its producers
@@ -90,9 +89,7 @@ where
 
     let (handshake_tx, handshake_rx) = oneshot::channel();
 
-    let token = CancellationToken::new();
-
-    let eio_future = engine_io(sink, engine_rx, transport_tx, handshake_rx, token.clone());
+    let eio_future = engine_io(sink, engine_rx, transport_tx, handshake_rx);
 
     let transport_future = strategy.run(
         url,
@@ -101,7 +98,6 @@ where
         handshake_tx,
         frame_tx,
         transport_rx,
-        token,
     );
 
     tokio::try_join!(
@@ -136,15 +132,11 @@ async fn engine_io<S>(
     mut engine_rx: mpsc::Receiver<EngineAction>,
     transport_tx: mpsc::Sender<Frame>,
     handshake_rx: oneshot::Receiver<Handshake>,
-    token: CancellationToken,
 ) -> Result<(), EngineError>
 where
     S: Sink<Message> + Unpin,
     S::Error: std::error::Error + Send + Sync + 'static,
 {
-    // Ensure the transport shuts down whenever the engine exits, regardless of the reason.
-    let _guard = token.drop_guard();
-
     let handshake = handshake_rx.await?;
     tracing::debug!(sid = %handshake.sid, "<- OPEN");
 
@@ -227,7 +219,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll};
     use tokio::sync::{mpsc, oneshot};
-    use tokio_util::sync::CancellationToken;
 
     struct FailingSink;
 
@@ -294,14 +285,7 @@ mod tests {
             S::Error: std::error::Error + Send + Sync + 'static,
         {
             let transport_rx = self.transport_rx;
-            let result = engine_io(
-                sink,
-                self.rx,
-                self.transport_tx,
-                self.handshake_rx,
-                CancellationToken::new(),
-            )
-            .await;
+            let result = engine_io(sink, self.rx, self.transport_tx, self.handshake_rx).await;
             (result, transport_rx)
         }
     }
@@ -357,14 +341,7 @@ mod tests {
         let (transport_tx, _) = mpsc::channel(4);
         let (handshake_tx, handshake_rx) = oneshot::channel::<Handshake>();
         drop(handshake_tx);
-        let result = engine_io(
-            sink::drain(),
-            rx,
-            transport_tx,
-            handshake_rx,
-            CancellationToken::new(),
-        )
-        .await;
+        let result = engine_io(sink::drain(), rx, transport_tx, handshake_rx).await;
         assert!(matches!(result, Err(EngineError::RecvHandshake(_))));
     }
 
@@ -382,14 +359,7 @@ mod tests {
     async fn engine_io_engine_channel_closed_exits_ok() {
         let s = setup();
         drop(s.tx);
-        let result = engine_io(
-            sink::drain(),
-            s.rx,
-            s.transport_tx,
-            s.handshake_rx,
-            CancellationToken::new(),
-        )
-        .await;
+        let result = engine_io(sink::drain(), s.rx, s.transport_tx, s.handshake_rx).await;
         result.unwrap();
     }
 
@@ -410,14 +380,7 @@ mod tests {
         let s = setup();
         drop(s.transport_rx);
         s.tx.send(EngineAction::Sink(Message::Close)).await.unwrap();
-        let result = engine_io(
-            sink::drain(),
-            s.rx,
-            s.transport_tx,
-            s.handshake_rx,
-            CancellationToken::new(),
-        )
-        .await;
+        let result = engine_io(sink::drain(), s.rx, s.transport_tx, s.handshake_rx).await;
         result.unwrap();
     }
 
@@ -546,14 +509,7 @@ mod tests {
             })
             .unwrap();
         // tx is kept alive so recv() never returns None; heartbeat fires after 2ms.
-        let result = engine_io(
-            sink::drain(),
-            rx,
-            transport_tx,
-            handshake_rx,
-            CancellationToken::new(),
-        )
-        .await;
+        let result = engine_io(sink::drain(), rx, transport_tx, handshake_rx).await;
         drop(tx);
         assert!(matches!(result, Err(EngineError::HeartbeatTimeout(_))));
     }
