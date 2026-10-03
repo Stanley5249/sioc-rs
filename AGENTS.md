@@ -30,6 +30,8 @@ Re-export public surface through `prelude`. Never put `Result` or `Error` aliase
 
 Variable names should be descriptive and avoid unnecessary abbreviations. Prefer `packet` and `event` over `pkt` and `evt`. For short-lived variables, single-letter names like `p` and `e` are acceptable.
 
+Tasks shut down by half-close: a task stops by dropping its senders and finishes only when its receivers return `None`. A send never fails during a graceful shutdown, so every send error is a real error.
+
 ## Commits
 
 Use Conventional Commits; `cliff.toml` groups release notes by type, so pick the type a reader of the notes expects.
