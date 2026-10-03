@@ -198,10 +198,6 @@ impl SocketsMap {
         self.0.clear();
     }
 
-    fn take(&mut self) -> HashMap<ByteString, Socket> {
-        std::mem::take(&mut self.0)
-    }
-
     fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -324,43 +320,45 @@ impl Manager {
         }
     }
 
-    /// Runs the socket routing loop until all namespaces disconnect.
+    /// Routes packets until the engine ends the session.
+    ///
+    /// Sends [`Message::Close`] once every namespace has disconnected, then keeps
+    /// reading until the engine answers with its own [`Message::Close`], so the
+    /// engine never sends into a closed inbox.
     ///
     /// # Errors
     ///
     /// Returns an error if the engine or a namespace channel fails.
     #[tracing::instrument(skip_all, err)]
     pub async fn socket_io(mut self, tx: mpsc::Sender<Message>) -> Result<(), ManagerError> {
-        let result = self.run(&tx).await;
+        let mut closing = false;
 
-        if !self.sockets.is_empty() {
-            for (ns, _socket) in self.sockets.take() {
-                tracing::warn!(%ns, "namespace still connected after closing manager");
-
-                tx.send(Message::Text(Packet::Disconnect.encode(&ns).into()))
-                    .await?;
-            }
-            tx.send(Message::Close).await?;
-        }
-
-        result
-    }
-
-    async fn run(&mut self, tx: &mpsc::Sender<Message>) -> Result<(), ManagerError> {
-        while let Some(directive) = self.rx.recv().await {
-            match directive {
-                ManagerAction::Socket(Ns(ns, packet)) => {
-                    self.dispatch_directive(tx, ns, packet).await?;
+        while let Some(action) = self.rx.recv().await {
+            match action {
+                // The session is ending, so late directives have nowhere to go.
+                ManagerAction::Socket(_) if closing => {}
+                ManagerAction::Socket(Ns(ns, directive)) => {
+                    self.dispatch_directive(&tx, ns, directive).await?;
                 }
-                ManagerAction::Engine(message) => {
-                    self.route_message(tx, message).await?;
+                ManagerAction::Engine(Message::Text(text)) => {
+                    self.route_text_message(text, &tx).await?;
+                }
+                ManagerAction::Engine(Message::Binary(attachment)) => {
+                    self.route_binary_message(attachment).await?;
+                }
+                ManagerAction::Engine(Message::Close) => {
+                    tracing::debug!("closing all namespaces");
+                    self.sockets.close();
+                    break;
                 }
             }
-            if self.sockets.is_empty() {
+
+            if self.sockets.is_empty() && !closing {
+                closing = true;
                 tx.send(Message::Close).await?;
-                break;
             }
         }
+
         Ok(())
     }
 
@@ -448,29 +446,6 @@ impl Manager {
             tracing::trace!(%ns, %packet, "-> packet");
             for message in messages {
                 message_tx.send(message).await?;
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn route_message(
-        &mut self,
-        message_tx: &mpsc::Sender<Message>,
-        message: Message,
-    ) -> Result<(), ManagerError> {
-        match message {
-            Message::Text(text) => {
-                self.route_text_message(text, message_tx).await?;
-            }
-
-            Message::Binary(attachment) => {
-                self.route_binary_message(attachment).await?;
-            }
-
-            Message::Close => {
-                tracing::debug!("closing all namespaces");
-                self.sockets.close();
             }
         }
 
@@ -841,6 +816,10 @@ mod tests {
             Signal::Disconnect
         ));
         assert!(matches!(engine_rx.recv().await.unwrap(), Message::Close));
+        manager_tx
+            .send(ManagerAction::Engine(Message::Close))
+            .await
+            .unwrap();
         handle.await.unwrap().unwrap();
     }
 
@@ -1134,11 +1113,11 @@ mod tests {
         ));
     }
 
-    /// `Message::Close` clears all sockets and the manager exits cleanly.
+    /// The engine's `Message::Close` ends the stream: sockets close and the manager exits.
     #[tokio::test]
-    async fn server_close_message_clears_sockets() {
+    async fn engine_close_ends_manager() {
         let (manager_tx, mut engine_rx, handle) = setup_manager();
-        let _socket_rx = open_namespace(&manager_tx, "/").await;
+        let mut socket_rx = open_namespace(&manager_tx, "/").await;
         engine_rx.recv().await.unwrap();
 
         manager_tx
@@ -1146,28 +1125,38 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(matches!(engine_rx.recv().await.unwrap(), Message::Close));
-        drop(manager_tx);
         handle.await.unwrap().unwrap();
+        assert!(socket_rx.recv().await.is_none());
+        assert!(engine_rx.recv().await.is_none());
     }
 
-    /// Manager cleans up still-connected namespaces when the channel is dropped.
+    /// Directives that arrive after the manager starts closing are ignored.
     #[tokio::test]
-    async fn socket_io_cleanup_on_channel_close() {
+    async fn late_directive_while_closing_is_ignored() {
         let (manager_tx, mut engine_rx, handle) = setup_manager();
-        let _socket_rx = open_namespace(&manager_tx, "/other").await;
+        let _socket_rx = open_namespace(&manager_tx, "/").await;
         engine_rx.recv().await.unwrap();
+        server_connect(&manager_tx).await;
 
-        drop(manager_tx);
-
-        match engine_rx.recv().await.unwrap() {
-            Message::Text(text) => {
-                assert_eq!(&*text, "1/other,");
-            }
-            other => panic!("expected Disconnect text, got {other:?}"),
-        }
+        manager_tx
+            .send(ManagerAction::Engine(Message::Text(
+                ByteString::from_static("1"),
+            )))
+            .await
+            .unwrap();
         assert!(matches!(engine_rx.recv().await.unwrap(), Message::Close));
+
+        manager_tx
+            .send(ManagerAction::Socket(Ns("/".into(), Directive::Disconnect)))
+            .await
+            .unwrap();
+        manager_tx
+            .send(ManagerAction::Engine(Message::Close))
+            .await
+            .unwrap();
+
         handle.await.unwrap().unwrap();
+        assert!(engine_rx.recv().await.is_none());
     }
 
     /// Sending to a closed socket channel returns `SendSocket`.

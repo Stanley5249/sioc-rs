@@ -12,8 +12,8 @@ use url::Url;
 /// Drives the engine protocol and transport concurrently until the session ends.
 ///
 /// `sink` receives inbound [`Message`]s, and `message_rx` carries outbound ones.
-/// Sending [`Message::Close`] or dropping the sender closes the session. When the
-/// server closes it, `sink` receives [`Message::Close`].
+/// Sending [`Message::Close`] or dropping the sender closes the session. Either
+/// way, `sink` receives [`Message::Close`] as the end of the stream.
 ///
 /// Returns once the transport has finished and the sender of `message_rx` is dropped.
 ///
@@ -77,20 +77,23 @@ impl Heartbeat {
     fn reset(&mut self) {
         self.deadline = Instant::now() + self.ping_window;
     }
-}
 
-/// The side that ended the session.
-#[derive(Debug, PartialEq, Eq)]
-enum Closed {
-    ByClient,
-    ByServer,
+    /// Receives the next frame, failing once the server misses its ping window.
+    async fn recv(
+        &self,
+        frame_rx: &mut mpsc::Receiver<Frame>,
+    ) -> Result<Option<Frame>, EngineError> {
+        tokio::time::timeout_at(self.deadline, frame_rx.recv())
+            .await
+            .map_err(|_| EngineError::HeartbeatTimeout)
+    }
 }
 
 #[tracing::instrument(skip_all, err)]
 async fn engine_io<S>(
-    mut sink: S,
-    mut frame_rx: mpsc::Receiver<Frame>,
-    mut message_rx: mpsc::Receiver<Message>,
+    sink: S,
+    frame_rx: mpsc::Receiver<Frame>,
+    message_rx: mpsc::Receiver<Message>,
     transport_tx: mpsc::Sender<Frame>,
     handshake_rx: oneshot::Receiver<Handshake>,
 ) -> Result<(), EngineError>
@@ -101,89 +104,97 @@ where
     let handshake = handshake_rx.await?;
     tracing::debug!(sid = %handshake.sid, "<- OPEN");
 
-    let mut heartbeat = Heartbeat::new(handshake.ping_window());
+    let (pong_tx, pong_rx) = mpsc::channel(1);
 
-    // The session takes `transport_tx` and drops it on return, which tells the
-    // transport to finish.
-    let closed = session(
-        &mut sink,
-        &mut frame_rx,
-        &mut message_rx,
-        transport_tx,
-        &mut heartbeat,
-    )
-    .await?;
-
-    if closed == Closed::ByServer {
-        // The server may end the transport without a Socket.IO disconnect.
-        send_sink(&mut sink, Message::Close).await?;
-    }
-
-    // Wait for both producers to hang up, so neither sends into a closed
-    // channel during shutdown.
-    let transport_finished = async { while frame_rx.recv().await.is_some() {} };
-    tokio::time::timeout_at(heartbeat.deadline, transport_finished)
-        .await
-        .map_err(|_| EngineError::HeartbeatTimeout)?;
-    while message_rx.recv().await.is_some() {}
+    // Each direction runs on its own, so a slow consumer on one side never
+    // stalls the other.
+    tokio::try_join!(
+        inbound(sink, frame_rx, pong_tx, handshake.ping_window()),
+        outbound(message_rx, pong_rx, transport_tx),
+    )?;
 
     Ok(())
 }
 
-/// Exchanges frames and messages until either side closes the session.
-async fn session<S>(
-    sink: &mut S,
-    frame_rx: &mut mpsc::Receiver<Frame>,
-    message_rx: &mut mpsc::Receiver<Message>,
-    transport_tx: mpsc::Sender<Frame>,
-    heartbeat: &mut Heartbeat,
-) -> Result<Closed, EngineError>
+/// Forwards server frames to `sink` until the server or the transport ends the session.
+///
+/// Sends [`Message::Close`] to `sink` as the end of the stream, whichever side
+/// closed, then waits for the transport to finish.
+async fn inbound<S>(
+    mut sink: S,
+    mut frame_rx: mpsc::Receiver<Frame>,
+    pong_tx: mpsc::Sender<Frame>,
+    ping_window: std::time::Duration,
+) -> Result<(), EngineError>
 where
     S: Sink<Message> + Unpin,
     S::Error: std::error::Error + Send + Sync + 'static,
 {
-    loop {
-        tokio::select! {
-            () = tokio::time::sleep_until(heartbeat.deadline) => {
-                return Err(EngineError::HeartbeatTimeout);
-            }
+    let mut heartbeat = Heartbeat::new(ping_window);
 
-            frame = frame_rx.recv() => match frame {
-                Some(Frame::Packet(packet)) => {
-                    tracing::trace!(%packet, "<- packet");
+    while let Some(frame) = heartbeat.recv(&mut frame_rx).await? {
+        match frame {
+            Frame::Packet(packet) => {
+                tracing::trace!(%packet, "<- packet");
 
-                    match packet {
-                        Packet::Close => {
-                            tracing::debug!("server closed");
+                match packet {
+                    Packet::Close => {
+                        tracing::debug!("server closed");
 
-                            return Ok(Closed::ByServer);
-                        }
-                        Packet::Ping(payload) => {
-                            tracing::trace!("-> PONG");
-
-                            transport_tx.send(Packet::Pong(payload).into()).await?;
-
-                            heartbeat.reset();
-                        }
-                        Packet::Message(payload) => {
-                            send_sink(sink, Message::Text(payload)).await?;
-                        }
-                        Packet::Noop => {}
-
-                        packet => return Err(EngineError::Server(packet)),
+                        break;
                     }
-                }
-                Some(Frame::Binary(payload)) => {
-                    tracing::trace!(bytes = payload.len(), "<- binary");
+                    Packet::Ping(payload) => {
+                        tracing::trace!("-> PONG");
 
-                    send_sink(sink, Message::Binary(payload)).await?;
-                }
-                None => {
-                    tracing::debug!("transport closed");
+                        pong_tx.send(Packet::Pong(payload).into()).await?;
 
-                    return Ok(Closed::ByServer);
+                        heartbeat.reset();
+                    }
+                    Packet::Message(payload) => {
+                        send_sink(&mut sink, Message::Text(payload)).await?;
+                    }
+                    Packet::Noop => {}
+
+                    packet => return Err(EngineError::Server(packet)),
                 }
-            },
+            }
+            Frame::Binary(payload) => {
+                tracing::trace!(bytes = payload.len(), "<- binary");
+
+                send_sink(&mut sink, Message::Binary(payload)).await?;
+            }
+        }
+    }
+
+    // Closing the pong channel ends the outbound loop if it is still running.
+    drop(pong_tx);
+
+    send_sink(&mut sink, Message::Close).await?;
+
+    while heartbeat.recv(&mut frame_rx).await?.is_some() {}
+
+    Ok(())
+}
+
+/// Forwards outbound messages and pongs to the transport until either side ends the session.
+///
+/// Then closes the transport channel and drains both inputs until their senders hang up.
+async fn outbound(
+    mut message_rx: mpsc::Receiver<Message>,
+    mut pong_rx: mpsc::Receiver<Frame>,
+    transport_tx: mpsc::Sender<Frame>,
+) -> Result<(), EngineError> {
+    loop {
+        // Both branches feed `transport_tx`, so waiting on it only applies
+        // backpressure to this direction.
+        let frame = tokio::select! {
+            pong = pong_rx.recv() => {
+                let Some(pong) = pong else {
+                    break;
+                };
+
+                pong
+            }
 
             message = message_rx.recv() => match message {
                 Some(Message::Text(bytes)) => {
@@ -191,12 +202,12 @@ where
 
                     tracing::trace!(%packet, "-> MESSAGE");
 
-                    transport_tx.send(packet.into()).await?;
+                    packet.into()
                 }
                 Some(Message::Binary(bytes)) => {
                     tracing::trace!(bytes = bytes.len(), "-> binary");
 
-                    transport_tx.send(bytes.into()).await?;
+                    bytes.into()
                 }
                 Some(Message::Close) | None => {
                     tracing::debug!("client closed");
@@ -204,11 +215,26 @@ where
 
                     transport_tx.send(Packet::Close.into()).await?;
 
-                    return Ok(Closed::ByClient);
+                    break;
                 }
             },
-        }
+        };
+
+        transport_tx.send(frame).await?;
     }
+
+    drop(transport_tx);
+
+    // Drain both inputs together, because the inbound loop may be waiting to
+    // send a pong while the upper layer is still finishing.
+    tokio::join!(drain(&mut message_rx), drain(&mut pong_rx));
+
+    Ok(())
+}
+
+/// Receives and discards items until every sender hangs up.
+async fn drain<T>(rx: &mut mpsc::Receiver<T>) {
+    while rx.recv().await.is_some() {}
 }
 
 async fn send_sink<S>(sink: &mut S, message: Message) -> Result<(), EngineError>
@@ -229,8 +255,10 @@ mod tests {
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll};
+    use std::time::Duration;
     use tokio::sync::{mpsc, oneshot};
     use tokio::task::JoinHandle;
+    use tokio_util::sync::PollSender;
 
     struct FailingSink;
 
@@ -377,7 +405,7 @@ mod tests {
         let (result, sent) = h.finish().await;
         result.unwrap();
         assert!(matches!(sent[..], [Frame::Packet(Packet::Close)]));
-        assert!(store.lock().unwrap().is_empty());
+        assert!(matches!(store.lock().unwrap()[..], [Message::Close]));
     }
 
     #[tokio::test]
@@ -434,6 +462,29 @@ mod tests {
         drop(frame_tx);
         drop(message_tx);
         engine.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn engine_io_outbound_flows_while_sink_is_full() {
+        let (sink_tx, _sink_rx) = mpsc::channel(1);
+        let h = spawn(PollSender::new(sink_tx), make_handshake());
+        for text in ["fills", "blocks"] {
+            h.frame_tx
+                .send(Packet::Message(text.into()).into())
+                .await
+                .unwrap();
+        }
+        h.message_tx
+            .send(Message::Text("out".into()))
+            .await
+            .unwrap();
+        let Harness {
+            mut transport_rx, ..
+        } = h;
+        let frame = tokio::time::timeout(Duration::from_secs(5), transport_rx.recv())
+            .await
+            .unwrap();
+        assert!(matches!(frame, Some(Frame::Packet(Packet::Message(m))) if m == "out"));
     }
 
     #[tokio::test]

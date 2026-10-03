@@ -4,6 +4,7 @@ use crate::ENGINE_IO_VERSION;
 use crate::error::{TransportError, WebSocketError};
 use crate::packet::{Frame, Handshake, PROBE, Packet};
 use bytestring::ByteString;
+use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{Sink, SinkExt, Stream, StreamExt, TryStreamExt};
 use std::future::Future;
 use std::pin::Pin;
@@ -13,6 +14,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Error as TungsteniteError;
 use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
 use tokio_tungstenite::{MaybeTlsStream, connect_async};
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use url::Url;
 
@@ -218,13 +220,15 @@ impl WebSocketStream {
         Ok(())
     }
 
-    /// Drives the WebSocket I/O loop until the engine closes `transport_rx`.
+    /// Drives the WebSocket I/O until the engine closes `transport_rx` and the stream ends.
     ///
     /// When `handshake_tx` is `Some`, reads the first `Open` frame and forwards the handshake
     /// (direct WebSocket transport). When `None`, sends `Upgrade` immediately (polling upgrade path).
     ///
-    /// If the server ends the stream first, drops `frame_tx` and discards outbound frames
-    /// until the engine closes `transport_rx`.
+    /// Inbound and outbound frames flow independently. When the engine closes
+    /// `transport_rx`, the socket closes and inbound frames flow until the server
+    /// answers. If the server ends the stream first, drops `frame_tx` and discards
+    /// outbound frames until the engine closes `transport_rx`.
     ///
     /// # Errors
     ///
@@ -234,7 +238,7 @@ impl WebSocketStream {
         mut self,
         handshake_tx: Option<oneshot::Sender<Handshake>>,
         frame_tx: mpsc::Sender<Frame>,
-        mut transport_rx: mpsc::Receiver<Frame>,
+        transport_rx: mpsc::Receiver<Frame>,
     ) -> Result<(), TransportError> {
         if let Some(handshake_tx) = handshake_tx {
             let handshake = match self.recv().await? {
@@ -253,37 +257,69 @@ impl WebSocketStream {
             self.send(Packet::Upgrade.into()).await?;
         }
 
-        loop {
-            tokio::select! {
-                result = self.try_next() => {
-                    let Some(frame) = result? else {
-                        tracing::debug!("websocket stream closed");
+        let (sink, stream) = self.split();
+        let stream_closed = CancellationToken::new();
 
-                        // The engine may queue frames before it learns the session
-                        // ended, and the closed stream cannot send them.
-                        drop(frame_tx);
-                        while transport_rx.recv().await.is_some() {}
-                        break;
-                    };
-
-                    frame_tx.send(frame).await?;
-                }
-
-                option = transport_rx.recv() => {
-                    let Some(frame) = option else {
-                        tracing::debug!("transport channel closed");
-                        break;
-                    };
-
-                    self.send(frame).await?;
-                }
-            };
-        }
-
-        self.close().await?;
+        // Each direction runs on its own, so a slow engine never stalls
+        // outbound frames and a slow socket never stalls inbound ones.
+        tokio::try_join!(
+            inbound(stream, frame_tx, stream_closed.clone()),
+            outbound(sink, transport_rx, stream_closed),
+        )?;
 
         Ok(())
     }
+}
+
+/// Forwards server frames to the engine until the stream ends.
+///
+/// Returning drops `frame_tx`, which tells the engine the transport has finished.
+async fn inbound(
+    mut stream: SplitStream<WebSocketStream>,
+    frame_tx: mpsc::Sender<Frame>,
+    stream_closed: CancellationToken,
+) -> Result<(), TransportError> {
+    let _guard = stream_closed.drop_guard();
+
+    while let Some(frame) = stream.try_next().await? {
+        frame_tx.send(frame).await?;
+    }
+
+    tracing::debug!("websocket stream closed");
+
+    Ok(())
+}
+
+/// Sends engine frames until the engine closes `transport_rx`, then closes the socket.
+///
+/// If the stream ends first, discards frames until the engine closes `transport_rx`,
+/// because the closed socket cannot send them.
+async fn outbound(
+    mut sink: SplitSink<WebSocketStream, Frame>,
+    mut transport_rx: mpsc::Receiver<Frame>,
+    stream_closed: CancellationToken,
+) -> Result<(), TransportError> {
+    loop {
+        tokio::select! {
+            frame = transport_rx.recv() => {
+                let Some(frame) = frame else {
+                    tracing::debug!("transport channel closed");
+                    break;
+                };
+
+                sink.send(frame).await?;
+            }
+
+            () = stream_closed.cancelled() => {
+                while transport_rx.recv().await.is_some() {}
+                break;
+            }
+        }
+    }
+
+    sink.close().await?;
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -552,6 +588,28 @@ mod tests {
         drop(transport_tx);
         transport.await.unwrap().unwrap();
         server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn transport_sends_outbound_while_engine_is_full() {
+        let (client, mut server) = ws_pair().await;
+        let (frame_tx, _frame_rx) = mpsc::channel(1);
+        let (transport_tx, transport_rx) = mpsc::channel::<Frame>(4);
+        tokio::spawn(client.transport(None, frame_tx, transport_rx));
+        let _ = server.next().await; // consume Upgrade
+        for text in ["4fills", "4blocks"] {
+            server.send(WsMsg::text(text)).await.unwrap();
+        }
+        transport_tx
+            .send(Frame::Packet(Packet::Message("out".into())))
+            .await
+            .unwrap();
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), server.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(msg.to_text().unwrap(), "4out");
     }
 
     #[tokio::test]
