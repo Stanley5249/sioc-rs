@@ -5,8 +5,8 @@
 Always use `--workspace --all-targets` for cargo checks and tests. The only exception is the MSRV check, which omits `--all-targets` so dev-dependencies do not gate the supported compiler version.
 
 ```sh
-just check
-just ci
+just lint
+just test
 ```
 
 ## Running examples
