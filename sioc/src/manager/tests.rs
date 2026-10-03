@@ -44,7 +44,7 @@ async fn assert_quiet(client_message_rx: &mut mpsc::Receiver<Message>) {
 fn event(payload: &'static str, ack_tx: Option<oneshot::Sender<DynAck>>) -> Directive {
     Directive::Event {
         payload: ByteString::from_static(payload),
-        tx: ack_tx,
+        ack_tx,
         attachments: None,
     }
 }
@@ -265,7 +265,7 @@ async fn binary_event_directive_sends_attachments() {
 
     let directive = Directive::Event {
         payload: ByteString::from_static(r#"["img"]"#),
-        tx: None,
+        ack_tx: None,
         attachments: Some(vec![Bytes::from_static(b"\x01\x02")]),
     };
     directive_tx.send(directive).await.unwrap();

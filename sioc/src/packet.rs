@@ -202,10 +202,10 @@ impl<E> Signal<E> {
 pub enum Directive {
     /// Closes the namespace.
     Disconnect,
-    /// Emits an event; if `tx` is set, an ack ID is assigned and the response routed to it.
+    /// Emits an event; if `ack_tx` is set, an ack ID is assigned and the response routed to it.
     Event {
         payload: ByteString,
-        tx: Option<oneshot::Sender<DynAck>>,
+        ack_tx: Option<oneshot::Sender<DynAck>>,
         attachments: Option<Vec<Bytes>>,
     },
     /// Acknowledges a previously received event.

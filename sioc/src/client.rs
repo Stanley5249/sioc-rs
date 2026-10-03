@@ -440,7 +440,7 @@ mod tests {
             Ok((
                 Directive::Event {
                     payload: r#"["test"]"#.into(),
-                    tx: None,
+                    ack_tx: None,
                     attachments: None,
                 },
                 (),

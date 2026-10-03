@@ -163,7 +163,7 @@ async fn send_directive(
     match directive {
         Directive::Event {
             payload,
-            tx: ack_tx,
+            ack_tx,
             attachments,
         } => {
             // Register before sending, so the server's answer always finds it.

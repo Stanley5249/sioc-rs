@@ -154,7 +154,7 @@ where
         Ok((
             Directive::Event {
                 payload: payload.into(),
-                tx: None,
+                ack_tx: None,
                 attachments: None,
             },
             (),
@@ -170,15 +170,15 @@ where
     type Output = AckHandle<A>;
 
     fn prepare(self) -> Result<(Directive, AckHandle<A>), PayloadError> {
-        let (tx, rx) = oneshot::channel();
+        let (ack_tx, ack_rx) = oneshot::channel();
         let payload = event_to_json(&self)?.into();
         Ok((
             Directive::Event {
                 payload,
-                tx: Some(tx),
+                ack_tx: Some(ack_tx),
                 attachments: None,
             },
-            AckHandle::new(rx),
+            AckHandle::new(ack_rx),
         ))
     }
 }
@@ -196,7 +196,7 @@ where
         Ok((
             Directive::Event {
                 payload,
-                tx: None,
+                ack_tx: None,
                 attachments: Some(builder.finish()),
             },
             (),
@@ -213,16 +213,16 @@ where
     type Output = AckHandle<A>;
 
     fn prepare(self) -> Result<(Directive, AckHandle<A>), PayloadError> {
-        let (tx, rx) = oneshot::channel();
+        let (ack_tx, ack_rx) = oneshot::channel();
         let mut builder = AttachmentsBuilder::new();
         let payload = event_to_json(&self(&mut builder))?.into();
         Ok((
             Directive::Event {
                 payload,
-                tx: Some(tx),
+                ack_tx: Some(ack_tx),
                 attachments: Some(builder.finish()),
             },
-            AckHandle::new(rx),
+            AckHandle::new(ack_rx),
         ))
     }
 }
@@ -380,14 +380,14 @@ mod tests {
         let (directive, ()) = Ping.prepare().unwrap();
         let Directive::Event {
             payload,
-            tx,
+            ack_tx,
             attachments,
         } = directive
         else {
             panic!("expected Event directive");
         };
         assert_eq!(&payload[..], r#"["ping"]"#);
-        assert!(tx.is_none());
+        assert!(ack_tx.is_none());
         assert!(attachments.is_none());
     }
 
@@ -396,14 +396,14 @@ mod tests {
         let (directive, _handle) = PingWithAck.prepare().unwrap();
         let Directive::Event {
             payload,
-            tx,
+            ack_tx,
             attachments,
         } = directive
         else {
             panic!("expected Event directive");
         };
         assert_eq!(&payload[..], r#"["ping"]"#);
-        assert!(tx.is_some());
+        assert!(ack_tx.is_some());
         assert!(attachments.is_none());
     }
 
@@ -416,14 +416,14 @@ mod tests {
         let (directive, ()) = closure.prepare().unwrap();
         let Directive::Event {
             payload,
-            tx,
+            ack_tx,
             attachments,
         } = directive
         else {
             panic!("expected Event directive");
         };
         assert_eq!(&payload[..], r#"["ping"]"#);
-        assert!(tx.is_none());
+        assert!(ack_tx.is_none());
         let att = attachments.expect("expected attachments");
         assert_eq!(att.len(), 1);
     }
@@ -459,14 +459,14 @@ mod tests {
         let (directive, _handle) = closure.prepare().unwrap();
         let Directive::Event {
             payload,
-            tx,
+            ack_tx,
             attachments,
         } = directive
         else {
             panic!("expected Event directive");
         };
         assert_eq!(&payload[..], r#"["ping"]"#);
-        assert!(tx.is_some());
+        assert!(ack_tx.is_some());
         let att = attachments.expect("expected attachments");
         assert_eq!(att.len(), 1);
     }
