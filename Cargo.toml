@@ -29,7 +29,7 @@ tokio = { version = "1", default-features = false, features = [
 tokio-util = "0.7"
 
 # HTTP and WebSocket
-base64 = "0.22"
+base64 = "0.23"
 http = "1"
 reqwest = { version = "0.13", default-features = false, features = ["charset"] }
 tokio-tungstenite = { version = "0.30", features = ["url"] }
