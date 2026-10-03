@@ -33,8 +33,8 @@ impl TransportStrategy {
         http_client: reqwest::Client,
         connector: C,
         handshake_tx: oneshot::Sender<Handshake>,
-        frame_tx: mpsc::Sender<Frame>,
-        transport_rx: mpsc::Receiver<Frame>,
+        server_frame_tx: mpsc::Sender<Frame>,
+        client_frame_rx: mpsc::Receiver<Frame>,
     ) -> Result<(), TransportError>
     where
         C: WebSocketConnector + Send + 'static,
@@ -42,14 +42,20 @@ impl TransportStrategy {
         match self {
             TransportStrategy::Polling => {
                 PollingClient(http_client)
-                    .transport(base_url, connector, handshake_tx, frame_tx, transport_rx)
+                    .transport(
+                        base_url,
+                        connector,
+                        handshake_tx,
+                        server_frame_tx,
+                        client_frame_rx,
+                    )
                     .await
             }
             TransportStrategy::WebSocket => {
                 let stream = WebSocketStream::connect(base_url, None, connector).await?;
 
                 stream
-                    .transport(Some(handshake_tx), frame_tx, transport_rx)
+                    .transport(Some(handshake_tx), server_frame_tx, client_frame_rx)
                     .await?;
 
                 Ok(())
@@ -80,8 +86,8 @@ mod tests {
         let http_client = reqwest::Client::new();
         let connector = async |_| Err(TungsteniteError::ConnectionClosed);
         let (handshake_tx, _handshake_rx) = oneshot::channel();
-        let (frame_tx, _frame_rx) = mpsc::channel(1);
-        let (_transport_tx, transport_rx) = mpsc::channel(1);
+        let (server_frame_tx, _frame_rx) = mpsc::channel(1);
+        let (_transport_tx, client_frame_rx) = mpsc::channel(1);
 
         let result = TransportStrategy::WebSocket
             .run(
@@ -89,8 +95,8 @@ mod tests {
                 http_client,
                 connector,
                 handshake_tx,
-                frame_tx,
-                transport_rx,
+                server_frame_tx,
+                client_frame_rx,
             )
             .await;
 

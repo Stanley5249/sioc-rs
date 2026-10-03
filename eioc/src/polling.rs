@@ -129,7 +129,7 @@ impl PollingClient {
         Ok(())
     }
 
-    /// Batches outbound frames into POST requests until `pause` fires or the engine closes `rx`.
+    /// Batches client frames into POST requests until `pause` fires or the engine closes `rx`.
     #[tracing::instrument(level = "debug", skip_all, err)]
     async fn post_until(
         &self,
@@ -163,7 +163,7 @@ impl PollingClient {
     async fn get_until(
         &self,
         url: &Url,
-        frame_tx: &mpsc::Sender<Frame>,
+        server_frame_tx: &mpsc::Sender<Frame>,
         pause: &CancellationToken,
     ) -> Result<Stop, TransportError> {
         // Pause only between requests, because the server answers the GET in
@@ -172,7 +172,7 @@ impl PollingClient {
             for frame in self.get(url).await? {
                 let close = frame == Frame::Packet(Packet::Close);
 
-                frame_tx.send(frame).await?;
+                server_frame_tx.send(frame).await?;
 
                 if close {
                     return Ok(Stop::Ended);
@@ -189,12 +189,12 @@ impl PollingClient {
     async fn poll(
         &self,
         url: &Url,
-        frame_tx: &mpsc::Sender<Frame>,
-        transport_rx: &mut mpsc::Receiver<Frame>,
+        server_frame_tx: &mpsc::Sender<Frame>,
+        client_frame_rx: &mut mpsc::Receiver<Frame>,
         pause: &CancellationToken,
     ) -> Result<Stop, TransportError> {
-        let mut get = pin!(self.get_until(url, frame_tx, pause));
-        let mut post = pin!(self.post_until(url, transport_rx, pause));
+        let mut get = pin!(self.get_until(url, server_frame_tx, pause));
+        let mut post = pin!(self.post_until(url, client_frame_rx, pause));
 
         // A pause lets the other loop finish its request. An ended session
         // abandons it, because its result no longer matters.
@@ -217,12 +217,12 @@ impl PollingClient {
     async fn poll_until_upgraded(
         &self,
         url: &Url,
-        frame_tx: &mpsc::Sender<Frame>,
-        transport_rx: &mut mpsc::Receiver<Frame>,
+        server_frame_tx: &mpsc::Sender<Frame>,
+        client_frame_rx: &mut mpsc::Receiver<Frame>,
         upgrade: impl Future<Output = Result<WebSocketStream, WebSocketError>>,
     ) -> Result<Option<WebSocketStream>, TransportError> {
         let pause = CancellationToken::new();
-        let mut poll = pin!(self.poll(url, frame_tx, transport_rx, &pause));
+        let mut poll = pin!(self.poll(url, server_frame_tx, client_frame_rx, &pause));
 
         tokio::select! {
             stop = &mut poll => {
@@ -251,8 +251,8 @@ impl PollingClient {
 
     /// Runs the full polling transport lifecycle: handshake, GET/POST loops, and optional WebSocket upgrade.
     ///
-    /// Finishes once the engine closes `transport_rx`. If the server ends the session first,
-    /// drops `frame_tx` and discards outbound frames until the engine closes `transport_rx`.
+    /// Finishes once the engine closes `client_frame_rx`. If the server ends the session first,
+    /// drops `server_frame_tx` and discards client frames until the engine closes `client_frame_rx`.
     ///
     /// # Errors
     ///
@@ -263,8 +263,8 @@ impl PollingClient {
         base_url: Url,
         connector: C,
         handshake_tx: oneshot::Sender<Handshake>,
-        frame_tx: mpsc::Sender<Frame>,
-        mut transport_rx: mpsc::Receiver<Frame>,
+        server_frame_tx: mpsc::Sender<Frame>,
+        mut client_frame_rx: mpsc::Receiver<Frame>,
     ) -> Result<(), TransportError>
     where
         C: WebSocketConnector,
@@ -289,13 +289,13 @@ impl PollingClient {
         let stream = if do_upgrade {
             let upgrade = WebSocketStream::connect(base_url, Some(&sid), connector);
 
-            self.poll_until_upgraded(&url, &frame_tx, &mut transport_rx, upgrade)
+            self.poll_until_upgraded(&url, &server_frame_tx, &mut client_frame_rx, upgrade)
                 .await?
         } else {
             self.poll(
                 &url,
-                &frame_tx,
-                &mut transport_rx,
+                &server_frame_tx,
+                &mut client_frame_rx,
                 &CancellationToken::new(),
             )
             .await?;
@@ -306,13 +306,15 @@ impl PollingClient {
         if let Some(stream) = stream {
             tracing::debug!("paused polling transport");
 
-            return stream.transport(None, frame_tx, transport_rx).await;
+            return stream
+                .transport(None, server_frame_tx, client_frame_rx)
+                .await;
         }
 
         // The engine may queue frames before it learns the server ended the
         // session, and the closed session cannot accept them.
-        drop(frame_tx);
-        while transport_rx.recv().await.is_some() {}
+        drop(server_frame_tx);
+        while client_frame_rx.recv().await.is_some() {}
 
         Ok(())
     }
@@ -366,7 +368,7 @@ mod tests {
     #[tokio::test]
     async fn get_finishes_request_in_flight_when_paused() {
         let url = http_server(Some("4data"), Duration::from_millis(100)).await;
-        let (frame_tx, mut frame_rx) = mpsc::channel(4);
+        let (server_frame_tx, mut server_frame_rx) = mpsc::channel(4);
         let pause = CancellationToken::new();
         let pause_later = pause.clone();
         tokio::spawn(async move {
@@ -374,10 +376,13 @@ mod tests {
             pause_later.cancel();
         });
         let client = PollingClient(Client::new());
-        let stop = client.get_until(&url, &frame_tx, &pause).await.unwrap();
+        let stop = client
+            .get_until(&url, &server_frame_tx, &pause)
+            .await
+            .unwrap();
         assert!(matches!(stop, Stop::Paused));
         assert!(matches!(
-            frame_rx.recv().await.unwrap(),
+            server_frame_rx.recv().await.unwrap(),
             Frame::Packet(Packet::Message(m)) if m == "data"
         ));
     }
@@ -385,15 +390,15 @@ mod tests {
     #[tokio::test]
     async fn get_ends_at_server_close() {
         let url = http_server(Some("1"), Duration::ZERO).await;
-        let (frame_tx, mut frame_rx) = mpsc::channel(4);
+        let (server_frame_tx, mut server_frame_rx) = mpsc::channel(4);
         let client = PollingClient(Client::new());
         let stop = client
-            .get_until(&url, &frame_tx, &CancellationToken::new())
+            .get_until(&url, &server_frame_tx, &CancellationToken::new())
             .await
             .unwrap();
         assert!(matches!(stop, Stop::Ended));
         assert!(matches!(
-            frame_rx.recv().await.unwrap(),
+            server_frame_rx.recv().await.unwrap(),
             Frame::Packet(Packet::Close)
         ));
     }
@@ -401,12 +406,12 @@ mod tests {
     #[tokio::test]
     async fn poll_abandons_get_when_engine_closes() {
         let url = http_server(None, Duration::ZERO).await;
-        let (frame_tx, _frame_rx) = mpsc::channel(4);
-        let (transport_tx, mut transport_rx) = mpsc::channel(4);
-        drop(transport_tx);
+        let (server_frame_tx, _frame_rx) = mpsc::channel(4);
+        let (client_frame_tx, mut client_frame_rx) = mpsc::channel(4);
+        drop(client_frame_tx);
         let client = PollingClient(Client::new());
         let pause = CancellationToken::new();
-        let poll = client.poll(&url, &frame_tx, &mut transport_rx, &pause);
+        let poll = client.poll(&url, &server_frame_tx, &mut client_frame_rx, &pause);
         let stop = tokio::time::timeout(Duration::from_secs(5), poll)
             .await
             .unwrap()
@@ -417,17 +422,17 @@ mod tests {
     #[tokio::test]
     async fn failed_upgrade_falls_back_to_long_polling() {
         let url = http_server(Some("1"), Duration::from_millis(50)).await;
-        let (frame_tx, mut frame_rx) = mpsc::channel(4);
-        let (_transport_tx, mut transport_rx) = mpsc::channel(4);
+        let (server_frame_tx, mut server_frame_rx) = mpsc::channel(4);
+        let (_transport_tx, mut client_frame_rx) = mpsc::channel(4);
         let client = PollingClient(Client::new());
         let upgrade = async { Err(WebSocketError::Closed) };
         let stream = client
-            .poll_until_upgraded(&url, &frame_tx, &mut transport_rx, upgrade)
+            .poll_until_upgraded(&url, &server_frame_tx, &mut client_frame_rx, upgrade)
             .await
             .unwrap();
         assert!(stream.is_none());
         assert!(matches!(
-            frame_rx.recv().await.unwrap(),
+            server_frame_rx.recv().await.unwrap(),
             Frame::Packet(Packet::Close)
         ));
     }
