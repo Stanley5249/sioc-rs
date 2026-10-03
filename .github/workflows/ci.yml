@@ -75,6 +75,18 @@ jobs:
           tool: just
       - run: just lint-py
 
+  lint-js:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: bun install --frozen-lockfile
+      - run: just lint-js
+
   test:
     timeout-minutes: 30
     runs-on: ${{ matrix.os }}
@@ -103,9 +115,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: astral-sh/setup-uv@v7
+      - uses: oven-sh/setup-bun@v2
       - uses: taiki-e/install-action@v2
         with:
           tool: just
+      - run: bun install --frozen-lockfile
       - run: just smoke
 
   coverage:
@@ -140,7 +154,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [deny, msrv, fmt, clippy, lint-py, test, smoke, doc]
+    needs: [deny, msrv, fmt, clippy, lint-py, lint-js, test, smoke, doc]
     runs-on: ubuntu-latest
     permissions:
       contents: write
