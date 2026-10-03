@@ -1,10 +1,14 @@
 [project]
-name = "quick-start"
-version = "0.1.0"
-description = "Quick-start example with Socket.IO server in Python and client in Rust"
+name = "sioc-rs"
+version = "0.0.0"
+description = "Python Socket.IO servers for testing the Rust client"
 requires-python = ">=3.14"
-dependencies = [
+dependencies = []
+
+[dependency-groups]
+dev = [
   "python-socketio",
+  "ruff",
   "uvicorn",
 ]
 
@@ -17,3 +21,6 @@ ignore = [
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"examples/**" = ["INP001"]  # standalone scripts, not packages

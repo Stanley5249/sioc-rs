@@ -11,15 +11,14 @@ The example covers all four concepts from the main README:
 
 ## Prerequisites
 
-- uv with Python >= 3.14
+- uv
 
 ## Running
 
 Start the server:
 
 ```bash
-cd examples/quick-start
-uv run server.py
+uv run examples/quick-start/server.py
 ```
 
 Then in a second terminal, run the client.
