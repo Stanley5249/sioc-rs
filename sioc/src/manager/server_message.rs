@@ -56,14 +56,18 @@ async fn route_text(
 
             tracing::debug!(%ns, sid = %connect.sid, "connected");
 
-            send_control(control_tx, Control::Connected(ns.clone()))?;
+            if routes.connect(&ns) {
+                send_control(control_tx, Control::Connected(ns.clone()))?;
+            }
             deliver(routes.signal_tx(&ns), &ns, Signal::Connect(connect)).await;
         }
         Packet::Disconnect => {
             tracing::debug!(%ns, "disconnected");
 
             let signal_tx = routes.remove(&ns);
-            send_control(control_tx, Control::Disconnected(ns.clone()))?;
+            if signal_tx.is_some() {
+                send_control(control_tx, Control::Disconnected(ns.clone()))?;
+            }
             deliver(signal_tx, &ns, Signal::Disconnect).await;
         }
         Packet::Event { payload, id } => {

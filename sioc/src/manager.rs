@@ -54,7 +54,9 @@ pub(crate) async fn run(
 /// What the server-message loop tells the directive loop about a namespace.
 ///
 /// The channel is unbounded so that delivering server packets never waits on
-/// the client's sending direction. Only namespace state changes travel on it.
+/// the client's sending direction. It stays short because only real state
+/// changes of namespaces the client opened travel on it: at most one of each
+/// per open.
 #[derive(Debug)]
 enum Control {
     /// The server confirmed the namespace, so buffered events can go out.
@@ -73,6 +75,7 @@ struct Routes(Mutex<HashMap<ByteString, Route>>);
 struct Route {
     signal_tx: mpsc::Sender<Signal>,
     ack_txs: HashMap<u64, oneshot::Sender<DynAck>>,
+    connected: bool,
 }
 
 impl Routes {
@@ -92,6 +95,7 @@ impl Routes {
         let route = Route {
             signal_tx,
             ack_txs: HashMap::new(),
+            connected: false,
         };
         routes.insert(ns, route);
 
@@ -101,6 +105,13 @@ impl Routes {
     /// Removes a route. Dropping it ends the namespace receiver and fails its pending acks.
     fn remove(&self, ns: &str) -> Option<mpsc::Sender<Signal>> {
         self.lock().remove(ns).map(|route| route.signal_tx)
+    }
+
+    /// Marks a route connected, returning `true` only the first time.
+    fn connect(&self, ns: &str) -> bool {
+        self.lock()
+            .get_mut(ns)
+            .is_some_and(|route| !std::mem::replace(&mut route.connected, true))
     }
 
     fn signal_tx(&self, ns: &str) -> Option<mpsc::Sender<Signal>> {

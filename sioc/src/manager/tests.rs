@@ -446,3 +446,16 @@ async fn emits_flow_while_receiver_is_full() {
 
     assert!(matches!(signal_rx.recv().await, Some(Signal::Connect(_))));
 }
+
+#[tokio::test]
+async fn repeated_server_connect_flushes_once() {
+    let mut h = spawn();
+    let (directive_tx, _signal_rx) = h.open("/").await;
+    directive_tx.send(event(r#"["a"]"#, None)).await.unwrap();
+    for _ in 0..3 {
+        h.server(CONNECT_RESPONSE).await;
+    }
+    assert_eq!(&*h.text().await, r#"2["a"]"#);
+    assert_quiet(&mut h.client_message_rx).await;
+    h.close_server().await.unwrap();
+}
