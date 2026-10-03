@@ -11,8 +11,13 @@
     "**/Thumbs.db",
     "**/.classpath",
     "**/.settings",
+    // Rust
     "**/target",
-    "**/.ruff_cache"
+    // Python
+    "**/.venv",
+    "**/.ruff_cache",
+    // JavaScript
+    "**/node_modules"
   ],
   "languages": {
     "JSON": {
@@ -43,6 +48,13 @@
         }
       },
       "language_servers": ["!oxfmt", "..."]
+    },
+    "TypeScript": {
+      "formatter": {
+        "language_server": {
+          "name": "oxfmt"
+        }
+      }
     },
     "YAML": {
       "formatter": {
