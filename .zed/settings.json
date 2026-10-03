@@ -2,8 +2,27 @@
   "prettier": {
     "allowed": false
   },
+  "file_scan_exclusions": [
+    "**/.git",
+    "**/.svn",
+    "**/.hg",
+    "**/CVS",
+    "**/.DS_Store",
+    "**/Thumbs.db",
+    "**/.classpath",
+    "**/.settings",
+    "**/target",
+    "**/.ruff_cache"
+  ],
   "languages": {
     "JSON": {
+      "formatter": {
+        "language_server": {
+          "name": "oxfmt"
+        }
+      }
+    },
+    "JSONC": {
       "formatter": {
         "language_server": {
           "name": "oxfmt"
