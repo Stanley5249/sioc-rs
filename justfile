@@ -1,5 +1,7 @@
+[windows]
+set shell := ["pwsh", "-NoLogo", "-NoProfile", "-Command"]
+
 set default-list
-set windows-shell := ["pwsh", "-NoLogo", "-NoProfile", "-Command"]
 
 quick_start := "cargo run --locked -p quick-start --example quick_start"
 
