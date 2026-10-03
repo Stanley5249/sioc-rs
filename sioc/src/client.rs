@@ -7,7 +7,6 @@ use crate::manager::{DirectiveSender, Manager, ManagerAction, message_sink};
 use crate::marker::{AckId, AckMarker, BinaryMarker};
 use crate::packet::{Directive, DynEvent, Signal};
 use bytestring::ByteString;
-use eioc::engine::{FrameSender, MessageSender};
 use eioc::transport::TransportStrategy;
 use eioc::websocket::WebSocketConnector;
 use futures_util::TryFutureExt;
@@ -57,7 +56,7 @@ where
 /// or build manually for per-channel control.
 #[derive(Clone, Copy, Debug)]
 pub struct ChannelConfig {
-    /// Engine task inbox: frames from the transport and messages from the Socket.IO layer.
+    /// Engine task inboxes: frames from the transport and messages from the Socket.IO layer.
     pub engine: usize,
     /// Transport channel: encoded frames to send to the transport.
     pub transport: usize,
@@ -213,11 +212,7 @@ where
 
         let (manager_tx, manager_rx) = mpsc::channel::<ManagerAction>(self.channels.manager);
 
-        let (engine_tx, engine_rx) = mpsc::channel(self.channels.engine);
-
-        let frame_tx = FrameSender(engine_tx.clone());
-
-        let message_tx = MessageSender(engine_tx);
+        let (message_tx, message_rx) = mpsc::channel(self.channels.engine);
 
         let manager = Manager::new(manager_rx);
 
@@ -229,8 +224,8 @@ where
             websocket_connector,
             self.transport_strategy,
             message_sink(manager_tx.clone()),
-            engine_rx,
-            frame_tx,
+            message_rx,
+            self.channels.engine,
             self.channels.transport,
         );
 

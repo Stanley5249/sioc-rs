@@ -1,12 +1,10 @@
 //! Error types for Engine.IO operations.
 
-use crate::engine::EngineAction;
 use crate::packet::{Frame, Handshake, Packet};
 use bytestring::ByteString;
 use miette::Diagnostic;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::error::Elapsed;
 
 /// Top-level error aggregator for `eioc`.
 #[derive(Debug, Error, Diagnostic)]
@@ -57,7 +55,7 @@ pub enum EngineError {
         code(eioc::engine::heartbeat_timeout),
         help("the server stopped responding; check the network or server load")
     )]
-    HeartbeatTimeout(#[from] Elapsed),
+    HeartbeatTimeout,
 
     /// An unexpected packet was received during the session.
     #[error("unexpected packet {0:?}")]
@@ -83,13 +81,13 @@ pub enum TransportError {
     #[diagnostic(transparent)]
     Polling(#[from] PollingError),
 
-    /// Sending an action to the engine task failed because the channel is closed.
-    #[error("engine action channel closed")]
+    /// Sending a frame to the engine task failed because the channel is closed.
+    #[error("engine frame channel closed")]
     #[diagnostic(
         code(eioc::transport::send_engine),
         help("the engine task exited; check for prior engine errors")
     )]
-    SendEngine(#[from] mpsc::error::SendError<EngineAction>),
+    SendEngine(#[from] mpsc::error::SendError<Frame>),
 
     /// Handshake data could not be forwarded to the engine task.
     #[error("failed to send handshake to engine task")]

@@ -9,62 +9,13 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 use url::Url;
 
-/// Data exchanged between the engine task and its producers
-#[derive(Debug)]
-pub enum EngineAction {
-    /// An inbound frame from the transport layer.
-    Transport(Frame),
-    /// An outbound message from the upper layer.
-    Sink(Message),
-}
-
-impl From<Frame> for EngineAction {
-    fn from(frame: Frame) -> Self {
-        Self::Transport(frame)
-    }
-}
-
-impl From<Message> for EngineAction {
-    fn from(message: Message) -> Self {
-        Self::Sink(message)
-    }
-}
-
-/// Sends [`Frame`]s to the engine task (transport layer use).
-#[derive(Clone, Debug)]
-pub struct FrameSender(pub mpsc::Sender<EngineAction>);
-
-impl FrameSender {
-    /// Sends a [`Frame`] to the engine task.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the engine task has exited.
-    pub async fn send(&self, frame: Frame) -> Result<(), mpsc::error::SendError<EngineAction>> {
-        self.0.send(EngineAction::Transport(frame)).await
-    }
-}
-
-/// Sends [`Message`]s to the engine task (Socket.IO layer use).
-#[derive(Clone, Debug)]
-pub struct MessageSender(pub mpsc::Sender<EngineAction>);
-
-impl MessageSender {
-    /// Sends a [`Message`] to the engine task.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the engine task has exited.
-    pub async fn send(&self, message: Message) -> Result<(), mpsc::error::SendError<EngineAction>> {
-        self.0.send(EngineAction::Sink(message)).await
-    }
-}
-
 /// Drives the engine protocol and transport concurrently until the session ends.
 ///
-/// `sink` receives decoded inbound [`Message`]s from the transport.
-/// The caller creates the engine channel, retains the [`MessageSender`] half,
-/// and passes the [`FrameSender`] and receiver here.
+/// `sink` receives inbound [`Message`]s, and `message_rx` carries outbound ones.
+/// Sending [`Message::Close`] or dropping the sender closes the session. When the
+/// server closes it, `sink` receives [`Message::Close`].
+///
+/// Returns once the transport has finished and the sender of `message_rx` is dropped.
 ///
 /// # Errors
 ///
@@ -76,8 +27,8 @@ pub async fn connect<C, S>(
     websocket_connector: C,
     strategy: TransportStrategy,
     sink: S,
-    engine_rx: mpsc::Receiver<EngineAction>,
-    frame_tx: FrameSender,
+    message_rx: mpsc::Receiver<Message>,
+    frame_capacity: usize,
     transport_capacity: usize,
 ) -> Result<(), Error>
 where
@@ -85,11 +36,13 @@ where
     S: Sink<Message> + Unpin + Send + 'static,
     S::Error: std::error::Error + Send + Sync + 'static,
 {
+    let (frame_tx, frame_rx) = mpsc::channel(frame_capacity);
+
     let (transport_tx, transport_rx) = mpsc::channel(transport_capacity);
 
     let (handshake_tx, handshake_rx) = oneshot::channel();
 
-    let eio_future = engine_io(sink, engine_rx, transport_tx, handshake_rx);
+    let eio_future = engine_io(sink, frame_rx, message_rx, transport_tx, handshake_rx);
 
     let transport_future = strategy.run(
         url,
@@ -126,10 +79,18 @@ impl Heartbeat {
     }
 }
 
+/// The side that ended the session.
+#[derive(Debug, PartialEq, Eq)]
+enum Closed {
+    ByClient,
+    ByServer,
+}
+
 #[tracing::instrument(skip_all, err)]
 async fn engine_io<S>(
     mut sink: S,
-    mut engine_rx: mpsc::Receiver<EngineAction>,
+    mut frame_rx: mpsc::Receiver<Frame>,
+    mut message_rx: mpsc::Receiver<Message>,
     transport_tx: mpsc::Sender<Frame>,
     handshake_rx: oneshot::Receiver<Handshake>,
 ) -> Result<(), EngineError>
@@ -142,17 +103,60 @@ where
 
     let mut heartbeat = Heartbeat::new(handshake.ping_window());
 
-    while let Some(action) = tokio::time::timeout_at(heartbeat.deadline, engine_rx.recv()).await? {
-        match action {
-            EngineAction::Transport(frame) => match frame {
-                Frame::Packet(packet) => {
+    // The session takes `transport_tx` and drops it on return, which tells the
+    // transport to finish.
+    let closed = session(
+        &mut sink,
+        &mut frame_rx,
+        &mut message_rx,
+        transport_tx,
+        &mut heartbeat,
+    )
+    .await?;
+
+    if closed == Closed::ByServer {
+        // The server may end the transport without a Socket.IO disconnect.
+        send_sink(&mut sink, Message::Close).await?;
+    }
+
+    // Wait for both producers to hang up, so neither sends into a closed
+    // channel during shutdown.
+    let transport_finished = async { while frame_rx.recv().await.is_some() {} };
+    tokio::time::timeout_at(heartbeat.deadline, transport_finished)
+        .await
+        .map_err(|_| EngineError::HeartbeatTimeout)?;
+    while message_rx.recv().await.is_some() {}
+
+    Ok(())
+}
+
+/// Exchanges frames and messages until either side closes the session.
+async fn session<S>(
+    sink: &mut S,
+    frame_rx: &mut mpsc::Receiver<Frame>,
+    message_rx: &mut mpsc::Receiver<Message>,
+    transport_tx: mpsc::Sender<Frame>,
+    heartbeat: &mut Heartbeat,
+) -> Result<Closed, EngineError>
+where
+    S: Sink<Message> + Unpin,
+    S::Error: std::error::Error + Send + Sync + 'static,
+{
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep_until(heartbeat.deadline) => {
+                return Err(EngineError::HeartbeatTimeout);
+            }
+
+            frame = frame_rx.recv() => match frame {
+                Some(Frame::Packet(packet)) => {
                     tracing::trace!(%packet, "<- packet");
 
                     match packet {
                         Packet::Close => {
                             tracing::debug!("server closed");
 
-                            break;
+                            return Ok(Closed::ByServer);
                         }
                         Packet::Ping(payload) => {
                             tracing::trace!("-> PONG");
@@ -162,52 +166,59 @@ where
                             heartbeat.reset();
                         }
                         Packet::Message(payload) => {
-                            sink.send(Message::Text(payload))
-                                .await
-                                .map_err(|e| EngineError::SendSink(e.into()))?;
+                            send_sink(sink, Message::Text(payload)).await?;
                         }
                         Packet::Noop => {}
 
                         packet => return Err(EngineError::Server(packet)),
                     }
                 }
-                Frame::Binary(payload) => {
+                Some(Frame::Binary(payload)) => {
                     tracing::trace!(bytes = payload.len(), "<- binary");
 
-                    sink.send(Message::Binary(payload))
-                        .await
-                        .map_err(|e| EngineError::SendSink(e.into()))?;
+                    send_sink(sink, Message::Binary(payload)).await?;
+                }
+                None => {
+                    tracing::debug!("transport closed");
+
+                    return Ok(Closed::ByServer);
                 }
             },
-            EngineAction::Sink(message) => match message {
-                Message::Text(bytes) => {
+
+            message = message_rx.recv() => match message {
+                Some(Message::Text(bytes)) => {
                     let packet = Packet::Message(bytes);
 
                     tracing::trace!(%packet, "-> MESSAGE");
 
                     transport_tx.send(packet.into()).await?;
                 }
-                Message::Binary(bytes) => {
+                Some(Message::Binary(bytes)) => {
                     tracing::trace!(bytes = bytes.len(), "-> binary");
 
                     transport_tx.send(bytes.into()).await?;
                 }
-                Message::Close => {
+                Some(Message::Close) | None => {
                     tracing::debug!("client closed");
                     tracing::trace!("-> CLOSE");
 
-                    // A server may close the transport without an engine.io
-                    // CLOSE packet, so a gone transport already means closed.
-                    if transport_tx.send(Packet::Close.into()).await.is_err() {
-                        tracing::debug!("transport already closed");
-                    }
-                    break;
+                    transport_tx.send(Packet::Close.into()).await?;
+
+                    return Ok(Closed::ByClient);
                 }
             },
         }
     }
+}
 
-    Ok(())
+async fn send_sink<S>(sink: &mut S, message: Message) -> Result<(), EngineError>
+where
+    S: Sink<Message> + Unpin,
+    S::Error: std::error::Error + Send + Sync + 'static,
+{
+    sink.send(message)
+        .await
+        .map_err(|e| EngineError::SendSink(e.into()))
 }
 
 #[cfg(test)]
@@ -219,6 +230,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll};
     use tokio::sync::{mpsc, oneshot};
+    use tokio::task::JoinHandle;
 
     struct FailingSink;
 
@@ -252,41 +264,51 @@ mod tests {
         }
     }
 
-    struct Setup {
-        tx: mpsc::Sender<EngineAction>,
-        rx: mpsc::Receiver<EngineAction>,
-        transport_tx: mpsc::Sender<Frame>,
+    /// A running engine with the transport and upper-layer ends of its channels.
+    struct Harness {
+        frame_tx: mpsc::Sender<Frame>,
+        message_tx: mpsc::Sender<Message>,
         transport_rx: mpsc::Receiver<Frame>,
-        handshake_rx: oneshot::Receiver<Handshake>,
+        engine: JoinHandle<Result<(), EngineError>>,
     }
 
-    fn setup() -> Setup {
-        let (tx, rx) = mpsc::channel(4);
+    fn spawn<S>(sink: S, handshake: Handshake) -> Harness
+    where
+        S: Sink<Message> + Unpin + Send + 'static,
+        S::Error: std::error::Error + Send + Sync + 'static,
+    {
+        let (frame_tx, frame_rx) = mpsc::channel(4);
+        let (message_tx, message_rx) = mpsc::channel(4);
         let (transport_tx, transport_rx) = mpsc::channel(4);
         let (handshake_tx, handshake_rx) = oneshot::channel();
-        handshake_tx.send(make_handshake()).unwrap();
-        Setup {
-            tx,
-            rx,
+        handshake_tx.send(handshake).unwrap();
+        let engine = tokio::spawn(engine_io(
+            sink,
+            frame_rx,
+            message_rx,
             transport_tx,
-            transport_rx,
             handshake_rx,
+        ));
+        Harness {
+            frame_tx,
+            message_tx,
+            transport_rx,
+            engine,
         }
     }
 
-    impl Setup {
-        async fn run(self) -> (Result<(), EngineError>, mpsc::Receiver<Frame>) {
-            self.run_with(sink::drain()).await
-        }
-
-        async fn run_with<S>(self, sink: S) -> (Result<(), EngineError>, mpsc::Receiver<Frame>)
-        where
-            S: Sink<Message> + Unpin,
-            S::Error: std::error::Error + Send + Sync + 'static,
-        {
-            let transport_rx = self.transport_rx;
-            let result = engine_io(sink, self.rx, self.transport_tx, self.handshake_rx).await;
-            (result, transport_rx)
+    impl Harness {
+        /// Waits for the session to end, then hangs up both producers.
+        ///
+        /// Returns the engine result and the frames sent to the transport.
+        async fn finish(mut self) -> (Result<(), EngineError>, Vec<Frame>) {
+            let mut sent = Vec::new();
+            while let Some(frame) = self.transport_rx.recv().await {
+                sent.push(frame);
+            }
+            drop(self.frame_tx);
+            drop(self.message_tx);
+            (self.engine.await.unwrap(), sent)
         }
     }
 
@@ -302,227 +324,233 @@ mod tests {
         (sink, store)
     }
 
-    #[test]
-    fn engine_action_from_frame() {
-        let frame = Frame::Binary(Bytes::from_static(b"x"));
-        let action = EngineAction::from(frame.clone());
-        assert!(matches!(action, EngineAction::Transport(f) if f == frame));
-    }
-
-    #[test]
-    fn engine_action_from_message() {
-        let action = EngineAction::from(Message::Close);
-        assert!(matches!(action, EngineAction::Sink(Message::Close)));
-    }
-
-    #[tokio::test]
-    async fn frame_sender_wraps_frame_as_transport() {
-        let (tx, mut rx) = mpsc::channel(4);
-        let sender = FrameSender(tx);
-        let frame = Frame::Binary(Bytes::from_static(b"x"));
-        sender.send(frame.clone()).await.unwrap();
-        assert!(matches!(rx.recv().await.unwrap(), EngineAction::Transport(f) if f == frame));
-    }
-
-    #[tokio::test]
-    async fn message_sender_wraps_message_as_sink() {
-        let (tx, mut rx) = mpsc::channel(4);
-        let sender = MessageSender(tx);
-        sender.send(Message::Close).await.unwrap();
-        assert!(matches!(
-            rx.recv().await.unwrap(),
-            EngineAction::Sink(Message::Close)
-        ));
-    }
-
     #[tokio::test]
     async fn engine_io_handshake_dropped_is_error() {
-        let (_, rx) = mpsc::channel(4);
+        let (_frame_tx, frame_rx) = mpsc::channel(4);
+        let (_message_tx, message_rx) = mpsc::channel(4);
         let (transport_tx, _) = mpsc::channel(4);
         let (handshake_tx, handshake_rx) = oneshot::channel::<Handshake>();
         drop(handshake_tx);
-        let result = engine_io(sink::drain(), rx, transport_tx, handshake_rx).await;
+        let result = engine_io(
+            sink::drain(),
+            frame_rx,
+            message_rx,
+            transport_tx,
+            handshake_rx,
+        )
+        .await;
         assert!(matches!(result, Err(EngineError::RecvHandshake(_))));
     }
 
     #[tokio::test]
-    async fn engine_io_server_close_exits_ok() {
-        let s = setup();
-        s.tx.send(EngineAction::Transport(Frame::Packet(Packet::Close)))
-            .await
-            .unwrap();
-        let (result, _) = s.run().await;
+    async fn engine_io_server_close_notifies_sink() {
+        let (sink, store) = capturing_sink();
+        let h = spawn(sink, make_handshake());
+        h.frame_tx.send(Packet::Close.into()).await.unwrap();
+        let (result, sent) = h.finish().await;
         result.unwrap();
+        assert!(sent.is_empty());
+        assert!(matches!(store.lock().unwrap()[..], [Message::Close]));
     }
 
     #[tokio::test]
-    async fn engine_io_engine_channel_closed_exits_ok() {
-        let s = setup();
-        drop(s.tx);
-        let result = engine_io(sink::drain(), s.rx, s.transport_tx, s.handshake_rx).await;
-        result.unwrap();
+    async fn engine_io_transport_closed_notifies_sink() {
+        let (sink, store) = capturing_sink();
+        let Harness {
+            frame_tx,
+            message_tx,
+            mut transport_rx,
+            engine,
+        } = spawn(sink, make_handshake());
+        drop(frame_tx);
+        assert!(transport_rx.recv().await.is_none());
+        drop(message_tx);
+        engine.await.unwrap().unwrap();
+        assert!(matches!(store.lock().unwrap()[..], [Message::Close]));
     }
 
     #[tokio::test]
     async fn engine_io_client_close_sends_close_packet() {
-        let s = setup();
-        s.tx.send(EngineAction::Sink(Message::Close)).await.unwrap();
-        let (result, mut transport_rx) = s.run().await;
+        let (sink, store) = capturing_sink();
+        let h = spawn(sink, make_handshake());
+        h.message_tx.send(Message::Close).await.unwrap();
+        let (result, sent) = h.finish().await;
         result.unwrap();
+        assert!(matches!(sent[..], [Frame::Packet(Packet::Close)]));
+        assert!(store.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn engine_io_message_sender_dropped_sends_close_packet() {
+        let Harness {
+            frame_tx,
+            message_tx,
+            mut transport_rx,
+            engine,
+        } = spawn(sink::drain(), make_handshake());
+        drop(message_tx);
         assert!(matches!(
             transport_rx.recv().await.unwrap(),
             Frame::Packet(Packet::Close)
         ));
+        drop(frame_tx);
+        engine.await.unwrap().unwrap();
     }
 
     #[tokio::test]
-    async fn engine_io_client_close_after_transport_closed_exits_ok() {
-        let s = setup();
-        drop(s.transport_rx);
-        s.tx.send(EngineAction::Sink(Message::Close)).await.unwrap();
-        let result = engine_io(sink::drain(), s.rx, s.transport_tx, s.handshake_rx).await;
-        result.unwrap();
+    async fn engine_io_accepts_messages_until_sender_dropped() {
+        let Harness {
+            frame_tx,
+            message_tx,
+            mut transport_rx,
+            engine,
+        } = spawn(sink::drain(), make_handshake());
+        frame_tx.send(Packet::Close.into()).await.unwrap();
+        assert!(transport_rx.recv().await.is_none());
+        message_tx.send(Message::Close).await.unwrap();
+        drop(frame_tx);
+        drop(message_tx);
+        engine.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn engine_io_accepts_frames_until_transport_finishes() {
+        let Harness {
+            frame_tx,
+            message_tx,
+            mut transport_rx,
+            engine,
+        } = spawn(sink::drain(), make_handshake());
+        message_tx.send(Message::Close).await.unwrap();
+        assert!(matches!(
+            transport_rx.recv().await.unwrap(),
+            Frame::Packet(Packet::Close)
+        ));
+        assert!(transport_rx.recv().await.is_none());
+        frame_tx
+            .send(Packet::Message("late".into()).into())
+            .await
+            .unwrap();
+        drop(frame_tx);
+        drop(message_tx);
+        engine.await.unwrap().unwrap();
     }
 
     #[tokio::test]
     async fn engine_io_ping_triggers_pong() {
-        let s = setup();
-        s.tx.send(EngineAction::Transport(Frame::Packet(Packet::Ping(
-            "probe".into(),
-        ))))
-        .await
-        .unwrap();
-        s.tx.send(EngineAction::Transport(Frame::Packet(Packet::Close)))
+        let h = spawn(sink::drain(), make_handshake());
+        h.frame_tx
+            .send(Packet::Ping("probe".into()).into())
             .await
             .unwrap();
-        let (result, mut transport_rx) = s.run().await;
+        h.frame_tx.send(Packet::Close.into()).await.unwrap();
+        let (result, sent) = h.finish().await;
         result.unwrap();
-        assert!(matches!(
-            transport_rx.recv().await.unwrap(),
-            Frame::Packet(Packet::Pong(p)) if p == "probe"
-        ));
+        assert!(matches!(&sent[..], [Frame::Packet(Packet::Pong(p))] if p == "probe"));
     }
 
     #[tokio::test]
     async fn engine_io_noop_is_ignored() {
-        let s = setup();
-        s.tx.send(EngineAction::Transport(Frame::Packet(Packet::Noop)))
-            .await
-            .unwrap();
-        s.tx.send(EngineAction::Transport(Frame::Packet(Packet::Close)))
-            .await
-            .unwrap();
-        let (result, _) = s.run().await;
+        let h = spawn(sink::drain(), make_handshake());
+        h.frame_tx.send(Packet::Noop.into()).await.unwrap();
+        h.frame_tx.send(Packet::Close.into()).await.unwrap();
+        let (result, sent) = h.finish().await;
         result.unwrap();
+        assert!(sent.is_empty());
     }
 
     #[tokio::test]
     async fn engine_io_unexpected_packet_is_server_error() {
-        let s = setup();
-        s.tx.send(EngineAction::Transport(Frame::Packet(Packet::Upgrade)))
-            .await
-            .unwrap();
-        let (result, _) = s.run().await;
+        let h = spawn(sink::drain(), make_handshake());
+        h.frame_tx.send(Packet::Upgrade.into()).await.unwrap();
+        let (result, _) = h.finish().await;
         assert!(matches!(result, Err(EngineError::Server(Packet::Upgrade))));
     }
 
     #[tokio::test]
     async fn engine_io_text_message_forwarded_to_sink() {
-        let s = setup();
-        s.tx.send(EngineAction::Transport(Frame::Packet(Packet::Message(
-            "hello".into(),
-        ))))
-        .await
-        .unwrap();
-        s.tx.send(EngineAction::Transport(Frame::Packet(Packet::Close)))
+        let (sink, store) = capturing_sink();
+        let h = spawn(sink, make_handshake());
+        h.frame_tx
+            .send(Packet::Message("hello".into()).into())
             .await
             .unwrap();
-        let (sink, store) = capturing_sink();
-        let (result, _) = s.run_with(sink).await;
+        h.frame_tx.send(Packet::Close.into()).await.unwrap();
+        let (result, _) = h.finish().await;
         result.unwrap();
-        let msgs = store.lock().unwrap();
-        assert!(matches!(&msgs[0], Message::Text(t) if t == "hello"));
+        assert!(
+            matches!(&store.lock().unwrap()[..], [Message::Text(t), Message::Close] if t == "hello")
+        );
     }
 
     #[tokio::test]
     async fn engine_io_binary_frame_forwarded_to_sink() {
-        let s = setup();
-        s.tx.send(EngineAction::Transport(Frame::Binary(Bytes::from_static(
-            b"bin",
-        ))))
-        .await
-        .unwrap();
-        s.tx.send(EngineAction::Transport(Frame::Packet(Packet::Close)))
+        let (sink, store) = capturing_sink();
+        let h = spawn(sink, make_handshake());
+        h.frame_tx
+            .send(Frame::Binary(Bytes::from_static(b"bin")))
             .await
             .unwrap();
-        let (sink, store) = capturing_sink();
-        let (result, _) = s.run_with(sink).await;
+        h.frame_tx.send(Packet::Close.into()).await.unwrap();
+        let (result, _) = h.finish().await;
         result.unwrap();
-        let msgs = store.lock().unwrap();
-        assert!(matches!(&msgs[0], Message::Binary(b) if b.as_ref() == b"bin"));
+        assert!(
+            matches!(&store.lock().unwrap()[..], [Message::Binary(b), Message::Close] if b.as_ref() == b"bin")
+        );
     }
 
     #[tokio::test]
     async fn engine_io_outbound_text_sent_to_transport() {
-        let s = setup();
-        s.tx.send(EngineAction::Sink(Message::Text("out".into())))
+        let h = spawn(sink::drain(), make_handshake());
+        h.message_tx
+            .send(Message::Text("out".into()))
             .await
             .unwrap();
-        s.tx.send(EngineAction::Sink(Message::Close)).await.unwrap();
-        let (result, mut transport_rx) = s.run().await;
+        h.message_tx.send(Message::Close).await.unwrap();
+        let (result, sent) = h.finish().await;
         result.unwrap();
         assert!(matches!(
-            transport_rx.recv().await.unwrap(),
-            Frame::Packet(Packet::Message(m)) if m == "out"
+            &sent[..],
+            [Frame::Packet(Packet::Message(m)), Frame::Packet(Packet::Close)] if m == "out"
         ));
     }
 
     #[tokio::test]
     async fn engine_io_outbound_binary_sent_to_transport() {
-        let s = setup();
-        s.tx.send(EngineAction::Sink(Message::Binary(Bytes::from_static(
-            b"out",
-        ))))
-        .await
-        .unwrap();
-        s.tx.send(EngineAction::Sink(Message::Close)).await.unwrap();
-        let (result, mut transport_rx) = s.run().await;
+        let h = spawn(sink::drain(), make_handshake());
+        h.message_tx
+            .send(Message::Binary(Bytes::from_static(b"out")))
+            .await
+            .unwrap();
+        h.message_tx.send(Message::Close).await.unwrap();
+        let (result, sent) = h.finish().await;
         result.unwrap();
         assert!(matches!(
-            transport_rx.recv().await.unwrap(),
-            Frame::Binary(b) if b.as_ref() == b"out"
+            &sent[..],
+            [Frame::Binary(b), Frame::Packet(Packet::Close)] if b.as_ref() == b"out"
         ));
     }
 
     #[tokio::test]
     async fn engine_io_heartbeat_timeout_fires() {
-        let (tx, rx) = mpsc::channel(4);
-        let (transport_tx, _transport_rx) = mpsc::channel(4);
-        let (handshake_tx, handshake_rx) = oneshot::channel();
-        handshake_tx
-            .send(Handshake {
-                sid: "sid".into(),
-                upgrades: vec![],
-                ping_interval: 1,
-                ping_timeout: 1,
-                max_payload: 1_000_000,
-            })
-            .unwrap();
-        // tx is kept alive so recv() never returns None; heartbeat fires after 2ms.
-        let result = engine_io(sink::drain(), rx, transport_tx, handshake_rx).await;
-        drop(tx);
-        assert!(matches!(result, Err(EngineError::HeartbeatTimeout(_))));
+        let handshake = Handshake {
+            ping_interval: 1,
+            ping_timeout: 1,
+            ..make_handshake()
+        };
+        let h = spawn(sink::drain(), handshake);
+        let (result, _) = h.finish().await;
+        assert!(matches!(result, Err(EngineError::HeartbeatTimeout)));
     }
 
     #[tokio::test]
     async fn engine_io_message_sink_error() {
-        let s = setup();
-        s.tx.send(EngineAction::Transport(Frame::Packet(Packet::Message(
-            "x".into(),
-        ))))
-        .await
-        .unwrap();
-        let (result, _) = s.run_with(FailingSink).await;
+        let h = spawn(FailingSink, make_handshake());
+        h.frame_tx
+            .send(Packet::Message("x".into()).into())
+            .await
+            .unwrap();
+        let (result, _) = h.finish().await;
         assert!(matches!(result, Err(EngineError::SendSink(_))));
     }
 }

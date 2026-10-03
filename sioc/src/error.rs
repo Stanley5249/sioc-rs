@@ -8,7 +8,7 @@ use crate::manager::ManagerAction;
 use crate::packet::{DynAck, Signal};
 use bytes::Bytes;
 use bytestring::ByteString;
-use eioc::engine::EngineAction;
+use eioc::prelude::Message;
 use miette::Diagnostic;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
@@ -258,13 +258,13 @@ pub enum ManagerError {
     #[diagnostic(transparent)]
     Packet(#[from] PacketError),
 
-    /// Sending an action to the engine layer failed because the channel is closed.
-    #[error("engine action channel closed")]
+    /// Sending a message to the engine layer failed because the channel is closed.
+    #[error("engine message channel closed")]
     #[diagnostic(
         code(sioc::manager::send_engine),
         help("the receiver was dropped; the socket is probably shut down")
     )]
-    SendEngine(#[from] mpsc::error::SendError<EngineAction>),
+    SendEngine(#[from] mpsc::error::SendError<Message>),
 
     /// Inbound packet delivery to a namespace channel failed.
     #[error("manager send failed for namespace `{ns}`")]

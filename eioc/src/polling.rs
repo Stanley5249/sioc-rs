@@ -1,7 +1,6 @@
 //! HTTP long-polling transport tasks for Engine.IO v4.
 
 use crate::ENGINE_IO_VERSION;
-use crate::engine::FrameSender;
 use crate::error::{PollingError, TransportError, WebSocketError};
 use crate::packet::{Frame, Handshake, Packet};
 use crate::prelude::WebSocketStream;
@@ -164,7 +163,7 @@ impl PollingClient {
     async fn get_until(
         &self,
         url: &Url,
-        frame_tx: &FrameSender,
+        frame_tx: &mpsc::Sender<Frame>,
         pause: &CancellationToken,
     ) -> Result<Stop, TransportError> {
         // Pause only between requests, because the server answers the GET in
@@ -190,7 +189,7 @@ impl PollingClient {
     async fn poll(
         &self,
         url: &Url,
-        frame_tx: &FrameSender,
+        frame_tx: &mpsc::Sender<Frame>,
         transport_rx: &mut mpsc::Receiver<Frame>,
         pause: &CancellationToken,
     ) -> Result<Stop, TransportError> {
@@ -217,7 +216,7 @@ impl PollingClient {
     async fn poll_until_upgraded(
         &self,
         url: &Url,
-        frame_tx: &FrameSender,
+        frame_tx: &mpsc::Sender<Frame>,
         transport_rx: &mut mpsc::Receiver<Frame>,
         upgrade: impl Future<Output = Result<WebSocketStream, WebSocketError>>,
     ) -> Result<Option<WebSocketStream>, TransportError> {
@@ -256,7 +255,7 @@ impl PollingClient {
         base_url: Url,
         connector: C,
         handshake_tx: oneshot::Sender<Handshake>,
-        frame_tx: FrameSender,
+        frame_tx: mpsc::Sender<Frame>,
         mut transport_rx: mpsc::Receiver<Frame>,
     ) -> Result<(), TransportError>
     where
@@ -359,7 +358,7 @@ mod tests {
     #[tokio::test]
     async fn get_finishes_request_in_flight_when_paused() {
         let url = http_server(Some("4data"), Duration::from_millis(100)).await;
-        let (engine_tx, mut engine_rx) = mpsc::channel(4);
+        let (frame_tx, mut frame_rx) = mpsc::channel(4);
         let pause = CancellationToken::new();
         let pause_later = pause.clone();
         tokio::spawn(async move {
@@ -367,41 +366,37 @@ mod tests {
             pause_later.cancel();
         });
         let client = PollingClient(Client::new());
-        let stop = client
-            .get_until(&url, &FrameSender(engine_tx), &pause)
-            .await
-            .unwrap();
+        let stop = client.get_until(&url, &frame_tx, &pause).await.unwrap();
         assert!(matches!(stop, Stop::Paused));
         assert!(matches!(
-            engine_rx.recv().await.unwrap(),
-            crate::engine::EngineAction::Transport(Frame::Packet(Packet::Message(m))) if m == "data"
+            frame_rx.recv().await.unwrap(),
+            Frame::Packet(Packet::Message(m)) if m == "data"
         ));
     }
 
     #[tokio::test]
     async fn get_ends_at_server_close() {
         let url = http_server(Some("1"), Duration::ZERO).await;
-        let (engine_tx, mut engine_rx) = mpsc::channel(4);
+        let (frame_tx, mut frame_rx) = mpsc::channel(4);
         let client = PollingClient(Client::new());
         let stop = client
-            .get_until(&url, &FrameSender(engine_tx), &CancellationToken::new())
+            .get_until(&url, &frame_tx, &CancellationToken::new())
             .await
             .unwrap();
         assert!(matches!(stop, Stop::Ended));
         assert!(matches!(
-            engine_rx.recv().await.unwrap(),
-            crate::engine::EngineAction::Transport(Frame::Packet(Packet::Close))
+            frame_rx.recv().await.unwrap(),
+            Frame::Packet(Packet::Close)
         ));
     }
 
     #[tokio::test]
     async fn poll_abandons_get_when_engine_closes() {
         let url = http_server(None, Duration::ZERO).await;
-        let (engine_tx, _engine_rx) = mpsc::channel(4);
+        let (frame_tx, _frame_rx) = mpsc::channel(4);
         let (transport_tx, mut transport_rx) = mpsc::channel(4);
         drop(transport_tx);
         let client = PollingClient(Client::new());
-        let frame_tx = FrameSender(engine_tx);
         let pause = CancellationToken::new();
         let poll = client.poll(&url, &frame_tx, &mut transport_rx, &pause);
         let stop = tokio::time::timeout(Duration::from_secs(5), poll)

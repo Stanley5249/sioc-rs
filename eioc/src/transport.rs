@@ -3,7 +3,6 @@
 //! Manages the transport lifecycle: HTTP long-polling handshake, optional
 //! upgrade to WebSocket, and shutdown once the engine closes the transport channel.
 
-use crate::engine::FrameSender;
 use crate::error::TransportError;
 use crate::packet::{Frame, Handshake};
 use crate::polling::PollingClient;
@@ -34,7 +33,7 @@ impl TransportStrategy {
         http_client: reqwest::Client,
         connector: C,
         handshake_tx: oneshot::Sender<Handshake>,
-        frame_tx: FrameSender,
+        frame_tx: mpsc::Sender<Frame>,
         transport_rx: mpsc::Receiver<Frame>,
     ) -> Result<(), TransportError>
     where
@@ -62,7 +61,6 @@ impl TransportStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::FrameSender;
     use crate::error::TransportError;
     use tokio::sync::{mpsc, oneshot};
     use tokio_tungstenite::tungstenite::Error as TungsteniteError;
@@ -82,8 +80,7 @@ mod tests {
         let http_client = reqwest::Client::new();
         let connector = async |_| Err(TungsteniteError::ConnectionClosed);
         let (handshake_tx, _handshake_rx) = oneshot::channel();
-        let (engine_tx, _engine_rx) = mpsc::channel(1);
-        let frame_tx = FrameSender(engine_tx);
+        let (frame_tx, _frame_rx) = mpsc::channel(1);
         let (_transport_tx, transport_rx) = mpsc::channel(1);
 
         let result = TransportStrategy::WebSocket

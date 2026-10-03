@@ -4,7 +4,6 @@ use crate::error::{ManagerError, PacketError};
 use crate::packet::{Connect, ConnectError, Directive, DynAck, DynEvent, Ns, Packet, Signal};
 use bytes::Bytes;
 use bytestring::ByteString;
-use eioc::engine::MessageSender;
 use eioc::prelude::Message;
 use futures_util::{Sink, SinkExt, future};
 use std::collections::BTreeMap;
@@ -331,7 +330,7 @@ impl Manager {
     ///
     /// Returns an error if the engine or a namespace channel fails.
     #[tracing::instrument(skip_all, err)]
-    pub async fn socket_io(mut self, tx: MessageSender) -> Result<(), ManagerError> {
+    pub async fn socket_io(mut self, tx: mpsc::Sender<Message>) -> Result<(), ManagerError> {
         let result = self.run(&tx).await;
 
         if !self.sockets.is_empty() {
@@ -347,7 +346,7 @@ impl Manager {
         result
     }
 
-    async fn run(&mut self, tx: &MessageSender) -> Result<(), ManagerError> {
+    async fn run(&mut self, tx: &mpsc::Sender<Message>) -> Result<(), ManagerError> {
         while let Some(directive) = self.rx.recv().await {
             match directive {
                 ManagerAction::Socket(Ns(ns, packet)) => {
@@ -368,7 +367,7 @@ impl Manager {
     /// Encodes and sends (or buffers) one outbound directive.
     async fn dispatch_directive(
         &mut self,
-        message_tx: &MessageSender,
+        message_tx: &mpsc::Sender<Message>,
         ns: ByteString,
         directive: Directive,
     ) -> Result<(), ManagerError> {
@@ -457,7 +456,7 @@ impl Manager {
 
     async fn route_message(
         &mut self,
-        message_tx: &MessageSender,
+        message_tx: &mpsc::Sender<Message>,
         message: Message,
     ) -> Result<(), ManagerError> {
         match message {
@@ -481,7 +480,7 @@ impl Manager {
     async fn route_text_message(
         &mut self,
         text: ByteString,
-        message_tx: &MessageSender,
+        message_tx: &mpsc::Sender<Message>,
     ) -> Result<(), ManagerError> {
         if self.reconstructor.is_pending() {
             return Err(ManagerError::UnexpectedText(text));
@@ -581,7 +580,6 @@ impl Manager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eioc::engine::EngineAction;
     use tokio::task::JoinHandle;
 
     const CONNECT_RESPONSE: &str = "0{\"sid\":\"test\"}";
@@ -589,14 +587,14 @@ mod tests {
     /// Spawns a manager and returns `(manager_tx, engine_rx, join_handle)`.
     fn setup_manager() -> (
         mpsc::Sender<ManagerAction>,
-        mpsc::Receiver<EngineAction>,
+        mpsc::Receiver<Message>,
         JoinHandle<Result<(), ManagerError>>,
     ) {
         let (engine_tx, engine_rx) = mpsc::channel(32);
 
         let (manager_tx, manager_rx) = mpsc::channel(32);
 
-        let handle = tokio::spawn(Manager::new(manager_rx).socket_io(MessageSender(engine_tx)));
+        let handle = tokio::spawn(Manager::new(manager_rx).socket_io(engine_tx));
 
         (manager_tx, engine_rx, handle)
     }
@@ -686,7 +684,7 @@ mod tests {
         let expected = ["2[\"a\"]", "2[\"b\"]", "2[\"c\"]"];
         for exp in &expected {
             match engine_rx.recv().await.unwrap() {
-                EngineAction::Sink(Message::Text(text)) => assert_eq!(&*text, *exp),
+                Message::Text(text) => assert_eq!(&*text, *exp),
                 other => panic!("expected Text, got {other:?}"),
             }
         }
@@ -709,14 +707,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(matches!(
-            engine_rx.recv().await.unwrap(),
-            EngineAction::Sink(Message::Text(_))
-        ));
-        assert!(matches!(
-            engine_rx.recv().await.unwrap(),
-            EngineAction::Sink(Message::Close)
-        ));
+        assert!(matches!(engine_rx.recv().await.unwrap(), Message::Text(_)));
+        assert!(matches!(engine_rx.recv().await.unwrap(), Message::Close));
 
         drop(manager_tx);
         handle.await.unwrap().unwrap();
@@ -848,10 +840,7 @@ mod tests {
             socket_rx.recv().await.unwrap(),
             Signal::Disconnect
         ));
-        assert!(matches!(
-            engine_rx.recv().await.unwrap(),
-            EngineAction::Sink(Message::Close)
-        ));
+        assert!(matches!(engine_rx.recv().await.unwrap(), Message::Close));
         handle.await.unwrap().unwrap();
     }
 
@@ -941,13 +930,13 @@ mod tests {
             .unwrap();
 
         match engine_rx.recv().await.unwrap() {
-            EngineAction::Sink(Message::Text(text)) => {
+            Message::Text(text) => {
                 assert_eq!(&*text, r#"51-["img"]"#);
             }
             other => panic!("expected Text, got {other:?}"),
         }
         match engine_rx.recv().await.unwrap() {
-            EngineAction::Sink(Message::Binary(bytes)) => {
+            Message::Binary(bytes) => {
                 assert_eq!(bytes, Bytes::from_static(b"\x01\x02"));
             }
             other => panic!("expected Binary, got {other:?}"),
@@ -974,7 +963,7 @@ mod tests {
             .unwrap();
 
         match engine_rx.recv().await.unwrap() {
-            EngineAction::Sink(Message::Text(text)) => {
+            Message::Text(text) => {
                 assert_eq!(&*text, "342[true]");
             }
             other => panic!("expected Text, got {other:?}"),
@@ -1001,13 +990,13 @@ mod tests {
             .unwrap();
 
         match engine_rx.recv().await.unwrap() {
-            EngineAction::Sink(Message::Text(text)) => {
+            Message::Text(text) => {
                 assert_eq!(&*text, "61-7[true]");
             }
             other => panic!("expected Text, got {other:?}"),
         }
         match engine_rx.recv().await.unwrap() {
-            EngineAction::Sink(Message::Binary(bytes)) => {
+            Message::Binary(bytes) => {
                 assert_eq!(bytes, Bytes::from_static(b"\xCA\xFE"));
             }
             other => panic!("expected Binary, got {other:?}"),
@@ -1029,7 +1018,7 @@ mod tests {
             .unwrap();
 
         match engine_rx.recv().await.unwrap() {
-            EngineAction::Sink(Message::Text(text)) => {
+            Message::Text(text) => {
                 assert_eq!(&*text, "1");
             }
             other => panic!("expected Disconnect text, got {other:?}"),
@@ -1157,10 +1146,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(matches!(
-            engine_rx.recv().await.unwrap(),
-            EngineAction::Sink(Message::Close)
-        ));
+        assert!(matches!(engine_rx.recv().await.unwrap(), Message::Close));
         drop(manager_tx);
         handle.await.unwrap().unwrap();
     }
@@ -1175,15 +1161,12 @@ mod tests {
         drop(manager_tx);
 
         match engine_rx.recv().await.unwrap() {
-            EngineAction::Sink(Message::Text(text)) => {
+            Message::Text(text) => {
                 assert_eq!(&*text, "1/other,");
             }
             other => panic!("expected Disconnect text, got {other:?}"),
         }
-        assert!(matches!(
-            engine_rx.recv().await.unwrap(),
-            EngineAction::Sink(Message::Close)
-        ));
+        assert!(matches!(engine_rx.recv().await.unwrap(), Message::Close));
         handle.await.unwrap().unwrap();
     }
 

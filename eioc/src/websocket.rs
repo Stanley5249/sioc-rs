@@ -1,7 +1,6 @@
 //! WebSocket transport for Engine.IO v4.
 
 use crate::ENGINE_IO_VERSION;
-use crate::engine::FrameSender;
 use crate::error::{TransportError, WebSocketError};
 use crate::packet::{Frame, Handshake, PROBE, Packet};
 use bytestring::ByteString;
@@ -234,7 +233,7 @@ impl WebSocketStream {
     pub async fn transport(
         mut self,
         handshake_tx: Option<oneshot::Sender<Handshake>>,
-        frame_tx: FrameSender,
+        frame_tx: mpsc::Sender<Frame>,
         mut transport_rx: mpsc::Receiver<Frame>,
     ) -> Result<(), TransportError> {
         if let Some(handshake_tx) = handshake_tx {
@@ -290,7 +289,6 @@ impl WebSocketStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::FrameSender;
     use bytes::Bytes;
     use futures_util::{SinkExt, StreamExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -451,10 +449,10 @@ mod tests {
             assert_eq!(msg.to_text().unwrap(), "5");
             while let Some(Ok(_)) = server.next().await {}
         });
-        let (engine_tx, _) = mpsc::channel(4);
+        let (frame_tx, _) = mpsc::channel(4);
         let (_, transport_rx) = mpsc::channel::<Frame>(4);
         client
-            .transport(None, FrameSender(engine_tx), transport_rx)
+            .transport(None, frame_tx, transport_rx)
             .await
             .unwrap();
         server_task.await.unwrap();
@@ -469,11 +467,11 @@ mod tests {
             while let Some(Ok(_)) = server.next().await {}
         });
         let (handshake_tx, handshake_rx) = oneshot::channel();
-        let (engine_tx, _) = mpsc::channel(4);
+        let (frame_tx, _) = mpsc::channel(4);
         let (transport_tx, transport_rx) = mpsc::channel::<Frame>(4);
         drop(transport_tx);
         client
-            .transport(Some(handshake_tx), FrameSender(engine_tx), transport_rx)
+            .transport(Some(handshake_tx), frame_tx, transport_rx)
             .await
             .unwrap();
         assert_eq!(&*handshake_rx.await.unwrap().sid, "abc");
@@ -488,10 +486,10 @@ mod tests {
             while let Some(Ok(_)) = server.next().await {}
         });
         let (handshake_tx, _) = oneshot::channel();
-        let (engine_tx, _) = mpsc::channel(4);
+        let (frame_tx, _) = mpsc::channel(4);
         let (_, transport_rx) = mpsc::channel::<Frame>(4);
         let result = client
-            .transport(Some(handshake_tx), FrameSender(engine_tx), transport_rx)
+            .transport(Some(handshake_tx), frame_tx, transport_rx)
             .await;
         assert!(matches!(result, Err(TransportError::Open(_))));
         let _ = server_task.await;
@@ -507,10 +505,10 @@ mod tests {
         });
         let (handshake_tx, handshake_rx) = oneshot::channel::<Handshake>();
         drop(handshake_rx);
-        let (engine_tx, _) = mpsc::channel(4);
+        let (frame_tx, _) = mpsc::channel(4);
         let (_, transport_rx) = mpsc::channel::<Frame>(4);
         let result = client
-            .transport(Some(handshake_tx), FrameSender(engine_tx), transport_rx)
+            .transport(Some(handshake_tx), frame_tx, transport_rx)
             .await;
         assert!(matches!(result, Err(TransportError::SendHandshake(_))));
         let _ = server_task.await;
@@ -525,13 +523,11 @@ mod tests {
             let _ = server.close(None).await;
             while let Some(Ok(_)) = server.next().await {}
         });
-        let (engine_tx, mut engine_rx) = mpsc::channel(4);
+        let (frame_tx, mut frame_rx) = mpsc::channel(4);
         let (transport_tx, transport_rx) = mpsc::channel::<Frame>(4);
-        let transport = tokio::spawn(client.transport(None, FrameSender(engine_tx), transport_rx));
-        let action = engine_rx.recv().await.unwrap();
-        assert!(
-            matches!(action, crate::engine::EngineAction::Transport(Frame::Packet(Packet::Message(m))) if m == "data")
-        );
+        let transport = tokio::spawn(client.transport(None, frame_tx, transport_rx));
+        let action = frame_rx.recv().await.unwrap();
+        assert!(matches!(action, Frame::Packet(Packet::Message(m)) if m == "data"));
         drop(transport_tx);
         transport.await.unwrap().unwrap();
         server_task.await.unwrap();
@@ -545,10 +541,10 @@ mod tests {
             server.close(None).await.unwrap();
             while let Some(Ok(_)) = server.next().await {}
         });
-        let (engine_tx, mut engine_rx) = mpsc::channel(4);
+        let (frame_tx, mut frame_rx) = mpsc::channel(4);
         let (transport_tx, transport_rx) = mpsc::channel::<Frame>(4);
-        let transport = tokio::spawn(client.transport(None, FrameSender(engine_tx), transport_rx));
-        assert!(engine_rx.recv().await.is_none());
+        let transport = tokio::spawn(client.transport(None, frame_tx, transport_rx));
+        assert!(frame_rx.recv().await.is_none());
         transport_tx
             .send(Frame::Packet(Packet::Close))
             .await
@@ -568,7 +564,7 @@ mod tests {
             assert_eq!(msg.to_text().unwrap(), "4out");
             while let Some(Ok(_)) = server.next().await {}
         });
-        let (engine_tx, _) = mpsc::channel(4);
+        let (frame_tx, _) = mpsc::channel(4);
         let (transport_tx, transport_rx) = mpsc::channel::<Frame>(4);
         transport_tx
             .send(Frame::Packet(Packet::Message("out".into())))
@@ -576,7 +572,7 @@ mod tests {
             .unwrap();
         drop(transport_tx);
         client
-            .transport(None, FrameSender(engine_tx), transport_rx)
+            .transport(None, frame_tx, transport_rx)
             .await
             .unwrap();
         server_task.await.unwrap();
