@@ -12,13 +12,13 @@ Derive macros for [`sioc`](https://docs.rs/sioc).
 
 ## Struct-level attributes
 
-| Attribute             | Applies to             | Effect                                                                                                              |
-| --------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Attribute             | Applies to             | Effect                                                                                                                |
+| --------------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | `event(name = "str")` | [`EventType`]          | Overrides the event name. By default the struct name is converted to `snake_case`, so `MyEvent` becomes `"my_event"`. |
-| `event(ack = Type)`   | [`EventType`]          | Declares that this event expects an acknowledgement of type `Type`. Without this the event has no acknowledgement.  |
-| `event(binary)`       | [`EventType`]          | Marks the event as carrying binary attachments. Without this the event has no binary attachments.                   |
-| `ack(binary)`         | [`AckType`]            | Marks the acknowledgement as carrying binary attachments. Without this the ack has no binary attachments.           |
-| `strict`              | [`DeserializePayload`] | Rejects payloads that contain more elements than the struct has fields. By default, extra elements are ignored.     |
+| `event(ack = Type)`   | [`EventType`]          | Declares that this event expects an acknowledgement of type `Type`. Without this the event has no acknowledgement.    |
+| `event(binary)`       | [`EventType`]          | Marks the event as carrying binary attachments. Without this the event has no binary attachments.                     |
+| `ack(binary)`         | [`AckType`]            | Marks the acknowledgement as carrying binary attachments. Without this the ack has no binary attachments.             |
+| `strict`              | [`DeserializePayload`] | Rejects payloads that contain more elements than the struct has fields. By default, extra elements are ignored.       |
 
 ## Field-level attributes
 
