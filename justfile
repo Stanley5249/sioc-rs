@@ -36,3 +36,11 @@ msrv toolchain="1.88":
 # Generate an LCOV report; requires cargo-llvm-cov and llvm-tools-preview.
 coverage:
     cargo llvm-cov --locked --workspace --all-targets --lcov --output-path lcov.info
+
+# Run every smoke test against a real Socket.IO server.
+smoke: smoke-python
+
+# Run the quick-start client against the python-socketio server.
+smoke-python:
+    cargo build --locked -p quick-start --example quick_start
+    uv run --locked --directory examples/quick-start python server.py --client "cargo run --locked -p quick-start --example quick_start"
