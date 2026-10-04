@@ -6,43 +6,36 @@ set default-list
 quick_start := "cargo run --locked -p quick-start --example quick_start"
 
 # Run the local merge gate.
-ci: fmt-check lint lint-py lint-js test smoke doc deny
+ci: fmt-check _ci-lint test smoke doc deny
+
+# The linters read disjoint sources. Cargo work stays in order, because cargo
+# serializes on the target directory lock anyway.
+[parallel]
+_ci-lint: lint lint-py lint-js
 
 # Format all sources.
-fmt: fmt-rs fmt-py fmt-js
-
-# Format Rust sources and this justfile.
-fmt-rs:
-    cargo fmt --all
-    just --fmt
-
-# Format Python test servers.
-fmt-py:
-    uv run --locked ruff format -q
-
-# Format JS, TS, JSON, YAML, and Markdown.
-fmt-js:
-    bunx oxfmt
+[parallel]
+fmt: _fmt-cargo _fmt-ruff _fmt-oxfmt _fmt-just
 
 # Check formatting of all sources without rewriting them.
-fmt-check: fmt-check-rs fmt-check-py fmt-check-js
+[parallel]
+fmt-check: (_fmt-cargo "--check") (_fmt-ruff "--check") (_fmt-oxfmt "--check") (_fmt-just "--check")
 
-# Check Rust and justfile formatting.
-fmt-check-rs:
-    cargo fmt --all --check
-    just --fmt --check
+_fmt-cargo *args:
+    cargo fmt --all {{ args }}
 
-# Check Python formatting.
-fmt-check-py:
-    uv run --locked ruff format --check -q
+_fmt-ruff *args:
+    uv run --locked ruff format -q {{ args }}
 
-# Check JS, TS, JSON, YAML, and Markdown formatting.
-fmt-check-js:
-    bunx oxfmt --check
+_fmt-oxfmt *args:
+    bunx oxfmt {{ args }}
+
+_fmt-just *args:
+    just --fmt {{ args }}
 
 # Lint libraries, examples, and tests with warnings denied.
-lint:
-    cargo clippy --locked --workspace --all-targets -- -D warnings
+lint *args:
+    cargo clippy --quiet --locked --workspace --all-targets {{ args }} -- -D warnings
 
 # Lint and type-check Python test servers.
 lint-py:
@@ -50,13 +43,13 @@ lint-py:
     uv run --locked pyrefly check --summary=none
 
 # Lint TypeScript test servers with type-aware rules.
-lint-js:
-    bunx oxlint
+lint-js *args:
+    bunx oxlint {{ args }}
 
 # Run all targets and documentation examples.
-test:
-    cargo test --locked --workspace --all-targets
-    cargo test --locked --workspace --doc
+test *args:
+    cargo test --locked --workspace --all-targets {{ args }}
+    cargo test --locked --workspace --doc {{ args }}
 
 # Run every smoke test against a real Socket.IO server.
 smoke: smoke-py smoke-js
@@ -75,17 +68,18 @@ _build-quick-start:
 
 # Check documentation with warnings denied.
 [env("RUSTDOCFLAGS", "-D warnings")]
-doc:
-    cargo doc --locked --no-deps --workspace --examples
+doc *args:
+    cargo doc --locked --no-deps --workspace --examples {{ args }}
 
 # Check dependency advisories, licenses, bans, and sources.
-deny:
-    cargo deny --locked check
+deny *args:
+    cargo deny --locked check {{ args }}
 
 # Check the minimum supported compiler; dev targets use stable Rust.
-msrv toolchain="1.88":
-    cargo +{{ toolchain }} check --locked --workspace
+[arg("toolchain", long, help="Rust toolchain to check with")]
+msrv toolchain="1.88" *args:
+    cargo +{{ toolchain }} check --locked --workspace {{ args }}
 
 # Generate an LCOV report; requires cargo-llvm-cov and llvm-tools-preview.
-coverage:
-    cargo llvm-cov --locked --workspace --all-targets --lcov --output-path lcov.info
+coverage *args:
+    cargo llvm-cov --locked --workspace --all-targets --lcov --output-path lcov.info {{ args }}
