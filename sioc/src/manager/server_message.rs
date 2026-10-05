@@ -1,6 +1,6 @@
 //! Delivers what the server sends to each namespace.
 
-use super::{NamespaceStatus, Routes};
+use super::Routes;
 use crate::error::{ManagerError, PacketError};
 use crate::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Packet, ServerPacket};
 use bytes::Bytes;
@@ -14,14 +14,14 @@ use tokio::sync::mpsc;
 pub(super) async fn server_messages_to_packets(
     mut server_message_rx: mpsc::Receiver<Message>,
     routes: &Routes,
-    namespace_status_tx: mpsc::UnboundedSender<NamespaceStatus>,
+    connected_generation_tx: mpsc::UnboundedSender<u64>,
 ) -> Result<(), ManagerError> {
     let mut reconstructor = Reconstructor::new();
 
     while let Some(message) = server_message_rx.recv().await {
         match message {
             Message::Text(text) => {
-                route_text(text, routes, &namespace_status_tx, &mut reconstructor).await?;
+                route_text(text, routes, &connected_generation_tx, &mut reconstructor).await?;
             }
             Message::Binary(attachment) => {
                 route_binary(attachment, routes, &mut reconstructor).await?;
@@ -39,7 +39,7 @@ pub(super) async fn server_messages_to_packets(
 async fn route_text(
     text: ByteString,
     routes: &Routes,
-    namespace_status_tx: &mpsc::UnboundedSender<NamespaceStatus>,
+    connected_generation_tx: &mpsc::UnboundedSender<u64>,
     reconstructor: &mut Reconstructor,
 ) -> Result<(), ManagerError> {
     if reconstructor.is_pending() {
@@ -56,8 +56,10 @@ async fn route_text(
 
             tracing::debug!(%ns, sid = %connect.sid, "connected");
 
-            if routes.mark_connected(&ns) {
-                send_namespace_status(namespace_status_tx, NamespaceStatus::Connected(ns.clone()))?;
+            if let Some(generation) = routes.mark_connected(&ns) {
+                connected_generation_tx
+                    .send(generation)
+                    .map_err(|_| ManagerError::SendNamespaceStatus)?;
             }
             send_server_packet(
                 routes.server_packet_tx(&ns),
@@ -67,16 +69,9 @@ async fn route_text(
             .await;
         }
         Packet::Disconnect => {
-            tracing::debug!(%ns, "disconnected");
+            tracing::debug!(%ns, "server closed");
 
-            let server_packet_tx = routes.remove(&ns);
-            if server_packet_tx.is_some() {
-                send_namespace_status(
-                    namespace_status_tx,
-                    NamespaceStatus::Disconnected(ns.clone()),
-                )?;
-            }
-            send_server_packet(server_packet_tx, &ns, ServerPacket::Disconnect).await;
+            send_server_packet(routes.close(&ns), &ns, ServerPacket::Disconnect).await;
         }
         Packet::Event { payload, id } => {
             let server_packet = ServerPacket::Event(DynEvent::new(payload, id));
@@ -90,12 +85,8 @@ async fn route_text(
 
             tracing::error!(%ns, %error, "connect error");
 
-            send_server_packet(
-                routes.server_packet_tx(&ns),
-                &ns,
-                ServerPacket::ConnectError(error),
-            )
-            .await;
+            // The server refused the namespace, so it closes like a DISCONNECT.
+            send_server_packet(routes.close(&ns), &ns, ServerPacket::ConnectError(error)).await;
         }
         Packet::BinaryEvent { payload, id, count } => {
             reconstructor.insert(ns, BinaryPacket::event(payload, id, count));
@@ -180,15 +171,6 @@ fn resolve_ack(routes: &Routes, ns: &ByteString, id: u64, ack: DynAck) {
     if ack_tx.send(ack).is_err() {
         tracing::debug!(%ns, id, "discarded ack for a dropped handle");
     }
-}
-
-fn send_namespace_status(
-    namespace_status_tx: &mpsc::UnboundedSender<NamespaceStatus>,
-    namespace_status: NamespaceStatus,
-) -> Result<(), ManagerError> {
-    namespace_status_tx
-        .send(namespace_status)
-        .map_err(|_| ManagerError::SendNamespaceStatus)
 }
 
 enum BinaryPacket {

@@ -295,7 +295,7 @@ pub enum ManagerError {
     )]
     NamespaceConflict { ns: ByteString },
 
-    /// Sending a namespace status between the manager loops failed because the channel is closed.
+    /// Telling the client-packet loop that the server confirmed a namespace failed because the channel is closed.
     #[error("namespace status channel closed")]
     #[diagnostic(
         code(sioc::manager::send_namespace_status),

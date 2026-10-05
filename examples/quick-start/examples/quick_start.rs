@@ -144,7 +144,7 @@ async fn run() -> Result<()> {
         }
     }
 
-    tx.disconnect().await;
+    tx.disconnect();
 
     client.join().await?;
 

@@ -1,8 +1,10 @@
 use super::*;
+use crate::error::SocketError;
 use crate::packet::{ClientPacket, DynAck, ServerPacket};
 use bytes::Bytes;
 use bytestring::ByteString;
 use eioc::prelude::Message;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, oneshot};
@@ -51,24 +53,23 @@ fn event(payload: &'static str, ack_tx: Option<oneshot::Sender<DynAck>>) -> Clie
 
 impl Harness {
     /// Opens a namespace and consumes its CONNECT packet.
-    async fn open(
-        &mut self,
-        ns: &str,
-    ) -> (mpsc::Sender<ClientPacket>, mpsc::Receiver<ServerPacket>) {
+    async fn open(&mut self, ns: &str) -> (Arc<ClientPacketTx>, mpsc::Receiver<ServerPacket>) {
         self.open_with(ns, 32).await
     }
 
     async fn open_with(
         &mut self,
         ns: &str,
-        signal_capacity: usize,
-    ) -> (mpsc::Sender<ClientPacket>, mpsc::Receiver<ServerPacket>) {
+        server_packet_capacity: usize,
+    ) -> (Arc<ClientPacketTx>, mpsc::Receiver<ServerPacket>) {
         let (client_packet_tx, client_packet_rx) = mpsc::channel(32);
-        let (server_packet_tx, server_packet_rx) = mpsc::channel(signal_capacity);
+        let client_packet_tx = Arc::new(ClientPacketTx::new(client_packet_tx));
+        let (server_packet_tx, server_packet_rx) = mpsc::channel(server_packet_capacity);
         let connect_request = ConnectRequest {
             ns: ns.into(),
             payload: ByteString::new(),
             client_packet_rx,
+            client_packet_tx: Arc::downgrade(&client_packet_tx),
             server_packet_tx,
         };
         self.connect_request_tx.send(connect_request).await.unwrap();
@@ -134,11 +135,8 @@ async fn closes_when_client_handle_drops_with_no_namespace() {
 #[tokio::test]
 async fn stays_open_after_last_namespace_while_client_handle_lives() {
     let mut h = spawn();
-    let (client_packet_tx, _signal_rx) = h.open("/").await;
-    client_packet_tx
-        .send(ClientPacket::Disconnect)
-        .await
-        .unwrap();
+    let (client_packet_tx, _server_packet_rx) = h.open("/").await;
+    client_packet_tx.close();
     assert_eq!(&*h.text().await, "1");
     assert_quiet(&mut h.client_message_rx).await;
     assert!(matches!(
@@ -155,7 +153,7 @@ async fn stays_open_after_last_namespace_while_client_handle_lives() {
 #[tokio::test]
 async fn closes_after_client_handle_and_last_namespace_drop() {
     let mut h = spawn();
-    let (client_packet_tx, _signal_rx) = h.open("/").await;
+    let (client_packet_tx, _server_packet_rx) = h.open("/").await;
     drop(h.connect_request_tx);
     assert_quiet(&mut h.client_message_rx).await;
 
@@ -172,7 +170,7 @@ async fn closes_after_client_handle_and_last_namespace_drop() {
 #[tokio::test]
 async fn dropping_handles_disconnects_only_that_namespace() {
     let mut h = spawn();
-    let (client_packet_tx, _signal_rx) = h.open("/").await;
+    let (client_packet_tx, _server_packet_rx) = h.open("/").await;
     let (_other_tx, _other_rx) = h.open("/other").await;
     drop(client_packet_tx);
     assert_eq!(&*h.text().await, "1");
@@ -257,7 +255,7 @@ async fn binary_ack_reassembly() {
 #[tokio::test]
 async fn binary_event_waits_for_every_attachment() {
     let mut h = spawn();
-    let (_directive_tx, mut server_packet_rx) = h.open("/").await;
+    let (_client_packet_tx, mut server_packet_rx) = h.open("/").await;
     h.server(CONNECT_RESPONSE).await;
     server_packet_rx.recv().await.unwrap();
 
@@ -295,7 +293,7 @@ async fn binary_event_directive_sends_attachments() {
 #[tokio::test]
 async fn ack_directive_is_not_buffered() {
     let mut h = spawn();
-    let (client_packet_tx, _signal_rx) = h.open("/").await;
+    let (client_packet_tx, _server_packet_rx) = h.open("/").await;
     let client_packet = ClientPacket::Ack {
         payload: ByteString::from_static("[true]"),
         id: 42,
@@ -309,7 +307,7 @@ async fn ack_directive_is_not_buffered() {
 #[tokio::test]
 async fn binary_ack_directive_sends_attachments() {
     let mut h = spawn();
-    let (client_packet_tx, _signal_rx) = h.open("/").await;
+    let (client_packet_tx, _server_packet_rx) = h.open("/").await;
     let client_packet = ClientPacket::Ack {
         payload: ByteString::from_static("[true]"),
         id: 7,
@@ -335,13 +333,58 @@ async fn server_disconnect_ends_receiver_and_handles() {
     ));
     assert!(server_packet_rx.recv().await.is_none());
 
-    // The stale handle is dropped on its next client packet, which closes it.
+    // The handles closed before the receiver saw the DISCONNECT.
+    assert!(matches!(
+        client_packet_tx.send(event(r#"["late"]"#, None)).await,
+        Err(SocketError::Closed)
+    ));
+
+    // The server closed the namespace, so dropping the handles sends nothing.
+    drop(client_packet_tx);
+    assert_quiet(&mut h.client_message_rx).await;
+    h.close_server().await.unwrap();
+}
+
+#[tokio::test]
+async fn connect_error_closes_namespace() {
+    let mut h = spawn();
+    let (client_packet_tx, mut server_packet_rx) = h.open("/").await;
+    h.server(r#"4{"message":"denied"}"#).await;
+    assert!(matches!(
+        server_packet_rx.recv().await,
+        Some(ServerPacket::ConnectError(_))
+    ));
+    assert!(server_packet_rx.recv().await.is_none());
+    assert!(matches!(
+        client_packet_tx.send(event(r#"["late"]"#, None)).await,
+        Err(SocketError::Closed)
+    ));
+
+    // The refused namespace can open again.
+    let (_client_packet_tx, mut server_packet_rx) = h.open("/").await;
+    h.server(CONNECT_RESPONSE).await;
+    assert!(matches!(
+        server_packet_rx.recv().await,
+        Some(ServerPacket::Connect(_))
+    ));
+    h.close_server().await.unwrap();
+}
+
+#[tokio::test]
+async fn client_close_sends_earlier_packets_first() {
+    let mut h = spawn();
+    let (client_packet_tx, mut server_packet_rx) = h.open("/").await;
+    h.server(CONNECT_RESPONSE).await;
+    server_packet_rx.recv().await.unwrap();
+
     client_packet_tx
-        .send(event(r#"["late"]"#, None))
+        .send(event(r#"["a"]"#, None))
         .await
         .unwrap();
-    client_packet_tx.closed().await;
-    assert_quiet(&mut h.client_message_rx).await;
+    client_packet_tx.close();
+    assert_eq!(&*h.text().await, r#"2["a"]"#);
+    assert_eq!(&*h.text().await, "1");
+    assert!(server_packet_rx.recv().await.is_none());
     h.close_server().await.unwrap();
 }
 
@@ -358,7 +401,7 @@ async fn reopened_namespace_ignores_old_handles() {
     h.server(CONNECT_RESPONSE).await;
     new_rx.recv().await.unwrap();
 
-    old_tx.send(event(r#"["old"]"#, None)).await.unwrap();
+    old_tx.send(event(r#"["old"]"#, None)).await.unwrap_err();
     new_tx.send(event(r#"["new"]"#, None)).await.unwrap();
     assert_eq!(&*h.text().await, r#"2["new"]"#);
     assert_quiet(&mut h.client_message_rx).await;
@@ -368,13 +411,14 @@ async fn reopened_namespace_ignores_old_handles() {
 #[tokio::test]
 async fn duplicate_namespace_is_conflict() {
     let mut h = spawn();
-    let (_directive_tx, _signal_rx) = h.open("/").await;
+    let (_client_packet_tx, _server_packet_rx) = h.open("/").await;
     let (_, client_packet_rx) = mpsc::channel(1);
     let (server_packet_tx, _) = mpsc::channel(1);
     let connect_request = ConnectRequest {
         ns: "/".into(),
         payload: ByteString::new(),
         client_packet_rx,
+        client_packet_tx: std::sync::Weak::new(),
         server_packet_tx,
     };
     h.connect_request_tx.send(connect_request).await.unwrap();
@@ -391,7 +435,7 @@ async fn late_server_packets_are_discarded() {
     h.server(r#"30["late"]"#).await;
     h.server("1/gone,").await;
 
-    let (_directive_tx, mut server_packet_rx) = h.open("/").await;
+    let (_client_packet_tx, mut server_packet_rx) = h.open("/").await;
     h.server(CONNECT_RESPONSE).await;
     assert!(matches!(
         server_packet_rx.recv().await,
@@ -429,7 +473,7 @@ async fn unexpected_binary_is_error() {
 #[tokio::test]
 async fn text_during_binary_reassembly_is_error() {
     let mut h = spawn();
-    let (_directive_tx, mut server_packet_rx) = h.open("/").await;
+    let (_client_packet_tx, mut server_packet_rx) = h.open("/").await;
     h.server(CONNECT_RESPONSE).await;
     server_packet_rx.recv().await.unwrap();
 
@@ -487,7 +531,7 @@ async fn emits_flow_while_receiver_is_full() {
 #[tokio::test]
 async fn repeated_server_connect_flushes_once() {
     let mut h = spawn();
-    let (client_packet_tx, _signal_rx) = h.open("/").await;
+    let (client_packet_tx, _server_packet_rx) = h.open("/").await;
     client_packet_tx
         .send(event(r#"["a"]"#, None))
         .await

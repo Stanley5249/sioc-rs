@@ -3,13 +3,14 @@
 use crate::ack::AckType;
 use crate::error::ManagerError;
 use crate::error::{ClientBuilderError, ClientError, PayloadError, SocketError};
-use crate::manager::{self, ConnectRequest};
+use crate::manager::{self, ClientPacketTx, ConnectRequest};
 use crate::marker::{AckId, AckMarker, BinaryMarker};
 use crate::packet::{ClientPacket, DynEvent, ServerPacket};
 use bytestring::ByteString;
 use eioc::transport::TransportStrategy;
 use eioc::websocket::WebSocketConnector;
 use futures_util::TryFutureExt;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use url::Url;
@@ -285,6 +286,7 @@ impl Client {
         B: Into<ByteString>,
     {
         let (client_packet_tx, client_packet_rx) = mpsc::channel(self.channels.manager);
+        let client_packet_tx = Arc::new(ClientPacketTx::new(client_packet_tx));
 
         let (server_packet_tx, server_packet_rx) = mpsc::channel(self.channels.socket);
 
@@ -292,6 +294,7 @@ impl Client {
             ns: ns.into(),
             payload: payload.into(),
             client_packet_rx,
+            client_packet_tx: Arc::downgrade(&client_packet_tx),
             server_packet_tx,
         };
 
@@ -324,18 +327,16 @@ impl Client {
 /// Sender for a Socket.IO namespace.
 ///
 /// Cloning is cheap, and all clones share the namespace. The namespace
-/// disconnects when the last clone is dropped.
+/// disconnects when any clone calls [`disconnect`](Self::disconnect) or the
+/// last clone is dropped.
 #[derive(Clone, Debug)]
 pub struct SocketSender {
-    client_packet_tx: mpsc::Sender<ClientPacket>,
+    client_packet_tx: Arc<ClientPacketTx>,
 }
 
 impl SocketSender {
     async fn send(&self, client_packet: ClientPacket) -> Result<(), SocketError> {
-        self.client_packet_tx
-            .send(client_packet)
-            .await
-            .map_err(|_| SocketError::Closed)
+        self.client_packet_tx.send(client_packet).await
     }
 
     /// Emits an event; returns `()` or an [`AckHandle`](crate::ack::AckHandle) depending on the ack policy.
@@ -369,12 +370,13 @@ impl SocketSender {
         self.send(client_packet).await
     }
 
-    /// Sends a graceful disconnect packet for the namespace.
+    /// Disconnects the namespace for every clone.
     ///
-    /// Idempotent: once the namespace has closed, by either side, the call returns immediately.
-    pub async fn disconnect(&self) {
-        // A closed channel means the namespace has already closed.
-        let _ = self.send(ClientPacket::Disconnect).await;
+    /// Events and acks sent before the call still go out, followed by a
+    /// DISCONNECT packet. Later sends fail with [`SocketError::Closed`]. Calling
+    /// it after the namespace has closed, by either side, does nothing.
+    pub fn disconnect(&self) {
+        self.client_packet_tx.close();
     }
 }
 
@@ -386,8 +388,8 @@ pub struct SocketReceiver {
 
 impl SocketReceiver {
     /// Returns the next application event. [`ServerPacket::Connect`], [`ServerPacket::Disconnect`], and
-    /// [`ServerPacket::ConnectError`] are silently dropped; they do not close the receiver.
-    /// Returns `None` only when the channel closes (router shut down).
+    /// [`ServerPacket::ConnectError`] are skipped.
+    /// Returns `None` once the namespace closes, by either side, or the session ends.
     ///
     /// Cancel safe: the only suspend point is `recv`; skipped protocol packets have no
     /// suspend point after consumption, so no events are lost on cancellation.
@@ -453,6 +455,7 @@ mod tests {
 
     fn socket_sender() -> (SocketSender, mpsc::Receiver<ClientPacket>) {
         let (client_packet_tx, client_packet_rx) = mpsc::channel(8);
+        let client_packet_tx = Arc::new(ClientPacketTx::new(client_packet_tx));
         (SocketSender { client_packet_tx }, client_packet_rx)
     }
 
@@ -535,20 +538,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disconnect_sends_disconnect_directive() {
+    async fn disconnect_closes_every_clone_after_sent_packets() {
         let (sender, mut client_packet_rx) = socket_sender();
-        sender.disconnect().await;
+        let clone = sender.clone();
+        sender.emit(TestEmit).await.unwrap();
+        sender.disconnect();
         assert!(matches!(
-            client_packet_rx.try_recv().unwrap(),
-            ClientPacket::Disconnect
+            clone.emit(TestEmit).await,
+            Err(SocketError::Closed)
         ));
+        assert!(matches!(
+            client_packet_rx.recv().await,
+            Some(ClientPacket::Event { .. })
+        ));
+        assert!(client_packet_rx.recv().await.is_none());
     }
 
     #[tokio::test]
     async fn disconnect_after_close_returns() {
         let (sender, client_packet_rx) = socket_sender();
         drop(client_packet_rx);
-        sender.disconnect().await;
+        sender.disconnect();
+        sender.disconnect();
     }
 
     #[tokio::test]

@@ -137,9 +137,14 @@ impl DynAck {
 pub enum ServerPacket<E = DynEvent> {
     /// The server confirmed the namespace connection.
     Connect(Connect),
-    /// The namespace was disconnected. Does not close the receiver; a reconnect delivers a new [`ServerPacket::Connect`].
+    /// The server disconnected the namespace.
+    ///
+    /// A disconnected namespace could connect again and deliver a new
+    /// [`ServerPacket::Connect`] on the same receiver, so this is a separate
+    /// state from the receiver ending. Reconnection is not implemented yet,
+    /// so the receiver currently ends right after this packet.
     Disconnect,
-    /// The server rejected a namespace connection attempt. Does not close the receiver.
+    /// The server refused the namespace. The receiver ends right after this packet.
     ConnectError(ConnectError),
     /// An application-level event (possibly with binary attachments).
     Event(E),
@@ -203,8 +208,6 @@ impl<E> ServerPacket<E> {
 #[derive(Debug)]
 #[allow(missing_docs)]
 pub enum ClientPacket {
-    /// Closes the namespace.
-    Disconnect,
     /// Emits an event; if `ack_tx` is set, an ack ID is assigned and the response routed to it.
     Event {
         payload: ByteString,
