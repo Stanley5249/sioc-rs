@@ -74,7 +74,9 @@ fn take_batch(
 ) -> (Vec<Frame>, Option<Frame>) {
     let mut size = encode_frames(std::slice::from_ref(&first)).len() as u64;
     let mut batch = vec![first];
-    for frame in frames {
+    // python-engineio accepts at most sixteen packets per POST. Its handshake
+    // advertises only a byte limit, so keep that interoperability ceiling too.
+    for frame in frames.take(15) {
         let next_size = encode_frames(std::slice::from_ref(&frame)).len() as u64;
         if size.saturating_add(1).saturating_add(next_size) > max_payload {
             return (batch, Some(frame));
@@ -145,7 +147,7 @@ async fn post(client: &Client, url: &Url, frames: &[Frame]) -> Result<(), Pollin
 ///
 /// When the engine closes `client_frame_rx`, posts a `Close` packet to end the session.
 ///
-/// Batches respect the handshake's wire-byte limit. A single oversized frame
+/// Batches contain at most sixteen frames and respect the handshake's wire-byte limit. A single oversized frame
 /// travels alone, matching engine.io-client's batching behavior.
 #[tracing::instrument(level = "debug", skip_all)]
 async fn post_client_frames(
@@ -411,6 +413,12 @@ mod tests {
         let (batch, pending) = take_batch(oversized.clone(), [text()].into_iter(), 1);
         assert_eq!(batch, [oversized]);
         assert_eq!(pending, Some(text()));
+
+        let mut frames = (0..32).map(|_| text());
+        let (batch, pending) = take_batch(text(), frames.by_ref(), u64::MAX);
+        assert_eq!(batch.len(), 16);
+        assert!(pending.is_none());
+        assert_eq!(frames.count(), 17);
     }
 
     #[tokio::test]
