@@ -18,6 +18,30 @@ It adds _namespaces_ for multiple channels over a single connection, _events_ as
 - Zero-copy packet parsing via [`bytestring`](https://docs.rs/bytestring) and [`bytes`](https://docs.rs/bytes).
 - Reconnection policy belongs to the application. Call `Client::connect` again for a closed namespace on a live session, or open a new `Client` after the session ends. Use `tokio::time::sleep` for application-controlled retry delays.
 
+An application can reopen a session after its receiver ends. This example retries
+session failures with a fixed delay; applications choose their own limit and policy.
+
+```rust,no_run
+# async fn reconnect(url: url::Url) -> sioc::error::Result<()> {
+use sioc::prelude::*;
+use std::time::Duration;
+
+loop {
+    let client = ClientBuilder::new(url.clone()).open()?;
+    let (tx, mut rx) = client.connect("/").await?;
+    while let Some(packet) = rx.recv().await {
+        // Dispatch packets in the application's event loop.
+        tracing::debug!(?packet, "received packet");
+    }
+    drop(tx);
+    if let Err(error) = client.join().await {
+        tracing::warn!(%error, "session ended with an error");
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+}
+# }
+```
+
 ## License
 
 MIT OR Apache-2.0.
