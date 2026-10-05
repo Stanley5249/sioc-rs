@@ -175,6 +175,11 @@ while let Some(event) = rx.listen::<ChatEvent>().await? {
 
 Early development. Expect breaking changes. Benchmarks and test coverage are not yet comprehensive. This does not attempt to pass the JavaScript Socket.IO test suite.
 
+Not implemented yet:
+
+- Reconnection. A namespace the server disconnects or refuses stays closed, and a session that ends stays ended. Call `Client::connect` again or open a new `Client`.
+- The handshake's `maxPayload`. Long polling batches up to eight packets per request regardless of their size.
+
 ## Comparison
 
 ### Rust-socketio-client
