@@ -65,6 +65,26 @@ fn encode_frames(frames: &[Frame]) -> String {
     buffer
 }
 
+/// Takes an ordered prefix whose wire encoding fits the handshake limit.
+/// A single oversized frame travels alone, matching engine.io-client.
+fn take_batch(
+    first: Frame,
+    frames: impl Iterator<Item = Frame>,
+    max_payload: u64,
+) -> (Vec<Frame>, Option<Frame>) {
+    let mut size = encode_frames(std::slice::from_ref(&first)).len() as u64;
+    let mut batch = vec![first];
+    for frame in frames {
+        let next_size = encode_frames(std::slice::from_ref(&frame)).len() as u64;
+        if size.saturating_add(1).saturating_add(next_size) > max_payload {
+            return (batch, Some(frame));
+        }
+        size += 1 + next_size;
+        batch.push(frame);
+    }
+    (batch, None)
+}
+
 /// Builds the polling URL by appending the EIO version and transport parameters.
 fn polling_url(mut base_url: Url) -> Url {
     base_url
@@ -133,37 +153,53 @@ impl PollingClient {
     ///
     /// When the engine closes `client_frame_rx`, posts a `Close` packet to end the session.
     ///
-    /// A batch holds up to eight frames regardless of size, so it can exceed
-    /// the handshake's `maxPayload`. Respecting the limit is not implemented yet.
+    /// Batches respect the handshake's wire-byte limit. A single oversized frame
+    /// travels alone, matching engine.io-client's batching behavior.
     #[tracing::instrument(level = "debug", skip_all)]
     async fn post_client_frames(
         &self,
         url: &Url,
         client_frame_rx: &mut mpsc::Receiver<Frame>,
         pause: &CancellationToken,
+        max_payload: u64,
     ) -> Result<Stop, TransportError> {
-        let mut buffer = Vec::with_capacity(8);
+        let mut pending = None;
 
         loop {
             // Pause only while idle, because a POST in flight may carry frames.
-            let count = tokio::select! {
-                () = pause.cancelled() => {
-                    tracing::debug!("paused polling post");
-                    return Ok(Stop::Paused);
+            let first = if let Some(frame) = pending.take() {
+                Some(frame)
+            } else {
+                tokio::select! {
+                    () = pause.cancelled() => {
+                        tracing::debug!("paused polling post");
+                        return Ok(Stop::Paused);
+                    }
+                    frame = client_frame_rx.recv() => frame,
                 }
-                count = client_frame_rx.recv_many(&mut buffer, 8) => count,
             };
 
-            if count == 0 {
+            let Some(first) = first else {
                 tracing::trace!("sent close packet");
 
                 self.post(url, &[Packet::Close.into()]).await?;
 
                 return Ok(Stop::Ended);
-            }
+            };
+
+            // Empty or disconnected means the ready prefix has ended. Pending
+            // frames are posted before honoring an upgrade pause.
+            let ready = std::iter::from_fn(|| {
+                if pause.is_cancelled() {
+                    None
+                } else {
+                    client_frame_rx.try_recv().ok()
+                }
+            });
+            let (buffer, remainder) = take_batch(first, ready, max_payload);
+            pending = remainder;
 
             self.post(url, &buffer).await?;
-            buffer.clear();
         }
     }
 
@@ -204,9 +240,10 @@ impl PollingClient {
         server_frame_tx: &mpsc::Sender<Frame>,
         client_frame_rx: &mut mpsc::Receiver<Frame>,
         pause: &CancellationToken,
+        max_payload: u64,
     ) -> Result<Stop, TransportError> {
         let mut get = pin!(self.get_server_frames(url, server_frame_tx, pause));
-        let mut post = pin!(self.post_client_frames(url, client_frame_rx, pause));
+        let mut post = pin!(self.post_client_frames(url, client_frame_rx, pause, max_payload));
 
         // A pause lets the other loop finish its request. An ended session
         // abandons it, because its result no longer matters.
@@ -232,9 +269,10 @@ impl PollingClient {
         server_frame_tx: &mpsc::Sender<Frame>,
         client_frame_rx: &mut mpsc::Receiver<Frame>,
         upgrade: impl Future<Output = Result<WebSocketStream, WebSocketError>>,
+        max_payload: u64,
     ) -> Result<Option<WebSocketStream>, TransportError> {
         let pause = CancellationToken::new();
-        let mut poll = pin!(self.poll(url, server_frame_tx, client_frame_rx, &pause));
+        let mut poll = pin!(self.poll(url, server_frame_tx, client_frame_rx, &pause, max_payload));
 
         tokio::select! {
             stop = &mut poll => {
@@ -293,6 +331,7 @@ impl PollingClient {
         url.query_pairs_mut().append_pair("sid", &handshake.sid);
         let can_upgrade = handshake.can_upgrade_to_websocket();
         let sid = handshake.sid.clone();
+        let max_payload = handshake.max_payload;
 
         handshake_tx
             .send(handshake)
@@ -301,14 +340,21 @@ impl PollingClient {
         let stream = if can_upgrade {
             let upgrade = WebSocketStream::connect(base_url, Some(&sid), connector);
 
-            self.poll_until_upgraded(&url, &server_frame_tx, &mut client_frame_rx, upgrade)
-                .await?
+            self.poll_until_upgraded(
+                &url,
+                &server_frame_tx,
+                &mut client_frame_rx,
+                upgrade,
+                max_payload,
+            )
+            .await?
         } else {
             self.poll(
                 &url,
                 &server_frame_tx,
                 &mut client_frame_rx,
                 &CancellationToken::new(),
+                max_payload,
             )
             .await?;
 
@@ -343,6 +389,78 @@ enum Stop {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batches_count_encoded_bytes_and_keep_order() {
+        let text = || Packet::Message("a".into()).into();
+        for (limit, count) in [(4, 1), (5, 2), (6, 2), (8, 3)] {
+            let (batch, pending) = take_batch(text(), [text(), text()].into_iter(), limit);
+            assert_eq!(batch.len(), count, "limit {limit}");
+            assert_eq!(pending.is_some(), count < 3);
+        }
+        let binary = Frame::Binary(Bytes::from_static(b"abc")); // bYWJj = 5 bytes
+        let unicode = Frame::Packet(Packet::Message("台".into())); // 4 UTF-8 bytes
+        let (batch, pending) = take_batch(binary.clone(), [unicode.clone()].into_iter(), 9);
+        assert_eq!(batch, [binary]);
+        assert_eq!(pending, Some(unicode));
+
+        let oversized: Frame = Packet::Message("oversized".into()).into();
+        let (batch, pending) = take_batch(oversized.clone(), [text()].into_iter(), 1);
+        assert_eq!(batch, [oversized]);
+        assert_eq!(pending, Some(text()));
+    }
+
+    #[tokio::test]
+    async fn posts_respect_limit_and_close_after_all_frames() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move {
+            let mut bodies = Vec::new();
+            for _ in 0..3 {
+                let (mut tcp, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let (header_end, length) = loop {
+                    let mut chunk = [0; 1024];
+                    let count = tcp.read(&mut chunk).await.unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&chunk[..count]);
+                    if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                        let length: usize = headers
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length: "))
+                            .unwrap()
+                            .parse()
+                            .unwrap();
+                        if request.len() >= end + 4 + length {
+                            break (end + 4, length);
+                        }
+                    }
+                };
+                bodies.push(
+                    String::from_utf8(request[header_end..header_end + length].to_vec()).unwrap(),
+                );
+                tcp.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                )
+                .await
+                .unwrap();
+            }
+            bodies
+        });
+        let (tx, mut rx) = mpsc::channel(4);
+        for payload in ["aaaa", "bbbb", "cccc"] {
+            tx.send(Packet::Message(payload.into()).into())
+                .await
+                .unwrap();
+        }
+        drop(tx);
+        PollingClient(Client::new())
+            .post_client_frames(&url, &mut rx, &CancellationToken::new(), 11)
+            .await
+            .unwrap();
+        assert_eq!(server.await.unwrap(), ["4aaaa\x1e4bbbb", "4cccc", "1"]);
+    }
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -426,7 +544,13 @@ mod tests {
         drop(client_frame_tx);
         let client = PollingClient(Client::new());
         let pause = CancellationToken::new();
-        let poll = client.poll(&url, &server_frame_tx, &mut client_frame_rx, &pause);
+        let poll = client.poll(
+            &url,
+            &server_frame_tx,
+            &mut client_frame_rx,
+            &pause,
+            1_000_000,
+        );
         let stop = tokio::time::timeout(Duration::from_secs(5), poll)
             .await
             .unwrap()
@@ -442,7 +566,13 @@ mod tests {
         let client = PollingClient(Client::new());
         let upgrade = async { Err(WebSocketError::Closed) };
         let stream = client
-            .poll_until_upgraded(&url, &server_frame_tx, &mut client_frame_rx, upgrade)
+            .poll_until_upgraded(
+                &url,
+                &server_frame_tx,
+                &mut client_frame_rx,
+                upgrade,
+                1_000_000,
+            )
             .await
             .unwrap();
         assert!(stream.is_none());

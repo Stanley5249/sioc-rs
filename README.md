@@ -178,7 +178,7 @@ Early development. Expect breaking changes. Benchmarks and test coverage are not
 Not implemented yet:
 
 - Reconnection. A namespace the server disconnects or refuses stays closed, and a session that ends stays ended. Call `Client::connect` again or open a new `Client`.
-- The handshake's `maxPayload`. Long polling batches up to eight packets per request regardless of their size.
+- Long polling respects the handshake's `maxPayload` when combining packets. A single oversized packet is sent alone, matching the JavaScript client.
 
 ## Comparison
 
