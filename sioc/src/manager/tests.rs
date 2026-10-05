@@ -273,7 +273,7 @@ async fn binary_event_waits_for_every_attachment() {
 }
 
 #[tokio::test]
-async fn binary_event_directive_sends_attachments() {
+async fn binary_event_sends_attachments() {
     let mut h = spawn();
     let (client_packet_tx, mut server_packet_rx) = h.open("/").await;
     h.server(CONNECT_RESPONSE).await;
@@ -291,7 +291,7 @@ async fn binary_event_directive_sends_attachments() {
 }
 
 #[tokio::test]
-async fn ack_directive_is_not_buffered() {
+async fn ack_is_not_buffered() {
     let mut h = spawn();
     let (client_packet_tx, _server_packet_rx) = h.open("/").await;
     let client_packet = ClientPacket::Ack {
@@ -305,7 +305,7 @@ async fn ack_directive_is_not_buffered() {
 }
 
 #[tokio::test]
-async fn binary_ack_directive_sends_attachments() {
+async fn binary_ack_sends_attachments() {
     let mut h = spawn();
     let (client_packet_tx, _server_packet_rx) = h.open("/").await;
     let client_packet = ClientPacket::Ack {

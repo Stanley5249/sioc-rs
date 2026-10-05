@@ -492,7 +492,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn listen_skips_protocol_signals() {
+    async fn listen_skips_protocol_packets() {
         let (tx, rx) = mpsc::channel(8);
         let mut receiver = SocketReceiver {
             server_packet_rx: rx,
@@ -528,7 +528,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropping_last_clone_closes_directive_channel() {
+    async fn dropping_last_clone_closes_client_packet_channel() {
         let (sender, mut client_packet_rx) = socket_sender();
         let clone = sender.clone();
         drop(sender);
@@ -595,7 +595,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn emit_sends_event_directive() {
+    async fn emit_sends_event_packet() {
         let (sender, mut rx) = socket_sender();
         sender.emit(TestEmit).await.unwrap();
         assert!(matches!(rx.try_recv().unwrap(), ClientPacket::Event { .. }));
@@ -612,7 +612,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn acknowledge_sends_ack_directive_with_correct_id() {
+    async fn acknowledge_sends_ack_packet_with_correct_id() {
         let (sender, mut rx) = socket_sender();
         let id = HasAck::<()>::parse(Some(5)).unwrap();
         sender.acknowledge(id, ()).await.unwrap();

@@ -982,13 +982,13 @@ mod tests {
     }
 
     #[test]
-    fn signal_take_event_returns_some() {
+    fn server_packet_take_event_returns_some() {
         let sig = ServerPacket::Event(DynEvent::new("[]", None));
         assert!(sig.take_event().is_some());
     }
 
     #[test]
-    fn signal_take_event_on_non_event_returns_none() {
+    fn server_packet_take_event_on_non_event_returns_none() {
         assert!(ServerPacket::<u8>::Disconnect.take_event().is_none());
         assert!(
             ServerPacket::<u8>::Connect(make_connect())
@@ -1003,13 +1003,13 @@ mod tests {
     }
 
     #[test]
-    fn signal_map_transforms_event() {
+    fn server_packet_map_transforms_event() {
         let sig: ServerPacket<u8> = ServerPacket::Event(3u8);
         assert!(matches!(sig.map(|x| x * 2), ServerPacket::Event(6)));
     }
 
     #[test]
-    fn signal_map_passes_non_event_through() {
+    fn server_packet_map_passes_non_event_through() {
         assert!(matches!(
             ServerPacket::<u8>::Disconnect.map(|x: u8| x * 2),
             ServerPacket::Disconnect
@@ -1025,7 +1025,7 @@ mod tests {
     }
 
     #[test]
-    fn signal_and_then_returns_some_on_event() {
+    fn server_packet_and_then_returns_some_on_event() {
         let sig: ServerPacket<u8> = ServerPacket::Event(3u8);
         assert_eq!(
             sig.and_then(|x| if x > 0 { Some(x) } else { None }),
@@ -1034,7 +1034,7 @@ mod tests {
     }
 
     #[test]
-    fn signal_and_then_returns_none_when_f_returns_none() {
+    fn server_packet_and_then_returns_none_when_f_returns_none() {
         let sig: ServerPacket<u8> = ServerPacket::Event(0u8);
         assert!(
             sig.and_then(|x| if x > 0 { Some(x) } else { None })
@@ -1043,7 +1043,7 @@ mod tests {
     }
 
     #[test]
-    fn signal_and_then_returns_none_on_non_event() {
+    fn server_packet_and_then_returns_none_on_non_event() {
         assert!(
             ServerPacket::<u8>::Disconnect
                 .and_then(|x: u8| Some(x))
@@ -1057,7 +1057,7 @@ mod tests {
     }
 
     #[test]
-    fn signal_display_variants() {
+    fn server_packet_display_variants() {
         assert_eq!(format!("{}", ServerPacket::<u8>::Disconnect), "Disconnect");
         let ev_sig = ServerPacket::Event(DynEvent::new("[]", None));
         assert_eq!(format!("{ev_sig}"), r#"Event({"payload": []})"#);
