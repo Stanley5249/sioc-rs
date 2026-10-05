@@ -10,6 +10,7 @@ use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 /// The client-packet loop's view of one namespace generation.
 ///
@@ -25,14 +26,30 @@ struct Namespace {
 
 /// Waits for the next client packet of one namespace generation.
 ///
+/// Once `closed` is cancelled, closes the channel, so the packets sent before
+/// still arrive and then the channel ends, as it does when every handle drops.
 /// Hands the receiver back, so the caller decides whether to keep listening.
 async fn recv_client_packet(
     generation: u64,
     mut client_packet_rx: mpsc::Receiver<ClientPacket>,
-) -> (u64, Option<ClientPacket>, mpsc::Receiver<ClientPacket>) {
-    let client_packet = client_packet_rx.recv().await;
+    closed: CancellationToken,
+) -> (
+    u64,
+    Option<ClientPacket>,
+    mpsc::Receiver<ClientPacket>,
+    CancellationToken,
+) {
+    // Prefer the channel, so buffered packets drain before the close takes effect.
+    let client_packet = tokio::select! {
+        biased;
+        client_packet = client_packet_rx.recv() => client_packet,
+        () = closed.cancelled() => {
+            client_packet_rx.close();
+            client_packet_rx.recv().await
+        }
+    };
 
-    (generation, client_packet, client_packet_rx)
+    (generation, client_packet, client_packet_rx, closed)
 }
 
 /// Sends what the namespace handles ask for until the session closes.
@@ -55,14 +72,14 @@ pub(super) async fn client_packets_to_messages(
         // up only this direction, which no other arm could serve anyway.
         tokio::select! {
             connect_request = connect_request_rx.recv(), if client_open => {
-                let Some(ConnectRequest { ns, payload, client_packet_rx, client_packet_tx, server_packet_tx }) = connect_request else {
+                let Some(ConnectRequest { ns, payload, client_packet_rx, closed, server_packet_tx }) = connect_request else {
                     client_open = false;
                     continue;
                 };
 
                 let generation = generations.next().unwrap_or_default();
 
-                if !routes.insert(ns.clone(), generation, server_packet_tx, client_packet_tx) {
+                if !routes.insert(ns.clone(), generation, server_packet_tx, closed.clone()) {
                     return Err(ManagerError::NamespaceConflict { ns });
                 }
 
@@ -74,12 +91,12 @@ pub(super) async fn client_packets_to_messages(
                 };
 
                 namespaces.insert(generation, namespace);
-                client_packets.push(recv_client_packet(generation, client_packet_rx));
+                client_packets.push(recv_client_packet(generation, client_packet_rx, closed));
 
                 send_wire_packet(&client_message_tx, &ns, Packet::Connect(payload), None).await?;
             }
 
-            Some((generation, client_packet, client_packet_rx)) = client_packets.next() => {
+            Some((generation, client_packet, client_packet_rx, closed)) = client_packets.next() => {
                 let Some(client_packet) = client_packet else {
                     let namespace = namespaces
                         .remove(&generation)
@@ -100,7 +117,7 @@ pub(super) async fn client_packets_to_messages(
                     .expect("a namespace generation lives until its client packets end");
 
                 send_client_packet(namespace, generation, routes, &client_message_tx, client_packet).await?;
-                client_packets.push(recv_client_packet(generation, client_packet_rx));
+                client_packets.push(recv_client_packet(generation, client_packet_rx, closed));
             }
 
             generation = connected_generation_rx.recv() => {

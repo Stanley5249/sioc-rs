@@ -4,11 +4,11 @@ use crate::packet::{ClientPacket, DynAck, ServerPacket};
 use bytes::Bytes;
 use bytestring::ByteString;
 use eioc::prelude::Message;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 const CONNECT_RESPONSE: &str = "0{\"sid\":\"test\"}";
 
@@ -53,7 +53,7 @@ fn event(payload: &'static str, ack_tx: Option<oneshot::Sender<DynAck>>) -> Clie
 
 impl Harness {
     /// Opens a namespace and consumes its CONNECT packet.
-    async fn open(&mut self, ns: &str) -> (Arc<ClientPacketTx>, mpsc::Receiver<ServerPacket>) {
+    async fn open(&mut self, ns: &str) -> (ClientPacketTx, mpsc::Receiver<ServerPacket>) {
         self.open_with(ns, 32).await
     }
 
@@ -61,17 +61,18 @@ impl Harness {
         &mut self,
         ns: &str,
         server_packet_capacity: usize,
-    ) -> (Arc<ClientPacketTx>, mpsc::Receiver<ServerPacket>) {
+    ) -> (ClientPacketTx, mpsc::Receiver<ServerPacket>) {
         let (client_packet_tx, client_packet_rx) = mpsc::channel(32);
-        let client_packet_tx = Arc::new(ClientPacketTx::new(client_packet_tx));
+        let closed = CancellationToken::new();
         let (server_packet_tx, server_packet_rx) = mpsc::channel(server_packet_capacity);
         let connect_request = ConnectRequest {
             ns: ns.into(),
             payload: ByteString::new(),
             client_packet_rx,
-            client_packet_tx: Arc::downgrade(&client_packet_tx),
+            closed: closed.clone(),
             server_packet_tx,
         };
+        let client_packet_tx = ClientPacketTx::new(client_packet_tx, closed);
         self.connect_request_tx.send(connect_request).await.unwrap();
         assert!(self.text().await.starts_with('0'));
         (client_packet_tx, server_packet_rx)
@@ -334,6 +335,7 @@ async fn server_disconnect_ends_receiver_and_handles() {
     assert!(server_packet_rx.recv().await.is_none());
 
     // The handles closed before the receiver saw the DISCONNECT.
+    client_packet_tx.closed().await;
     assert!(matches!(
         client_packet_tx.send(event(r#"["late"]"#, None)).await,
         Err(SocketError::Closed)
@@ -418,7 +420,7 @@ async fn duplicate_namespace_is_conflict() {
         ns: "/".into(),
         payload: ByteString::new(),
         client_packet_rx,
-        client_packet_tx: std::sync::Weak::new(),
+        closed: CancellationToken::new(),
         server_packet_tx,
     };
     h.connect_request_tx.send(connect_request).await.unwrap();

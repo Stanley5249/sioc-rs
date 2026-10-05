@@ -14,8 +14,9 @@ use crate::packet::{ClientPacket, DynAck, ServerPacket};
 use bytestring::ByteString;
 use eioc::prelude::Message;
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 /// A namespace opened by [`Client::connect`](crate::client::Client::connect).
 #[derive(Debug)]
@@ -23,34 +24,36 @@ pub(crate) struct ConnectRequest {
     pub ns: ByteString,
     pub payload: ByteString,
     pub client_packet_rx: mpsc::Receiver<ClientPacket>,
-    pub client_packet_tx: Weak<ClientPacketTx>,
+    /// Cancelled once the namespace closes, by either side.
+    pub closed: CancellationToken,
     pub server_packet_tx: mpsc::Sender<ServerPacket>,
 }
 
-/// The client packet sender of a namespace, shared by every [`SocketSender`](crate::client::SocketSender) clone.
+/// The client packet sender of a namespace, as every [`SocketSender`](crate::client::SocketSender) clone holds it.
 ///
-/// Closing takes the sender out, so every clone fails from then on, and the
-/// channel ends once the sends in flight finish. The manager holds only a
-/// [`Weak`] handle, so dropping every clone ends the channel as well.
-#[derive(Debug)]
-pub(crate) struct ClientPacketTx(Mutex<Option<mpsc::Sender<ClientPacket>>>);
+/// Every clone shares the `closed` token. Once it is cancelled, sends fail and
+/// the manager closes the channel, then drains the packets sent before.
+#[derive(Clone, Debug)]
+pub(crate) struct ClientPacketTx {
+    client_packet_tx: mpsc::Sender<ClientPacket>,
+    closed: CancellationToken,
+}
 
 impl ClientPacketTx {
-    pub fn new(client_packet_tx: mpsc::Sender<ClientPacket>) -> Self {
-        Self(Mutex::new(Some(client_packet_tx)))
-    }
-
-    fn lock(&self) -> MutexGuard<'_, Option<mpsc::Sender<ClientPacket>>> {
-        // No critical section can panic halfway, so a poisoned slot is still consistent.
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    pub fn new(client_packet_tx: mpsc::Sender<ClientPacket>, closed: CancellationToken) -> Self {
+        Self {
+            client_packet_tx,
+            closed,
+        }
     }
 
     /// Sends a client packet, failing once the namespace has closed.
     pub async fn send(&self, client_packet: ClientPacket) -> Result<(), SocketError> {
-        // Clone the sender out, so the lock is never held across the send.
-        let client_packet_tx = self.lock().clone().ok_or(SocketError::Closed)?;
+        if self.closed.is_cancelled() {
+            return Err(SocketError::Closed);
+        }
 
-        client_packet_tx
+        self.client_packet_tx
             .send(client_packet)
             .await
             .map_err(|_| SocketError::Closed)
@@ -58,7 +61,12 @@ impl ClientPacketTx {
 
     /// Closes the namespace for every clone. Closing again does nothing.
     pub fn close(&self) {
-        self.lock().take();
+        self.closed.cancel();
+    }
+
+    /// Waits until the namespace closes, by either side.
+    pub async fn closed(&self) {
+        self.closed.cancelled().await;
     }
 }
 
@@ -120,18 +128,7 @@ struct Route {
     server_packet_tx: mpsc::Sender<ServerPacket>,
     ack_txs: HashMap<u64, oneshot::Sender<DynAck>>,
     connected: bool,
-    _client_packet_tx: CloseOnDrop,
-}
-
-/// Closes the client packet sender of a namespace when its route is dropped.
-struct CloseOnDrop(Weak<ClientPacketTx>);
-
-impl Drop for CloseOnDrop {
-    fn drop(&mut self) {
-        if let Some(client_packet_tx) = self.0.upgrade() {
-            client_packet_tx.close();
-        }
-    }
+    _closed: DropGuard,
 }
 
 impl Routes {
@@ -146,7 +143,7 @@ impl Routes {
         ns: ByteString,
         generation: u64,
         server_packet_tx: mpsc::Sender<ServerPacket>,
-        client_packet_tx: Weak<ClientPacketTx>,
+        closed: CancellationToken,
     ) -> bool {
         let mut routes = self.lock();
 
@@ -159,7 +156,7 @@ impl Routes {
             server_packet_tx,
             ack_txs: HashMap::new(),
             connected: false,
-            _client_packet_tx: CloseOnDrop(client_packet_tx),
+            _closed: closed.drop_guard(),
         };
         routes.insert(ns, route);
 

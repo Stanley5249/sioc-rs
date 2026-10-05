@@ -10,9 +10,9 @@ use bytestring::ByteString;
 use eioc::transport::TransportStrategy;
 use eioc::websocket::WebSocketConnector;
 use futures_util::TryFutureExt;
-use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 /// Converts a typed event into a [`ClientPacket`] for emission.
@@ -286,7 +286,7 @@ impl Client {
         B: Into<ByteString>,
     {
         let (client_packet_tx, client_packet_rx) = mpsc::channel(self.channels.manager);
-        let client_packet_tx = Arc::new(ClientPacketTx::new(client_packet_tx));
+        let closed = CancellationToken::new();
 
         let (server_packet_tx, server_packet_rx) = mpsc::channel(self.channels.socket);
 
@@ -294,9 +294,11 @@ impl Client {
             ns: ns.into(),
             payload: payload.into(),
             client_packet_rx,
-            client_packet_tx: Arc::downgrade(&client_packet_tx),
+            closed: closed.clone(),
             server_packet_tx,
         };
+
+        let client_packet_tx = ClientPacketTx::new(client_packet_tx, closed);
 
         self.connect_request_tx
             .send(connect_request)
@@ -331,7 +333,7 @@ impl Client {
 /// last clone is dropped.
 #[derive(Clone, Debug)]
 pub struct SocketSender {
-    client_packet_tx: Arc<ClientPacketTx>,
+    client_packet_tx: ClientPacketTx,
 }
 
 impl SocketSender {
@@ -377,6 +379,14 @@ impl SocketSender {
     /// it after the namespace has closed, by either side, does nothing.
     pub fn disconnect(&self) {
         self.client_packet_tx.close();
+    }
+
+    /// Waits until the namespace closes, by either side, or the session ends.
+    ///
+    /// Resolves as soon as the namespace stops accepting packets, which can be
+    /// before its DISCONNECT packet reaches the server.
+    pub async fn closed(&self) {
+        self.client_packet_tx.closed().await;
     }
 }
 
@@ -455,7 +465,7 @@ mod tests {
 
     fn socket_sender() -> (SocketSender, mpsc::Receiver<ClientPacket>) {
         let (client_packet_tx, client_packet_rx) = mpsc::channel(8);
-        let client_packet_tx = Arc::new(ClientPacketTx::new(client_packet_tx));
+        let client_packet_tx = ClientPacketTx::new(client_packet_tx, CancellationToken::new());
         (SocketSender { client_packet_tx }, client_packet_rx)
     }
 
@@ -538,7 +548,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disconnect_closes_every_clone_after_sent_packets() {
+    async fn disconnect_closes_every_clone_and_keeps_sent_packets() {
         let (sender, mut client_packet_rx) = socket_sender();
         let clone = sender.clone();
         sender.emit(TestEmit).await.unwrap();
@@ -547,11 +557,12 @@ mod tests {
             clone.emit(TestEmit).await,
             Err(SocketError::Closed)
         ));
+        // The manager drains what was sent before; `client_close_sends_earlier_packets_first` covers the rest.
         assert!(matches!(
-            client_packet_rx.recv().await,
-            Some(ClientPacket::Event { .. })
+            client_packet_rx.try_recv(),
+            Ok(ClientPacket::Event { .. })
         ));
-        assert!(client_packet_rx.recv().await.is_none());
+        client_packet_rx.try_recv().unwrap_err();
     }
 
     #[tokio::test]
@@ -560,6 +571,14 @@ mod tests {
         drop(client_packet_rx);
         sender.disconnect();
         sender.disconnect();
+    }
+
+    #[tokio::test]
+    async fn closed_resolves_for_every_clone_after_disconnect() {
+        let (sender, _client_packet_rx) = socket_sender();
+        let clone = sender.clone();
+        sender.disconnect();
+        clone.closed().await;
     }
 
     #[tokio::test]
