@@ -3,8 +3,6 @@ set shell := ["pwsh", "-NoLogo", "-NoProfile", "-Command"]
 
 set default-list
 
-quick_start := "cargo run --locked -p quick-start --example quick_start"
-
 # Run the local merge gate.
 ci: fmt-check _ci-lint test test-servers doc deny
 
@@ -54,6 +52,19 @@ test *args:
 # Run protocol and pressure tests against JavaScript and Python Socket.IO servers.
 test-servers *args:
     cargo nextest run --locked --workspace --all-targets --run-ignored only -E 'binary(servers)' {{ args }}
+
+# Run the Rust chat client against a quick-start server.
+[env("RUST_LOG", "quick_start=info,sioc=trace")]
+quick-start *args:
+    cargo run --locked --example quick_start {{ args }}
+
+# Start the TypeScript quick-start server on localhost:3000.
+quick-start-ts *args:
+    bun examples/quick-start/server.ts {{ args }}
+
+# Start the Python quick-start server on localhost:3000.
+quick-start-py *args:
+    uv run --locked python examples/quick-start/server.py {{ args }}
 
 # Check documentation with warnings denied.
 [env("RUSTDOCFLAGS", "-D warnings")]

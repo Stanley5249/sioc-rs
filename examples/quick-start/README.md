@@ -19,12 +19,21 @@ Both servers take their dependencies from the workspace root `pyproject.toml` an
 
 ## Running
 
-Run the client against each server in one command from the workspace root:
+From the workspace root, start either server in one terminal:
 
 ```bash
-just smoke-py
-just smoke-js
+just quick-start-py
+# or, after bun install --frozen-lockfile
+just quick-start-ts
 ```
+
+Both recipes keep the server running on `localhost:3000`. In a second terminal, run the Rust client:
+
+```sh
+just quick-start
+```
+
+Stop the server with Ctrl+C after the client finishes. CI runs protocol and pressure tests through `just test-servers`.
 
 Each side logs only the events it receives, so every event appears once, with an arrow pointing at the receiver:
 
@@ -38,28 +47,6 @@ client <- image     crab.png (8 bytes)
 client <- message   bot: hi ferris, you said "hello from Rust!"
 client <- confirm   Leave the room?
 server <- ack       confirm: yes
-```
-
-To run them by hand, start a server from the workspace root:
-
-```bash
-uv run examples/quick-start/server.py
-# or
-bun install && bun examples/quick-start/server.ts
-```
-
-Then in a second terminal, run the client.
-
-On Bash:
-
-```bash
-RUST_LOG=quick_start=info,sioc=trace cargo run --example quick_start
-```
-
-On PowerShell:
-
-```powershell
-$env:RUST_LOG="quick_start=info,sioc=trace"; cargo run --example quick_start
 ```
 
 ## What Happens
