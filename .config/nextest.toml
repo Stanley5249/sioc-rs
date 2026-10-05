@@ -1,0 +1,4 @@
+# A test that runs past 30 seconds is hung, so fail it and name it instead of
+# stalling the whole run.
+[profile.default]
+slow-timeout = { period = "10s", terminate-after = 3 }

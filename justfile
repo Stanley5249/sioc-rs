@@ -46,9 +46,9 @@ lint-py:
 lint-js *args:
     bunx oxlint {{ args }}
 
-# Run all targets and documentation examples.
+# Run all targets with nextest, which fails hung tests, then documentation examples.
 test *args:
-    cargo test --locked --workspace --all-targets {{ args }}
+    cargo nextest run --locked --workspace --all-targets {{ args }}
     cargo test --locked --workspace --doc {{ args }}
 
 # Run every smoke test against a real Socket.IO server.

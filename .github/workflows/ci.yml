@@ -104,7 +104,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - uses: taiki-e/install-action@v2
         with:
-          tool: just
+          tool: just, cargo-nextest
       - run: bun install --frozen-lockfile
       - run: just test
       - if: ${{ !cancelled() }}
