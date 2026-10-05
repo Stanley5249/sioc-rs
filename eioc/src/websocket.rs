@@ -69,7 +69,7 @@ where
     while let Some(message) = stream.try_next().await? {
         match message {
             WebSocketMessage::Text(text) => {
-                tracing::trace!(bytes = text.len(), "<- TEXT");
+                tracing::trace!(bytes = text.len(), "received text frame");
 
                 let bytes = bytestring_from_utf8_bytes(text);
 
@@ -83,12 +83,12 @@ where
                 };
             }
             WebSocketMessage::Binary(binary) => {
-                tracing::trace!(bytes = binary.len(), "<- BINARY");
+                tracing::trace!(bytes = binary.len(), "received binary frame");
 
                 return Ok(Some(Frame::Binary(binary)));
             }
             WebSocketMessage::Close(_) => {
-                tracing::trace!("<- CLOSE");
+                tracing::trace!("received close frame");
 
                 return Ok(None);
             }
@@ -105,12 +105,12 @@ fn encode_frame(frame: Frame) -> WebSocketMessage {
         Frame::Packet(packet) => {
             let text = packet.encode();
 
-            tracing::trace!(bytes = text.len(), "-> TEXT");
+            tracing::trace!(bytes = text.len(), "sent text frame");
 
             WebSocketMessage::text(text)
         }
         Frame::Binary(bytes) => {
-            tracing::trace!(bytes = bytes.len(), "-> BINARY");
+            tracing::trace!(bytes = bytes.len(), "sent binary frame");
 
             WebSocketMessage::binary(bytes)
         }
@@ -184,15 +184,15 @@ impl WebSocketStream {
     }
 
     /// Sends a probe `Ping` and expects a matching `Pong`, confirming the WebSocket path is live.
-    #[tracing::instrument(level = "debug", skip_all, err)]
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn probe(&mut self) -> Result<(), WebSocketError> {
-        tracing::debug!("-> PING probe");
+        tracing::debug!("sent probe ping");
 
         self.send(Packet::Ping(PROBE).into()).await?;
 
         match self.recv().await? {
             Frame::Packet(Packet::Pong(payload)) if payload == PROBE => {
-                tracing::debug!("<- PONG probe");
+                tracing::debug!("received probe pong");
             }
 
             frame => return Err(WebSocketError::Probe(frame)),
@@ -214,7 +214,7 @@ impl WebSocketStream {
     /// # Errors
     ///
     /// Returns an error if a transport or protocol failure occurs.
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub async fn transport(
         mut self,
         handshake_tx: Option<oneshot::Sender<Handshake>>,
@@ -227,13 +227,13 @@ impl WebSocketStream {
                 frame => return Err(TransportError::Open(frame)),
             };
 
-            tracing::debug!(sid = %handshake.sid, "<- OPEN");
+            tracing::debug!(sid = %handshake.sid, "received handshake");
 
             handshake_tx
                 .send(handshake)
                 .map_err(TransportError::SendHandshake)?;
         } else {
-            tracing::debug!("-> UPGRADE");
+            tracing::debug!("sent upgrade packet");
 
             self.send(Packet::Upgrade.into()).await?;
         }

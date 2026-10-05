@@ -203,7 +203,11 @@ where
     /// # Errors
     ///
     /// Returns an error if the URL is invalid.
-    #[must_use = "dropping the Client stops the background tasks"]
+    ///
+    /// # Panics
+    ///
+    /// Panics when called outside a Tokio runtime.
+    #[must_use = "call join() to observe the background task result"]
     pub fn open(self) -> Result<Client, ClientBuilderError> {
         let http_client = self.http_client.unwrap_or_default();
         let websocket_connector = self.websocket_connector;
@@ -319,6 +323,8 @@ impl Client {
     /// # Errors
     ///
     /// Returns an error if the manager task fails or panics.
+    /// Call this method to collect session errors; dropping the handle detaches
+    /// the task, which continues while namespace senders remain alive.
     pub async fn join(self) -> Result<(), ClientError> {
         drop(self.connect_request_tx);
         self.task.await??;
@@ -391,6 +397,9 @@ impl SocketSender {
 }
 
 /// Receiver for a Socket.IO namespace.
+///
+/// Read it continuously: bounded queues apply backpressure to the server.
+/// A stalled consumer can delay heartbeat responses until the server times out.
 #[derive(Debug)]
 pub struct SocketReceiver {
     server_packet_rx: mpsc::Receiver<ServerPacket>,

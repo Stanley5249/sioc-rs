@@ -198,7 +198,7 @@ async fn send_client_packet(
             if namespace.connected {
                 send_wire_packet(client_message_tx, ns, packet, attachments).await
             } else {
-                tracing::trace!(%ns, %packet, "buffering messages");
+                tracing::trace!(%ns, %packet, "buffered packet");
 
                 let messages = encode_packet(ns, &packet, attachments);
                 namespace.send_buffer.extend(messages);
@@ -232,7 +232,7 @@ async fn send_wire_packet(
     packet: Packet,
     attachments: Option<Vec<Bytes>>,
 ) -> Result<(), ManagerError> {
-    tracing::trace!(%ns, %packet, "-> packet");
+    tracing::trace!(%ns, %packet, "sent packet");
 
     for message in encode_packet(ns, &packet, attachments) {
         client_message_tx.send(message).await?;

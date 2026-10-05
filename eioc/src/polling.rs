@@ -89,7 +89,7 @@ impl PollingClient {
             .text()
             .await?;
 
-        tracing::trace!(bytes = response.len(), "<- GET");
+        tracing::trace!(bytes = response.len(), "received polling payload");
         decode_frames(&ByteString::from(response))
     }
 
@@ -103,14 +103,14 @@ impl PollingClient {
             .text()
             .await?;
 
-        tracing::trace!(bytes = response.len(), "<- GET");
+        tracing::trace!(bytes = response.len(), "received polling payload");
 
         Frame::decode(&ByteString::from(response))
     }
 
     async fn post(&self, url: &Url, frames: &[Frame]) -> Result<(), PollingError> {
         let body = encode_frames(frames);
-        tracing::trace!(bytes = body.len(), "-> POST");
+        tracing::trace!(bytes = body.len(), "sent polling payload");
 
         let response = self
             .0
@@ -135,7 +135,7 @@ impl PollingClient {
     ///
     /// A batch holds up to eight frames regardless of size, so it can exceed
     /// the handshake's `maxPayload`. Respecting the limit is not implemented yet.
-    #[tracing::instrument(level = "debug", skip_all, err)]
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn post_client_frames(
         &self,
         url: &Url,
@@ -148,14 +148,14 @@ impl PollingClient {
             // Pause only while idle, because a POST in flight may carry frames.
             let count = tokio::select! {
                 () = pause.cancelled() => {
-                    tracing::debug!("paused polling POST");
+                    tracing::debug!("paused polling post");
                     return Ok(Stop::Paused);
                 }
                 count = client_frame_rx.recv_many(&mut buffer, 8) => count,
             };
 
             if count == 0 {
-                tracing::trace!("-> CLOSE");
+                tracing::trace!("sent close packet");
 
                 self.post(url, &[Packet::Close.into()]).await?;
 
@@ -171,7 +171,7 @@ impl PollingClient {
     ///
     /// The `Close` packet itself stays here, because the transport ending is
     /// what tells the engine the session is over.
-    #[tracing::instrument(level = "debug", skip_all, err)]
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn get_server_frames(
         &self,
         url: &Url,
@@ -192,7 +192,7 @@ impl PollingClient {
             }
         }
 
-        tracing::debug!("paused polling GET");
+        tracing::debug!("paused polling get");
 
         Ok(Stop::Paused)
     }
@@ -251,7 +251,7 @@ impl PollingClient {
                     }
                 }
                 Err(error) => {
-                    tracing::warn!(%error, "upgrade failed, falling back to long polling");
+                    tracing::warn!(%error, "failed to upgrade, continuing long polling");
 
                     poll.await?;
 
@@ -269,7 +269,7 @@ impl PollingClient {
     /// # Errors
     ///
     /// Returns an error if a network, protocol, or channel failure occurs.
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub async fn transport<C>(
         self,
         base_url: Url,

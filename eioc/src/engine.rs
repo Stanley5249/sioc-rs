@@ -94,7 +94,7 @@ impl Heartbeat {
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn run_protocol(
     server_frame_rx: mpsc::Receiver<Frame>,
     server_message_tx: mpsc::Sender<Message>,
@@ -103,7 +103,7 @@ async fn run_protocol(
     handshake_rx: oneshot::Receiver<Handshake>,
 ) -> Result<(), EngineError> {
     let handshake = handshake_rx.await?;
-    tracing::debug!(sid = %handshake.sid, "<- OPEN");
+    tracing::debug!(sid = %handshake.sid, "received handshake");
 
     let (pong_tx, pong_rx) = mpsc::channel(1);
 
@@ -138,11 +138,11 @@ async fn server_frames_to_messages(
     while let Some(frame) = heartbeat.next_server_frame(&mut server_frame_rx).await? {
         match frame {
             Frame::Packet(packet) => {
-                tracing::trace!(%packet, "<- packet");
+                tracing::trace!(%packet, "received packet");
 
                 match packet {
                     Packet::Ping(payload) => {
-                        tracing::trace!("-> PONG");
+                        tracing::trace!("sent pong");
 
                         pong_tx.send(Packet::Pong(payload).into()).await?;
 
@@ -157,7 +157,7 @@ async fn server_frames_to_messages(
                 }
             }
             Frame::Binary(payload) => {
-                tracing::trace!(bytes = payload.len(), "<- binary");
+                tracing::trace!(bytes = payload.len(), "received binary frame");
 
                 server_message_tx.send(Message::Binary(payload)).await?;
             }
@@ -195,12 +195,12 @@ async fn client_messages_to_frames(
                 Some(Message::Text(bytes)) => {
                     let packet = Packet::Message(bytes);
 
-                    tracing::trace!(%packet, "-> MESSAGE");
+                    tracing::trace!(%packet, "sent packet");
 
                     packet.into()
                 }
                 Some(Message::Binary(bytes)) => {
-                    tracing::trace!(bytes = bytes.len(), "-> binary");
+                    tracing::trace!(bytes = bytes.len(), "sent binary frame");
 
                     bytes.into()
                 }

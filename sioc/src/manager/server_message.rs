@@ -29,7 +29,7 @@ pub(super) async fn server_messages_to_packets(
         }
     }
 
-    tracing::debug!("closing all namespaces");
+    tracing::debug!("server message channel closed");
 
     routes.clear();
 
@@ -48,7 +48,7 @@ async fn route_text(
 
     let Ns(ns, packet) = text.try_into()?;
 
-    tracing::trace!(%ns, %packet, "<- packet");
+    tracing::trace!(%ns, %packet, "received packet");
 
     match packet {
         Packet::Connect(payload) => {
@@ -83,7 +83,7 @@ async fn route_text(
         Packet::ConnectError(payload) => {
             let error: ConnectError = serde_json::from_str(&payload).map_err(PacketError::Json)?;
 
-            tracing::error!(%ns, %error, "connect error");
+            tracing::debug!(%ns, %error, "namespace connection refused");
 
             // The server refused the namespace, so it closes like a DISCONNECT.
             send_server_packet(routes.close(&ns), &ns, ServerPacket::ConnectError(error)).await;
@@ -107,11 +107,11 @@ async fn route_binary(
     let bytes = attachment.len();
 
     let Some(Ns(ns, packet)) = reconstructor.attach_and_take(attachment)? else {
-        tracing::trace!(bytes, status = "pending", "<- attachment");
+        tracing::trace!(bytes, status = "pending", "received attachment");
         return Ok(());
     };
 
-    tracing::trace!(%ns, bytes, status = "complete", "<- attachment");
+    tracing::trace!(%ns, bytes, status = "complete", "received attachment");
 
     match packet {
         BinaryPacket::Event {
