@@ -8,5 +8,5 @@
     "skipLibCheck": true,
     "types": ["bun"]
   },
-  "include": ["examples/**/*.ts"]
+  "include": ["examples/**/*.ts", "sioc/tests/servers/**/*.ts"]
 }
