@@ -72,7 +72,7 @@ pub(super) async fn client_packets_to_messages(
         // up only this direction, which no other arm could serve anyway.
         tokio::select! {
             connect_request = connect_request_rx.recv(), if client_open => {
-                let Some(ConnectRequest { ns, payload, client_packet_rx, closed, server_packet_tx }) = connect_request else {
+                let Some(ConnectRequest { ns, payload, client_packet_rx, closed, server_packet_tx, reply_tx }) = connect_request else {
                     client_open = false;
                     continue;
                 };
@@ -80,7 +80,9 @@ pub(super) async fn client_packets_to_messages(
                 let generation = generations.next().unwrap_or_default();
 
                 if !routes.insert(ns.clone(), generation, server_packet_tx, closed.clone()) {
-                    return Err(ManagerError::NamespaceConflict { ns });
+                    // A cancelled connect drops its reply receiver.
+                    let _ = reply_tx.send(Err(crate::error::SocketError::NamespaceConflict { ns }));
+                    continue;
                 }
 
                 let namespace = Namespace {
@@ -94,6 +96,8 @@ pub(super) async fn client_packets_to_messages(
                 client_packets.push(recv_client_packet(generation, client_packet_rx, closed));
 
                 send_wire_packet(&client_message_tx, &ns, Packet::Connect(payload), None).await?;
+                // The caller may have cancelled connect while the request was queued.
+                let _ = reply_tx.send(Ok(()));
             }
 
             Some((generation, client_packet, client_packet_rx, closed)) = client_packets.next() => {

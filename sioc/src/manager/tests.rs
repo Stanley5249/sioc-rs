@@ -65,16 +65,19 @@ impl Harness {
         let (client_packet_tx, client_packet_rx) = mpsc::channel(32);
         let closed = CancellationToken::new();
         let (server_packet_tx, server_packet_rx) = mpsc::channel(server_packet_capacity);
+        let (reply_tx, reply_rx) = oneshot::channel();
         let connect_request = ConnectRequest {
             ns: ns.into(),
             payload: ByteString::new(),
             client_packet_rx,
             closed: closed.clone(),
             server_packet_tx,
+            reply_tx,
         };
         let client_packet_tx = ClientPacketTx::new(client_packet_tx, closed);
         self.connect_request_tx.send(connect_request).await.unwrap();
         assert!(self.text().await.starts_with('0'));
+        reply_rx.await.unwrap().unwrap();
         (client_packet_tx, server_packet_rx)
     }
 
@@ -416,18 +419,22 @@ async fn duplicate_namespace_is_conflict() {
     let (_client_packet_tx, _server_packet_rx) = h.open("/").await;
     let (_, client_packet_rx) = mpsc::channel(1);
     let (server_packet_tx, _) = mpsc::channel(1);
+    let (reply_tx, reply_rx) = oneshot::channel();
     let connect_request = ConnectRequest {
         ns: "/".into(),
         payload: ByteString::new(),
         client_packet_rx,
         closed: CancellationToken::new(),
         server_packet_tx,
+        reply_tx,
     };
     h.connect_request_tx.send(connect_request).await.unwrap();
     assert!(matches!(
-        h.manager.await.unwrap(),
-        Err(ManagerError::NamespaceConflict { .. })
+        reply_rx.await.unwrap(),
+        Err(SocketError::NamespaceConflict { .. })
     ));
+    let (_other_tx, _other_rx) = h.open("/other").await;
+    h.close_server().await.unwrap();
 }
 
 #[tokio::test]

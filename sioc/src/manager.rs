@@ -27,6 +27,7 @@ pub(crate) struct ConnectRequest {
     /// Cancelled once the namespace closes, by either side.
     pub closed: CancellationToken,
     pub server_packet_tx: mpsc::Sender<ServerPacket>,
+    pub reply_tx: oneshot::Sender<Result<(), SocketError>>,
 }
 
 /// The client packet sender of a namespace, as every [`SocketSender`](crate::client::SocketSender) clone holds it.

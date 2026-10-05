@@ -80,6 +80,13 @@ pub enum ClientError {
 /// Error returned by [`SocketSender`](crate::client::SocketSender) operations.
 #[derive(Debug, Error, Diagnostic)]
 pub enum SocketError {
+    /// A namespace with this name is already open on the client.
+    #[error("namespace conflict: `{ns}`")]
+    #[diagnostic(code(sioc::socket::namespace_conflict))]
+    NamespaceConflict {
+        /// The namespace that already has an open route.
+        ns: ByteString,
+    },
     /// The namespace or the whole session has closed.
     #[error("socket closed")]
     #[diagnostic(
@@ -286,14 +293,6 @@ pub enum ManagerError {
         )
     )]
     UnexpectedBinary(Bytes),
-
-    /// Attempted to open a namespace that is already open.
-    #[error("namespace conflict: `{ns}`")]
-    #[diagnostic(
-        code(sioc::manager::namespace_conflict),
-        help("the namespace is already open; drop the existing handle before reconnecting")
-    )]
-    NamespaceConflict { ns: ByteString },
 
     /// Telling the client-packet loop that the server confirmed a namespace failed because the channel is closed.
     #[error("namespace status channel closed")]

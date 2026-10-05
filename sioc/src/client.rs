@@ -293,6 +293,7 @@ impl Client {
         let closed = CancellationToken::new();
 
         let (server_packet_tx, server_packet_rx) = mpsc::channel(self.channels.socket);
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
 
         let connect_request = ConnectRequest {
             ns: ns.into(),
@@ -300,6 +301,7 @@ impl Client {
             client_packet_rx,
             closed: closed.clone(),
             server_packet_tx,
+            reply_tx,
         };
 
         let client_packet_tx = ClientPacketTx::new(client_packet_tx, closed);
@@ -308,6 +310,8 @@ impl Client {
             .send(connect_request)
             .await
             .map_err(|_| SocketError::Closed)?;
+
+        reply_rx.await.map_err(|_| SocketError::Closed)??;
 
         Ok((
             SocketSender { client_packet_tx },
