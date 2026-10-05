@@ -5,8 +5,8 @@
 
 use crate::error::TransportError;
 use crate::packet::{Frame, Handshake};
-use crate::polling::PollingClient;
-use crate::websocket::{WebSocketConnector, WebSocketStream};
+use crate::polling;
+use crate::websocket::{self, WebSocketConnector};
 use tokio::sync::{mpsc, oneshot};
 use url::Url;
 
@@ -41,21 +41,20 @@ impl TransportStrategy {
     {
         match self {
             TransportStrategy::Polling => {
-                PollingClient(http_client)
-                    .transport(
-                        base_url,
-                        connector,
-                        handshake_tx,
-                        server_frame_tx,
-                        client_frame_rx,
-                    )
-                    .await
+                polling::transport(
+                    http_client,
+                    base_url,
+                    connector,
+                    handshake_tx,
+                    server_frame_tx,
+                    client_frame_rx,
+                )
+                .await
             }
             TransportStrategy::WebSocket => {
-                let stream = WebSocketStream::connect(base_url, None, connector).await?;
+                let stream = websocket::connect(base_url, None, connector).await?;
 
-                stream
-                    .transport(Some(handshake_tx), server_frame_tx, client_frame_rx)
+                websocket::transport(stream, Some(handshake_tx), server_frame_tx, client_frame_rx)
                     .await?;
 
                 Ok(())

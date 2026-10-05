@@ -43,14 +43,14 @@ where
 impl WebSocketConnector for () {
     async fn connect(self, url: Url) -> Result<WebSocketStream, TungsteniteError> {
         let (stream, _) = connect_async(url).await?;
-        Ok(WebSocketStream(stream))
+        Ok(stream)
     }
 }
 
 type TungsteniteStream = tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// An open WebSocket connection that carries Engine.IO [`Frame`]s.
-pub struct WebSocketStream(pub tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>);
+pub type WebSocketStream = tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// Converts a WebSocket text frame from the server into a [`ByteString`] without copying.
 fn bytestring_from_utf8_bytes(utf8: tokio_tungstenite::tungstenite::Utf8Bytes) -> ByteString {
@@ -144,114 +144,111 @@ fn websocket_url(mut url: Url, sid: Option<&str>) -> Url {
     url
 }
 
-impl WebSocketStream {
-    /// Opens a [`WebSocketStream`], running the upgrade probe when `sid` is present.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the connection or probe fails.
-    pub async fn connect<C>(
-        base_url: Url,
-        sid: Option<&str>,
-        connector: C,
-    ) -> Result<Self, WebSocketError>
-    where
-        C: WebSocketConnector,
-    {
-        let url = websocket_url(base_url, sid);
+/// Opens a [`WebSocketStream`], running the upgrade probe when `sid` is present.
+///
+/// # Errors
+///
+/// Returns an error if the connection or probe fails.
+pub async fn connect<C>(
+    base_url: Url,
+    sid: Option<&str>,
+    connector: C,
+) -> Result<WebSocketStream, WebSocketError>
+where
+    C: WebSocketConnector,
+{
+    let url = websocket_url(base_url, sid);
 
-        let span = tracing::debug_span!("connect", %url);
+    let span = tracing::debug_span!("connect", %url);
 
-        let mut stream = connector.connect(url).instrument(span).await?;
+    let mut stream = connector.connect(url).instrument(span).await?;
 
-        if sid.is_some() {
-            stream.probe().await?;
-        }
-
-        Ok(stream)
+    if sid.is_some() {
+        probe(&mut stream).await?;
     }
 
-    /// Waits for the next frame, returning an error if the stream is closed.
-    async fn recv(&mut self) -> Result<Frame, WebSocketError> {
-        next_server_frame(&mut self.0)
-            .await?
-            .ok_or(WebSocketError::Closed)
-    }
-
-    /// Sends one frame.
-    async fn send(&mut self, frame: Frame) -> Result<(), WebSocketError> {
-        Ok(self.0.send(encode_frame(frame)).await?)
-    }
-
-    /// Sends a probe `Ping` and expects a matching `Pong`, confirming the WebSocket path is live.
-    #[tracing::instrument(level = "debug", skip_all)]
-    async fn probe(&mut self) -> Result<(), WebSocketError> {
-        tracing::debug!("sent probe ping");
-
-        self.send(Packet::Ping(PROBE).into()).await?;
-
-        match self.recv().await? {
-            Frame::Packet(Packet::Pong(payload)) if payload == PROBE => {
-                tracing::debug!("received probe pong");
-            }
-
-            frame => return Err(WebSocketError::Probe(frame)),
-        }
-
-        Ok(())
-    }
-
-    /// Drives the WebSocket I/O until the engine closes `client_frame_rx` and the stream ends.
-    ///
-    /// When `handshake_tx` is `Some`, reads the first `Open` frame and forwards the handshake
-    /// (direct WebSocket transport). When `None`, sends `Upgrade` immediately (polling upgrade path).
-    ///
-    /// Server and client frames flow independently. When the engine closes
-    /// `client_frame_rx`, the socket closes and server frames flow until the server
-    /// answers. If the server ends the stream first, drops `server_frame_tx` and discards
-    /// client frames until the engine closes `client_frame_rx`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a transport or protocol failure occurs.
-    #[tracing::instrument(skip_all)]
-    pub async fn transport(
-        mut self,
-        handshake_tx: Option<oneshot::Sender<Handshake>>,
-        server_frame_tx: mpsc::Sender<Frame>,
-        client_frame_rx: mpsc::Receiver<Frame>,
-    ) -> Result<(), TransportError> {
-        if let Some(handshake_tx) = handshake_tx {
-            let handshake = match self.recv().await? {
-                Frame::Packet(Packet::Open(handshake)) => handshake,
-                frame => return Err(TransportError::Open(frame)),
-            };
-
-            tracing::debug!(sid = %handshake.sid, "received handshake");
-
-            handshake_tx
-                .send(handshake)
-                .map_err(TransportError::SendHandshake)?;
-        } else {
-            tracing::debug!("sent upgrade packet");
-
-            self.send(Packet::Upgrade.into()).await?;
-        }
-
-        let (sink, stream) = self.0.split();
-        let stream_closed = CancellationToken::new();
-
-        // Each direction runs on its own, so a slow engine never stalls
-        // client frames and a slow socket never stalls server ones.
-        tokio::try_join!(
-            websocket_to_server_frames(stream, server_frame_tx, stream_closed.clone()),
-            client_frames_to_websocket(sink, client_frame_rx, stream_closed),
-        )?;
-
-        Ok(())
-    }
+    Ok(stream)
 }
 
+/// Waits for the next frame, returning an error if the stream is closed.
+async fn recv(stream: &mut WebSocketStream) -> Result<Frame, WebSocketError> {
+    next_server_frame(stream)
+        .await?
+        .ok_or(WebSocketError::Closed)
+}
+
+/// Sends one frame.
+async fn send(stream: &mut WebSocketStream, frame: Frame) -> Result<(), WebSocketError> {
+    Ok(stream.send(encode_frame(frame)).await?)
+}
+
+/// Sends a probe `Ping` and expects a matching `Pong`, confirming the WebSocket path is live.
+#[tracing::instrument(level = "debug", skip_all)]
+async fn probe(stream: &mut WebSocketStream) -> Result<(), WebSocketError> {
+    tracing::debug!("sent probe ping");
+
+    send(stream, Packet::Ping(PROBE).into()).await?;
+
+    match recv(stream).await? {
+        Frame::Packet(Packet::Pong(payload)) if payload == PROBE => {
+            tracing::debug!("received probe pong");
+        }
+
+        frame => return Err(WebSocketError::Probe(frame)),
+    }
+
+    Ok(())
+}
+
+/// Drives the WebSocket I/O until the engine closes `client_frame_rx` and the stream ends.
+///
+/// When `handshake_tx` is `Some`, reads the first `Open` frame and forwards the handshake
+/// (direct WebSocket transport). When `None`, sends `Upgrade` immediately (polling upgrade path).
+///
+/// Server and client frames flow independently. When the engine closes
+/// `client_frame_rx`, the socket closes and server frames flow until the server
+/// answers. If the server ends the stream first, drops `server_frame_tx` and discards
+/// client frames until the engine closes `client_frame_rx`.
+///
+/// # Errors
+///
+/// Returns an error if a transport or protocol failure occurs.
+#[tracing::instrument(skip_all)]
+pub async fn transport(
+    mut stream: WebSocketStream,
+    handshake_tx: Option<oneshot::Sender<Handshake>>,
+    server_frame_tx: mpsc::Sender<Frame>,
+    client_frame_rx: mpsc::Receiver<Frame>,
+) -> Result<(), TransportError> {
+    if let Some(handshake_tx) = handshake_tx {
+        let handshake = match recv(&mut stream).await? {
+            Frame::Packet(Packet::Open(handshake)) => handshake,
+            frame => return Err(TransportError::Open(frame)),
+        };
+
+        tracing::debug!(sid = %handshake.sid, "received handshake");
+
+        handshake_tx
+            .send(handshake)
+            .map_err(TransportError::SendHandshake)?;
+    } else {
+        tracing::debug!("sent upgrade packet");
+
+        send(&mut stream, Packet::Upgrade.into()).await?;
+    }
+
+    let (sink, stream) = stream.split();
+    let stream_closed = CancellationToken::new();
+
+    // Each direction runs on its own, so a slow engine never stalls
+    // client frames and a slow socket never stalls server ones.
+    tokio::try_join!(
+        websocket_to_server_frames(stream, server_frame_tx, stream_closed.clone()),
+        client_frames_to_websocket(sink, client_frame_rx, stream_closed),
+    )?;
+
+    Ok(())
+}
 /// Forwards server frames to the engine until the stream ends.
 ///
 /// Returning drops `server_frame_tx`, which tells the engine the transport has finished.
@@ -339,7 +336,7 @@ mod tests {
     #[tokio::test]
     async fn writer_drains_after_reader_observes_peer_close() {
         let (client, mut server) = ws_pair().await;
-        let (sink, mut stream) = client.0.split();
+        let (sink, mut stream) = client.split();
         server.close(None).await.unwrap();
         assert!(next_server_frame(&mut stream).await.unwrap().is_none());
 
@@ -370,7 +367,7 @@ mod tests {
         let (ws, _) = client_async("ws://127.0.0.1/", MaybeTlsStream::Plain(tcp))
             .await
             .unwrap();
-        let client = WebSocketStream(ws);
+        let client = ws;
         let server = server_task.await.unwrap();
         (client, server)
     }
@@ -426,7 +423,7 @@ mod tests {
     async fn stream_decodes_text_frame_as_packet() {
         let (mut client, mut server) = ws_pair().await;
         server.send(WsMsg::text("4hello")).await.unwrap();
-        let frame = client.recv().await.unwrap();
+        let frame = recv(&mut client).await.unwrap();
         assert!(matches!(frame, Frame::Packet(Packet::Message(m)) if m == "hello"));
     }
 
@@ -434,21 +431,21 @@ mod tests {
     async fn stream_ends_at_peer_close_frame() {
         let (mut client, mut server) = ws_pair().await;
         server.send(WsMsg::Close(None)).await.unwrap();
-        assert!(next_server_frame(&mut client.0).await.unwrap().is_none());
+        assert!(next_server_frame(&mut client).await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn stream_ends_at_close_packet() {
         let (mut client, mut server) = ws_pair().await;
         server.send(WsMsg::text("1")).await.unwrap();
-        assert!(next_server_frame(&mut client.0).await.unwrap().is_none());
+        assert!(next_server_frame(&mut client).await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn stream_decodes_binary_frame() {
         let (mut client, mut server) = ws_pair().await;
         server.send(WsMsg::binary(b"data".as_ref())).await.unwrap();
-        let frame = client.recv().await.unwrap();
+        let frame = recv(&mut client).await.unwrap();
         assert!(matches!(frame, Frame::Binary(b) if b.as_ref() == b"data"));
     }
 
@@ -456,14 +453,13 @@ mod tests {
     async fn stream_invalid_packet_id_is_error() {
         let (mut client, mut server) = ws_pair().await;
         server.send(WsMsg::text("9bad")).await.unwrap();
-        client.recv().await.unwrap_err();
+        recv(&mut client).await.unwrap_err();
     }
 
     #[tokio::test]
     async fn sink_sends_packet_frame_as_text() {
         let (mut client, mut server) = ws_pair().await;
-        client
-            .send(Frame::Packet(Packet::Pong("probe".into())))
+        send(&mut client, Frame::Packet(Packet::Pong("probe".into())))
             .await
             .unwrap();
         let msg = server.next().await.unwrap().unwrap();
@@ -473,8 +469,7 @@ mod tests {
     #[tokio::test]
     async fn sink_sends_binary_frame() {
         let (mut client, mut server) = ws_pair().await;
-        client
-            .send(Frame::Binary(Bytes::from_static(b"raw")))
+        send(&mut client, Frame::Binary(Bytes::from_static(b"raw")))
             .await
             .unwrap();
         let msg = server.next().await.unwrap().unwrap();
@@ -490,7 +485,7 @@ mod tests {
             assert_eq!(msg.to_text().unwrap(), "2probe");
             server.send(WsMsg::text("3probe")).await.unwrap();
         });
-        client.probe().await.unwrap();
+        probe(&mut client).await.unwrap();
         server_task.await.unwrap();
     }
 
@@ -502,7 +497,7 @@ mod tests {
             server.send(WsMsg::text("4unexpected")).await.unwrap();
         });
         assert!(matches!(
-            client.probe().await,
+            probe(&mut client).await,
             Err(WebSocketError::Probe(_))
         ));
         server_task.await.unwrap();
@@ -518,8 +513,7 @@ mod tests {
         });
         let (server_frame_tx, _) = mpsc::channel(4);
         let (_, client_frame_rx) = mpsc::channel::<Frame>(4);
-        client
-            .transport(None, server_frame_tx, client_frame_rx)
+        transport(client, None, server_frame_tx, client_frame_rx)
             .await
             .unwrap();
         server_task.await.unwrap();
@@ -537,8 +531,7 @@ mod tests {
         let (server_frame_tx, _) = mpsc::channel(4);
         let (client_frame_tx, client_frame_rx) = mpsc::channel::<Frame>(4);
         drop(client_frame_tx);
-        client
-            .transport(Some(handshake_tx), server_frame_tx, client_frame_rx)
+        transport(client, Some(handshake_tx), server_frame_tx, client_frame_rx)
             .await
             .unwrap();
         assert_eq!(&*handshake_rx.await.unwrap().sid, "abc");
@@ -555,9 +548,7 @@ mod tests {
         let (handshake_tx, _) = oneshot::channel();
         let (server_frame_tx, _) = mpsc::channel(4);
         let (_, client_frame_rx) = mpsc::channel::<Frame>(4);
-        let result = client
-            .transport(Some(handshake_tx), server_frame_tx, client_frame_rx)
-            .await;
+        let result = transport(client, Some(handshake_tx), server_frame_tx, client_frame_rx).await;
         assert!(matches!(result, Err(TransportError::Open(_))));
         let _ = server_task.await;
     }
@@ -574,9 +565,7 @@ mod tests {
         drop(handshake_rx);
         let (server_frame_tx, _) = mpsc::channel(4);
         let (_, client_frame_rx) = mpsc::channel::<Frame>(4);
-        let result = client
-            .transport(Some(handshake_tx), server_frame_tx, client_frame_rx)
-            .await;
+        let result = transport(client, Some(handshake_tx), server_frame_tx, client_frame_rx).await;
         assert!(matches!(result, Err(TransportError::SendHandshake(_))));
         let _ = server_task.await;
     }
@@ -592,7 +581,7 @@ mod tests {
         });
         let (server_frame_tx, mut server_frame_rx) = mpsc::channel(4);
         let (client_frame_tx, client_frame_rx) = mpsc::channel::<Frame>(4);
-        let transport = tokio::spawn(client.transport(None, server_frame_tx, client_frame_rx));
+        let transport = tokio::spawn(transport(client, None, server_frame_tx, client_frame_rx));
         let action = server_frame_rx.recv().await.unwrap();
         assert!(matches!(action, Frame::Packet(Packet::Message(m)) if m == "data"));
         drop(client_frame_tx);
@@ -610,7 +599,7 @@ mod tests {
         });
         let (server_frame_tx, mut server_frame_rx) = mpsc::channel(4);
         let (client_frame_tx, client_frame_rx) = mpsc::channel::<Frame>(4);
-        let transport = tokio::spawn(client.transport(None, server_frame_tx, client_frame_rx));
+        let transport = tokio::spawn(transport(client, None, server_frame_tx, client_frame_rx));
         assert!(server_frame_rx.recv().await.is_none());
         client_frame_tx
             .send(Frame::Packet(Packet::Close))
@@ -626,7 +615,7 @@ mod tests {
         let (client, mut server) = ws_pair().await;
         let (server_frame_tx, _frame_rx) = mpsc::channel(1);
         let (client_frame_tx, client_frame_rx) = mpsc::channel::<Frame>(4);
-        tokio::spawn(client.transport(None, server_frame_tx, client_frame_rx));
+        tokio::spawn(transport(client, None, server_frame_tx, client_frame_rx));
         let _ = server.next().await; // consume Upgrade
         for text in ["4fills", "4blocks"] {
             server.send(WsMsg::text(text)).await.unwrap();
@@ -662,8 +651,7 @@ mod tests {
             .await
             .unwrap();
         drop(client_frame_tx);
-        client
-            .transport(None, server_frame_tx, client_frame_rx)
+        transport(client, None, server_frame_tx, client_frame_rx)
             .await
             .unwrap();
         server_task.await.unwrap();

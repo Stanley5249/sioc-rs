@@ -3,8 +3,8 @@
 use crate::ENGINE_IO_VERSION;
 use crate::error::{PollingError, TransportError, WebSocketError};
 use crate::packet::{Frame, Handshake, Packet};
-use crate::prelude::WebSocketStream;
 use crate::websocket::WebSocketConnector;
+use crate::websocket::{self, WebSocketStream};
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use bytes::Bytes;
 use bytestring::ByteString;
@@ -94,290 +94,293 @@ fn polling_url(mut base_url: Url) -> Url {
     base_url
 }
 
-/// Wraps a [`reqwest::Client`] with Engine.IO HTTP polling helpers.
-#[derive(Clone)]
-pub struct PollingClient(pub Client);
+async fn get(client: &Client, url: &Url) -> Result<Vec<Frame>, PollingError> {
+    let response = client
+        .get(url.as_str())
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
 
-impl PollingClient {
-    async fn get(&self, url: &Url) -> Result<Vec<Frame>, PollingError> {
-        let response = self
-            .0
-            .get(url.as_str())
-            .send()
-            .await?
-            .error_for_status()?
-            .text()
-            .await?;
+    tracing::trace!(bytes = response.len(), "received polling payload");
+    decode_frames(&ByteString::from(response))
+}
 
-        tracing::trace!(bytes = response.len(), "received polling payload");
-        decode_frames(&ByteString::from(response))
+async fn get_frame(client: &Client, url: &Url) -> Result<Frame, PollingError> {
+    let response = client
+        .get(url.as_str())
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+
+    tracing::trace!(bytes = response.len(), "received polling payload");
+
+    Frame::decode(&ByteString::from(response))
+}
+
+async fn post(client: &Client, url: &Url, frames: &[Frame]) -> Result<(), PollingError> {
+    let body = encode_frames(frames);
+    tracing::trace!(bytes = body.len(), "sent polling payload");
+
+    let response = client
+        .post(url.as_str())
+        .body(body)
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+
+    if !response.eq_ignore_ascii_case("ok") {
+        return Err(PollingError::Response(response));
     }
 
-    async fn get_frame(&self, url: &Url) -> Result<Frame, PollingError> {
-        let response = self
-            .0
-            .get(url.as_str())
-            .send()
-            .await?
-            .error_for_status()?
-            .text()
-            .await?;
+    Ok(())
+}
 
-        tracing::trace!(bytes = response.len(), "received polling payload");
+/// Batches client frames into POST requests until `pause` fires or the engine closes `client_frame_rx`.
+///
+/// When the engine closes `client_frame_rx`, posts a `Close` packet to end the session.
+///
+/// Batches respect the handshake's wire-byte limit. A single oversized frame
+/// travels alone, matching engine.io-client's batching behavior.
+#[tracing::instrument(level = "debug", skip_all)]
+async fn post_client_frames(
+    client: &Client,
+    url: &Url,
+    client_frame_rx: &mut mpsc::Receiver<Frame>,
+    pause: &CancellationToken,
+    max_payload: u64,
+) -> Result<Stop, TransportError> {
+    let mut pending = None;
 
-        Frame::decode(&ByteString::from(response))
-    }
-
-    async fn post(&self, url: &Url, frames: &[Frame]) -> Result<(), PollingError> {
-        let body = encode_frames(frames);
-        tracing::trace!(bytes = body.len(), "sent polling payload");
-
-        let response = self
-            .0
-            .post(url.as_str())
-            .body(body)
-            .send()
-            .await?
-            .error_for_status()?
-            .text()
-            .await?;
-
-        if !response.eq_ignore_ascii_case("ok") {
-            return Err(PollingError::Response(response));
-        }
-
-        Ok(())
-    }
-
-    /// Batches client frames into POST requests until `pause` fires or the engine closes `client_frame_rx`.
-    ///
-    /// When the engine closes `client_frame_rx`, posts a `Close` packet to end the session.
-    ///
-    /// Batches respect the handshake's wire-byte limit. A single oversized frame
-    /// travels alone, matching engine.io-client's batching behavior.
-    #[tracing::instrument(level = "debug", skip_all)]
-    async fn post_client_frames(
-        &self,
-        url: &Url,
-        client_frame_rx: &mut mpsc::Receiver<Frame>,
-        pause: &CancellationToken,
-        max_payload: u64,
-    ) -> Result<Stop, TransportError> {
-        let mut pending = None;
-
-        loop {
-            // Pause only while idle, because a POST in flight may carry frames.
-            let first = if let Some(frame) = pending.take() {
-                Some(frame)
-            } else {
-                tokio::select! {
-                    () = pause.cancelled() => {
-                        tracing::debug!("paused polling post");
-                        return Ok(Stop::Paused);
-                    }
-                    frame = client_frame_rx.recv() => frame,
-                }
-            };
-
-            let Some(first) = first else {
-                tracing::trace!("sent close packet");
-
-                self.post(url, &[Packet::Close.into()]).await?;
-
-                return Ok(Stop::Ended);
-            };
-
-            // Empty or disconnected means the ready prefix has ended. Pending
-            // frames are posted before honoring an upgrade pause.
-            let ready = std::iter::from_fn(|| {
-                if pause.is_cancelled() {
-                    None
-                } else {
-                    client_frame_rx.try_recv().ok()
-                }
-            });
-            let (buffer, remainder) = take_batch(first, ready, max_payload);
-            pending = remainder;
-
-            self.post(url, &buffer).await?;
-        }
-    }
-
-    /// Forwards server frames to the engine until `pause` fires or the server sends `Close`.
-    ///
-    /// The `Close` packet itself stays here, because the transport ending is
-    /// what tells the engine the session is over.
-    #[tracing::instrument(level = "debug", skip_all)]
-    async fn get_server_frames(
-        &self,
-        url: &Url,
-        server_frame_tx: &mpsc::Sender<Frame>,
-        pause: &CancellationToken,
-    ) -> Result<Stop, TransportError> {
-        // Pause only between requests, because the server answers the GET in
-        // flight once the upgrade probe succeeds, and the answer may carry frames.
-        while !pause.is_cancelled() {
-            for frame in self.get(url).await? {
-                if frame == Frame::Packet(Packet::Close) {
-                    tracing::debug!("server closed");
-
-                    return Ok(Stop::Ended);
-                }
-
-                server_frame_tx.send(frame).await?;
-            }
-        }
-
-        tracing::debug!("paused polling get");
-
-        Ok(Stop::Paused)
-    }
-
-    /// Runs the GET and POST loops until both pause or either one ends the session.
-    async fn poll(
-        &self,
-        url: &Url,
-        server_frame_tx: &mpsc::Sender<Frame>,
-        client_frame_rx: &mut mpsc::Receiver<Frame>,
-        pause: &CancellationToken,
-        max_payload: u64,
-    ) -> Result<Stop, TransportError> {
-        let mut get = pin!(self.get_server_frames(url, server_frame_tx, pause));
-        let mut post = pin!(self.post_client_frames(url, client_frame_rx, pause, max_payload));
-
-        // A pause lets the other loop finish its request. An ended session
-        // abandons it, because its result no longer matters.
-        tokio::select! {
-            stop = &mut get => match stop? {
-                Stop::Paused => post.await,
-                Stop::Ended => Ok(Stop::Ended),
-            },
-            stop = &mut post => match stop? {
-                Stop::Paused => get.await,
-                Stop::Ended => Ok(Stop::Ended),
-            },
-        }
-    }
-
-    /// Polls until the session ends, or until `upgrade` connects and polling pauses.
-    ///
-    /// Returns the upgraded stream, or `None` if the session ended first. A failed
-    /// upgrade falls back to long polling for the rest of the session.
-    async fn poll_until_upgraded(
-        &self,
-        url: &Url,
-        server_frame_tx: &mpsc::Sender<Frame>,
-        client_frame_rx: &mut mpsc::Receiver<Frame>,
-        upgrade: impl Future<Output = Result<WebSocketStream, WebSocketError>>,
-        max_payload: u64,
-    ) -> Result<Option<WebSocketStream>, TransportError> {
-        let pause = CancellationToken::new();
-        let mut poll = pin!(self.poll(url, server_frame_tx, client_frame_rx, &pause, max_payload));
-
-        tokio::select! {
-            stop = &mut poll => {
-                stop?;
-                Ok(None)
-            }
-            result = upgrade => match result {
-                Ok(stream) => {
-                    pause.cancel();
-
-                    match poll.await? {
-                        Stop::Paused => Ok(Some(stream)),
-                        Stop::Ended => Ok(None),
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "failed to upgrade, continuing long polling");
-
-                    poll.await?;
-
-                    Ok(None)
-                }
-            },
-        }
-    }
-
-    /// Runs the full polling transport lifecycle: handshake, GET/POST loops, and optional WebSocket upgrade.
-    ///
-    /// Finishes once the engine closes `client_frame_rx`. If the server ends the session first,
-    /// drops `server_frame_tx` and discards client frames until the engine closes `client_frame_rx`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a network, protocol, or channel failure occurs.
-    #[tracing::instrument(skip_all)]
-    pub async fn transport<C>(
-        self,
-        base_url: Url,
-        connector: C,
-        handshake_tx: oneshot::Sender<Handshake>,
-        server_frame_tx: mpsc::Sender<Frame>,
-        mut client_frame_rx: mpsc::Receiver<Frame>,
-    ) -> Result<(), TransportError>
-    where
-        C: WebSocketConnector,
-    {
-        let mut url = polling_url(base_url.clone());
-
-        let span = tracing::debug_span!("connect", %url);
-
-        let handshake = match self.get_frame(&url).instrument(span).await? {
-            Frame::Packet(Packet::Open(handshake)) => handshake,
-            frame => return Err(TransportError::Open(frame)),
-        };
-
-        url.query_pairs_mut().append_pair("sid", &handshake.sid);
-        let can_upgrade = handshake.can_upgrade_to_websocket();
-        let sid = handshake.sid.clone();
-        let max_payload = handshake.max_payload;
-
-        handshake_tx
-            .send(handshake)
-            .map_err(TransportError::SendHandshake)?;
-
-        let stream = if can_upgrade {
-            let upgrade = WebSocketStream::connect(base_url, Some(&sid), connector);
-
-            self.poll_until_upgraded(
-                &url,
-                &server_frame_tx,
-                &mut client_frame_rx,
-                upgrade,
-                max_payload,
-            )
-            .await?
+    loop {
+        // Pause only while idle, because a POST in flight may carry frames.
+        let first = if let Some(frame) = pending.take() {
+            Some(frame)
         } else {
-            self.poll(
-                &url,
-                &server_frame_tx,
-                &mut client_frame_rx,
-                &CancellationToken::new(),
-                max_payload,
-            )
-            .await?;
-
-            None
+            tokio::select! {
+                () = pause.cancelled() => {
+                    tracing::debug!("paused polling post");
+                    return Ok(Stop::Paused);
+                }
+                frame = client_frame_rx.recv() => frame,
+            }
         };
 
-        if let Some(stream) = stream {
-            tracing::debug!("paused polling transport");
+        let Some(first) = first else {
+            tracing::trace!("sent close packet");
 
-            return stream
-                .transport(None, server_frame_tx, client_frame_rx)
-                .await;
-        }
+            post(client, url, &[Packet::Close.into()]).await?;
 
-        // The engine may queue frames before it learns the server ended the
-        // session, and the closed session cannot accept them.
-        drop(server_frame_tx);
-        while client_frame_rx.recv().await.is_some() {}
+            return Ok(Stop::Ended);
+        };
 
-        Ok(())
+        // Empty or disconnected means the ready prefix has ended. Pending
+        // frames are posted before honoring an upgrade pause.
+        let ready = std::iter::from_fn(|| {
+            if pause.is_cancelled() {
+                None
+            } else {
+                client_frame_rx.try_recv().ok()
+            }
+        });
+        let (buffer, remainder) = take_batch(first, ready, max_payload);
+        pending = remainder;
+
+        post(client, url, &buffer).await?;
     }
 }
 
+/// Forwards server frames to the engine until `pause` fires or the server sends `Close`.
+///
+/// The `Close` packet itself stays here, because the transport ending is
+/// what tells the engine the session is over.
+#[tracing::instrument(level = "debug", skip_all)]
+async fn get_server_frames(
+    client: &Client,
+    url: &Url,
+    server_frame_tx: &mpsc::Sender<Frame>,
+    pause: &CancellationToken,
+) -> Result<Stop, TransportError> {
+    // Pause only between requests, because the server answers the GET in
+    // flight once the upgrade probe succeeds, and the answer may carry frames.
+    while !pause.is_cancelled() {
+        for frame in get(client, url).await? {
+            if frame == Frame::Packet(Packet::Close) {
+                tracing::debug!("server closed");
+
+                return Ok(Stop::Ended);
+            }
+
+            server_frame_tx.send(frame).await?;
+        }
+    }
+
+    tracing::debug!("paused polling get");
+
+    Ok(Stop::Paused)
+}
+
+/// Runs the GET and POST loops until both pause or either one ends the session.
+async fn poll(
+    client: &Client,
+    url: &Url,
+    server_frame_tx: &mpsc::Sender<Frame>,
+    client_frame_rx: &mut mpsc::Receiver<Frame>,
+    pause: &CancellationToken,
+    max_payload: u64,
+) -> Result<Stop, TransportError> {
+    let mut get = pin!(get_server_frames(client, url, server_frame_tx, pause));
+    let mut post = pin!(post_client_frames(
+        client,
+        url,
+        client_frame_rx,
+        pause,
+        max_payload
+    ));
+
+    // A pause lets the other loop finish its request. An ended session
+    // abandons it, because its result no longer matters.
+    tokio::select! {
+        stop = &mut get => match stop? {
+            Stop::Paused => post.await,
+            Stop::Ended => Ok(Stop::Ended),
+        },
+        stop = &mut post => match stop? {
+            Stop::Paused => get.await,
+            Stop::Ended => Ok(Stop::Ended),
+        },
+    }
+}
+
+/// Polls until the session ends, or until `upgrade` connects and polling pauses.
+///
+/// Returns the upgraded stream, or `None` if the session ended first. A failed
+/// upgrade falls back to long polling for the rest of the session.
+async fn poll_until_upgraded(
+    client: &Client,
+    url: &Url,
+    server_frame_tx: &mpsc::Sender<Frame>,
+    client_frame_rx: &mut mpsc::Receiver<Frame>,
+    upgrade: impl Future<Output = Result<WebSocketStream, WebSocketError>>,
+    max_payload: u64,
+) -> Result<Option<WebSocketStream>, TransportError> {
+    let pause = CancellationToken::new();
+    let mut poll = pin!(poll(
+        client,
+        url,
+        server_frame_tx,
+        client_frame_rx,
+        &pause,
+        max_payload
+    ));
+
+    tokio::select! {
+        stop = &mut poll => {
+            stop?;
+            Ok(None)
+        }
+        result = upgrade => match result {
+            Ok(stream) => {
+                pause.cancel();
+
+                match poll.await? {
+                    Stop::Paused => Ok(Some(stream)),
+                    Stop::Ended => Ok(None),
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to upgrade, continuing long polling");
+
+                poll.await?;
+
+                Ok(None)
+            }
+        },
+    }
+}
+
+/// Runs the full polling transport lifecycle: handshake, GET/POST loops, and optional WebSocket upgrade.
+///
+/// Finishes once the engine closes `client_frame_rx`. If the server ends the session first,
+/// drops `server_frame_tx` and discards client frames until the engine closes `client_frame_rx`.
+///
+/// # Errors
+///
+/// Returns an error if a network, protocol, or channel failure occurs.
+#[tracing::instrument(skip_all)]
+pub async fn transport<C>(
+    client: Client,
+    base_url: Url,
+    connector: C,
+    handshake_tx: oneshot::Sender<Handshake>,
+    server_frame_tx: mpsc::Sender<Frame>,
+    mut client_frame_rx: mpsc::Receiver<Frame>,
+) -> Result<(), TransportError>
+where
+    C: WebSocketConnector,
+{
+    let mut url = polling_url(base_url.clone());
+
+    let span = tracing::debug_span!("connect", %url);
+
+    let handshake = match get_frame(&client, &url).instrument(span).await? {
+        Frame::Packet(Packet::Open(handshake)) => handshake,
+        frame => return Err(TransportError::Open(frame)),
+    };
+
+    url.query_pairs_mut().append_pair("sid", &handshake.sid);
+    let can_upgrade = handshake.can_upgrade_to_websocket();
+    let sid = handshake.sid.clone();
+    let max_payload = handshake.max_payload;
+
+    handshake_tx
+        .send(handshake)
+        .map_err(TransportError::SendHandshake)?;
+
+    let stream = if can_upgrade {
+        let upgrade = websocket::connect(base_url, Some(&sid), connector);
+
+        poll_until_upgraded(
+            &client,
+            &url,
+            &server_frame_tx,
+            &mut client_frame_rx,
+            upgrade,
+            max_payload,
+        )
+        .await?
+    } else {
+        poll(
+            &client,
+            &url,
+            &server_frame_tx,
+            &mut client_frame_rx,
+            &CancellationToken::new(),
+            max_payload,
+        )
+        .await?;
+
+        None
+    };
+
+    if let Some(stream) = stream {
+        tracing::debug!("paused polling transport");
+
+        return websocket::transport(stream, None, server_frame_tx, client_frame_rx).await;
+    }
+
+    // The engine may queue frames before it learns the server ended the
+    // session, and the closed session cannot accept them.
+    drop(server_frame_tx);
+    while client_frame_rx.recv().await.is_some() {}
+
+    Ok(())
+}
 /// Why a polling loop stopped.
 enum Stop {
     /// The upgrade paused polling.
@@ -455,8 +458,7 @@ mod tests {
                 .unwrap();
         }
         drop(tx);
-        PollingClient(Client::new())
-            .post_client_frames(&url, &mut rx, &CancellationToken::new(), 11)
+        post_client_frames(&Client::new(), &url, &mut rx, &CancellationToken::new(), 11)
             .await
             .unwrap();
         assert_eq!(server.await.unwrap(), ["4aaaa\x1e4bbbb", "4cccc", "1"]);
@@ -511,9 +513,8 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
             pause_later.cancel();
         });
-        let client = PollingClient(Client::new());
-        let stop = client
-            .get_server_frames(&url, &server_frame_tx, &pause)
+        let client = Client::new();
+        let stop = get_server_frames(&client, &url, &server_frame_tx, &pause)
             .await
             .unwrap();
         assert!(matches!(stop, Stop::Paused));
@@ -527,9 +528,8 @@ mod tests {
     async fn get_ends_at_server_close() {
         let url = http_server(Some("1"), Duration::ZERO).await;
         let (server_frame_tx, mut server_frame_rx) = mpsc::channel(4);
-        let client = PollingClient(Client::new());
-        let stop = client
-            .get_server_frames(&url, &server_frame_tx, &CancellationToken::new())
+        let client = Client::new();
+        let stop = get_server_frames(&client, &url, &server_frame_tx, &CancellationToken::new())
             .await
             .unwrap();
         assert!(matches!(stop, Stop::Ended));
@@ -542,9 +542,10 @@ mod tests {
         let (server_frame_tx, _frame_rx) = mpsc::channel(4);
         let (client_frame_tx, mut client_frame_rx) = mpsc::channel(4);
         drop(client_frame_tx);
-        let client = PollingClient(Client::new());
+        let client = Client::new();
         let pause = CancellationToken::new();
-        let poll = client.poll(
+        let poll = poll(
+            &client,
             &url,
             &server_frame_tx,
             &mut client_frame_rx,
@@ -563,18 +564,18 @@ mod tests {
         let url = http_server(Some("1"), Duration::from_millis(50)).await;
         let (server_frame_tx, mut server_frame_rx) = mpsc::channel(4);
         let (_transport_tx, mut client_frame_rx) = mpsc::channel(4);
-        let client = PollingClient(Client::new());
+        let client = Client::new();
         let upgrade = async { Err(WebSocketError::Closed) };
-        let stream = client
-            .poll_until_upgraded(
-                &url,
-                &server_frame_tx,
-                &mut client_frame_rx,
-                upgrade,
-                1_000_000,
-            )
-            .await
-            .unwrap();
+        let stream = poll_until_upgraded(
+            &client,
+            &url,
+            &server_frame_tx,
+            &mut client_frame_rx,
+            upgrade,
+            1_000_000,
+        )
+        .await
+        .unwrap();
         assert!(stream.is_none());
         server_frame_rx.try_recv().unwrap_err();
     }
