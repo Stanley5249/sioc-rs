@@ -16,6 +16,7 @@ It adds _namespaces_ for multiple channels over a single connection, _events_ as
 - Event handling lives in match arms, no callbacks with boxed futures.
 - State lives in the enclosing scope, no Arc or Mutex.
 - Zero-copy packet parsing via [`bytestring`](https://docs.rs/bytestring) and [`bytes`](https://docs.rs/bytes).
+- Reconnection policy belongs to the application. Call `Client::connect` again for a closed namespace on a live session, or open a new `Client` after the session ends. Use `tokio::time::sleep` for application-controlled retry delays.
 
 ## License
 
