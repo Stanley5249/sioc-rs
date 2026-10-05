@@ -122,10 +122,11 @@ async fn run_protocol(
     Ok(())
 }
 
-/// Forwards server frames as messages until the server or the transport ends the session.
+/// Forwards server frames as messages until the transport finishes.
 ///
-/// Then drops `server_message_tx` to end the message stream, whichever side
-/// closed, and waits for the transport to finish.
+/// The transport ends `server_frame_rx` at the server's `Close` packet too, so
+/// the channel's end is the one end of the session, whichever side closed.
+/// Returning drops `server_message_tx`, which ends the message stream.
 async fn server_frames_to_messages(
     mut server_frame_rx: mpsc::Receiver<Frame>,
     server_message_tx: mpsc::Sender<Message>,
@@ -140,11 +141,6 @@ async fn server_frames_to_messages(
                 tracing::trace!(%packet, "<- packet");
 
                 match packet {
-                    Packet::Close => {
-                        tracing::debug!("server closed");
-
-                        break;
-                    }
                     Packet::Ping(payload) => {
                         tracing::trace!("-> PONG");
 
@@ -168,22 +164,16 @@ async fn server_frames_to_messages(
         }
     }
 
-    // Closing the pong channel ends the client-message loop if it is still running.
-    drop(pong_tx);
-    drop(server_message_tx);
+    tracing::debug!("transport finished");
 
-    while heartbeat
-        .next_server_frame(&mut server_frame_rx)
-        .await?
-        .is_some()
-    {}
-
+    // Dropping `pong_tx` ends the client-message loop if it is still running.
     Ok(())
 }
 
 /// Forwards client messages and pongs as frames until either side ends the session.
 ///
-/// Then drops `client_frame_tx` and drains both inputs until their senders hang up.
+/// Then drops `client_frame_tx`, which tells the transport to send the server
+/// a `Close` packet, and drains both inputs until their senders hang up.
 async fn client_messages_to_frames(
     mut client_message_rx: mpsc::Receiver<Message>,
     mut pong_rx: mpsc::Receiver<Frame>,
@@ -216,9 +206,6 @@ async fn client_messages_to_frames(
                 }
                 None => {
                     tracing::debug!("client closed");
-                    tracing::trace!("-> CLOSE");
-
-                    client_frame_tx.send(Packet::Close.into()).await?;
 
                     break;
                 }
@@ -293,16 +280,16 @@ mod tests {
     }
 
     impl Harness {
-        /// Waits for the session to end, then hangs up both producers.
+        /// Ends the session from the transport, then hangs up the upper layer.
         ///
         /// Returns the engine result, the frames sent to the transport, and the
         /// messages sent to the upper layer.
         async fn finish(mut self) -> (Result<(), EngineError>, Vec<Frame>, Vec<Message>) {
+            drop(self.server_frame_tx);
             let mut frames = Vec::new();
             while let Some(frame) = self.client_frame_rx.recv().await {
                 frames.push(frame);
             }
-            drop(self.server_frame_tx);
             drop(self.client_message_tx);
             let mut messages = Vec::new();
             while let Some(message) = self.server_message_rx.recv().await {
@@ -332,16 +319,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn protocol_server_close_ends_message_stream() {
-        let mut h = spawn(make_handshake(), 4);
-        h.server_frame_tx.send(Packet::Close.into()).await.unwrap();
-        assert!(h.server_message_rx.recv().await.is_none());
-        let (result, frames, _) = h.finish().await;
-        result.unwrap();
-        assert!(frames.is_empty());
-    }
-
-    #[tokio::test]
     async fn protocol_transport_closed_ends_message_stream() {
         let Harness {
             server_frame_tx,
@@ -358,7 +335,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn protocol_client_close_sends_close_packet() {
+    async fn protocol_client_close_ends_frame_stream() {
         let Harness {
             server_frame_tx,
             mut server_message_rx,
@@ -367,10 +344,6 @@ mod tests {
             engine,
         } = spawn(make_handshake(), 4);
         drop(client_message_tx);
-        assert!(matches!(
-            client_frame_rx.recv().await,
-            Some(Frame::Packet(Packet::Close))
-        ));
         assert!(client_frame_rx.recv().await.is_none());
 
         // Frames keep arriving until the transport finishes.
@@ -396,14 +369,13 @@ mod tests {
             mut client_frame_rx,
             engine,
         } = spawn(make_handshake(), 4);
-        server_frame_tx.send(Packet::Close.into()).await.unwrap();
+        drop(server_frame_tx);
         assert!(server_message_rx.recv().await.is_none());
         assert!(client_frame_rx.recv().await.is_none());
         client_message_tx
             .send(Message::Text("late".into()))
             .await
             .unwrap();
-        drop(server_frame_tx);
         drop(client_message_tx);
         engine.await.unwrap().unwrap();
     }
@@ -438,7 +410,6 @@ mod tests {
             .send(Packet::Ping("probe".into()).into())
             .await
             .unwrap();
-        h.server_frame_tx.send(Packet::Close.into()).await.unwrap();
         let (result, frames, _) = h.finish().await;
         result.unwrap();
         assert!(matches!(&frames[..], [Frame::Packet(Packet::Pong(p))] if p == "probe"));
@@ -448,7 +419,6 @@ mod tests {
     async fn protocol_noop_is_ignored() {
         let h = spawn(make_handshake(), 4);
         h.server_frame_tx.send(Packet::Noop.into()).await.unwrap();
-        h.server_frame_tx.send(Packet::Close.into()).await.unwrap();
         let (result, frames, messages) = h.finish().await;
         result.unwrap();
         assert!(frames.is_empty());
@@ -477,7 +447,6 @@ mod tests {
             .send(Frame::Binary(Bytes::from_static(b"bin")))
             .await
             .unwrap();
-        h.server_frame_tx.send(Packet::Close.into()).await.unwrap();
         let (result, _, messages) = h.finish().await;
         result.unwrap();
         assert!(matches!(
@@ -510,11 +479,8 @@ mod tests {
         }
         assert!(matches!(
             &frames[..],
-            [
-                Frame::Packet(Packet::Message(m)),
-                Frame::Binary(b),
-                Frame::Packet(Packet::Close),
-            ] if m == "out" && b.as_ref() == b"out"
+            [Frame::Packet(Packet::Message(m)), Frame::Binary(b)]
+                if m == "out" && b.as_ref() == b"out"
         ));
         drop(server_frame_tx);
         engine.await.unwrap().unwrap();
@@ -528,8 +494,10 @@ mod tests {
             ..make_handshake()
         };
         let h = spawn(handshake, 4);
-        let (result, _, _) = h.finish().await;
-        assert!(matches!(result, Err(EngineError::HeartbeatTimeout)));
+        assert!(matches!(
+            h.engine.await.unwrap(),
+            Err(EngineError::HeartbeatTimeout)
+        ));
     }
 
     #[tokio::test]

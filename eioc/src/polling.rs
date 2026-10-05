@@ -130,6 +130,11 @@ impl PollingClient {
     }
 
     /// Batches client frames into POST requests until `pause` fires or the engine closes `client_frame_rx`.
+    ///
+    /// When the engine closes `client_frame_rx`, posts a `Close` packet to end the session.
+    ///
+    /// A batch holds up to eight frames regardless of size, so it can exceed
+    /// the handshake's `maxPayload`. Respecting the limit is not implemented yet.
     #[tracing::instrument(level = "debug", skip_all, err)]
     async fn post_client_frames(
         &self,
@@ -150,6 +155,10 @@ impl PollingClient {
             };
 
             if count == 0 {
+                tracing::trace!("-> CLOSE");
+
+                self.post(url, &[Packet::Close.into()]).await?;
+
                 return Ok(Stop::Ended);
             }
 
@@ -159,6 +168,9 @@ impl PollingClient {
     }
 
     /// Forwards server frames to the engine until `pause` fires or the server sends `Close`.
+    ///
+    /// The `Close` packet itself stays here, because the transport ending is
+    /// what tells the engine the session is over.
     #[tracing::instrument(level = "debug", skip_all, err)]
     async fn get_server_frames(
         &self,
@@ -170,13 +182,13 @@ impl PollingClient {
         // flight once the upgrade probe succeeds, and the answer may carry frames.
         while !pause.is_cancelled() {
             for frame in self.get(url).await? {
-                let close = frame == Frame::Packet(Packet::Close);
+                if frame == Frame::Packet(Packet::Close) {
+                    tracing::debug!("server closed");
 
-                server_frame_tx.send(frame).await?;
-
-                if close {
                     return Ok(Stop::Ended);
                 }
+
+                server_frame_tx.send(frame).await?;
             }
         }
 
@@ -349,8 +361,14 @@ mod tests {
                 tokio::spawn(async move {
                     let mut buffer = [0; 4096];
                     while tcp.read(&mut buffer).await.is_ok_and(|n| n > 0) {
-                        let Some(body) = body else { continue };
-                        tokio::time::sleep(delay).await;
+                        // POSTs always succeed; GETs answer `body` after `delay`, or never.
+                        let body = if buffer.starts_with(b"POST") {
+                            "ok"
+                        } else {
+                            let Some(body) = body else { continue };
+                            tokio::time::sleep(delay).await;
+                            body
+                        };
                         let response = format!(
                             "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{body}",
                             body.len()
@@ -397,10 +415,7 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(stop, Stop::Ended));
-        assert!(matches!(
-            server_frame_rx.recv().await.unwrap(),
-            Frame::Packet(Packet::Close)
-        ));
+        server_frame_rx.try_recv().unwrap_err();
     }
 
     #[tokio::test]
@@ -431,10 +446,7 @@ mod tests {
             .await
             .unwrap();
         assert!(stream.is_none());
-        assert!(matches!(
-            server_frame_rx.recv().await.unwrap(),
-            Frame::Packet(Packet::Close)
-        ));
+        server_frame_rx.try_recv().unwrap_err();
     }
 
     #[test]

@@ -60,8 +60,8 @@ fn bytestring_from_utf8_bytes(utf8: tokio_tungstenite::tungstenite::Utf8Bytes) -
 
 /// Reads the next frame, skipping WebSocket control messages.
 ///
-/// Returns `None` at the peer's close frame, so the transport stops before it
-/// sends into a closing socket.
+/// Returns `None` at the server's `Close` packet or the peer's close frame,
+/// so the transport stops before it sends into a closing socket.
 async fn next_server_frame<S>(stream: &mut S) -> Result<Option<Frame>, WebSocketError>
 where
     S: Stream<Item = Result<WebSocketMessage, TungsteniteError>> + Unpin,
@@ -73,7 +73,14 @@ where
 
                 let bytes = bytestring_from_utf8_bytes(text);
 
-                return Ok(Some(Frame::Packet(Packet::decode(&bytes)?)));
+                return match Packet::decode(&bytes)? {
+                    Packet::Close => {
+                        tracing::debug!("server closed");
+
+                        Ok(None)
+                    }
+                    packet => Ok(Some(Frame::Packet(packet))),
+                };
             }
             WebSocketMessage::Binary(binary) => {
                 tracing::trace!(bytes = binary.len(), "<- BINARY");
@@ -264,7 +271,8 @@ async fn websocket_to_server_frames(
     Ok(())
 }
 
-/// Sends engine frames until the engine closes `client_frame_rx`, then closes the socket.
+/// Sends engine frames until the engine closes `client_frame_rx`, then sends
+/// the server a `Close` packet and closes the socket.
 ///
 /// If the stream ends first, discards frames until the engine closes `client_frame_rx`,
 /// because the closed socket cannot send them.
@@ -278,6 +286,11 @@ async fn client_frames_to_websocket(
             frame = client_frame_rx.recv() => {
                 let Some(frame) = frame else {
                     tracing::debug!("client frame channel closed");
+
+                    sink.send(encode_frame(Packet::Close.into()))
+                        .await
+                        .map_err(WebSocketError::from)?;
+
                     break;
                 };
 
@@ -386,6 +399,13 @@ mod tests {
     async fn stream_ends_at_peer_close_frame() {
         let (mut client, mut server) = ws_pair().await;
         server.send(WsMsg::Close(None)).await.unwrap();
+        assert!(next_server_frame(&mut client.0).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn stream_ends_at_close_packet() {
+        let (mut client, mut server) = ws_pair().await;
+        server.send(WsMsg::text("1")).await.unwrap();
         assert!(next_server_frame(&mut client.0).await.unwrap().is_none());
     }
 
@@ -596,6 +616,8 @@ mod tests {
             assert_eq!(msg.to_text().unwrap(), "5");
             let msg = server.next().await.unwrap().unwrap();
             assert_eq!(msg.to_text().unwrap(), "4out");
+            let msg = server.next().await.unwrap().unwrap();
+            assert_eq!(msg.to_text().unwrap(), "1");
             while let Some(Ok(_)) = server.next().await {}
         });
         let (server_frame_tx, _) = mpsc::channel(4);
