@@ -1,6 +1,5 @@
 //! Socket.IO client and namespace handles.
 
-pub use crate::SocketSender;
 use crate::ack::AckType;
 use crate::error::ManagerError;
 use crate::error::{ClientBuilderError, ClientError, PayloadError, SocketError};
@@ -338,6 +337,28 @@ impl Client {
     }
 }
 
+/// Sender for a Socket.IO namespace.
+///
+/// Clones share the namespace. Disconnecting any clone closes all of them;
+/// dropping the last clone also disconnects the namespace.
+#[derive(Clone, Debug)]
+pub struct SocketSender {
+    client_packet_tx: mpsc::Sender<ClientPacket>,
+    closed: CancellationToken,
+}
+
+impl SocketSender {
+    async fn send(&self, packet: ClientPacket) -> Result<(), SocketError> {
+        if self.closed.is_cancelled() {
+            return Err(SocketError::Closed);
+        }
+        self.client_packet_tx
+            .send(packet)
+            .await
+            .map_err(|_| SocketError::Closed)
+    }
+}
+
 impl SocketSender {
     /// Emits an event; returns `()` or an [`AckHandle`](crate::ack::AckHandle) depending on the ack policy.
     ///
@@ -657,3 +678,8 @@ mod tests {
         let _ = &*receiver;
     }
 }
+
+// Namespace routing tests also exercise the private sender state.
+#[cfg(test)]
+#[path = "manager/tests.rs"]
+mod manager_tests;

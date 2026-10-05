@@ -1,5 +1,7 @@
-use super::*;
+use super::SocketSender;
+use crate::error::ManagerError;
 use crate::error::SocketError;
+use crate::manager::{ConnectRequest, run};
 use crate::packet::{ClientPacket, DynAck, ServerPacket};
 use bytes::Bytes;
 use bytestring::ByteString;
@@ -53,7 +55,7 @@ fn event(payload: &'static str, ack_tx: Option<oneshot::Sender<DynAck>>) -> Clie
 
 impl Harness {
     /// Opens a namespace and consumes its CONNECT packet.
-    async fn open(&mut self, ns: &str) -> (crate::SocketSender, mpsc::Receiver<ServerPacket>) {
+    async fn open(&mut self, ns: &str) -> (SocketSender, mpsc::Receiver<ServerPacket>) {
         self.open_with(ns, 32).await
     }
 
@@ -61,7 +63,7 @@ impl Harness {
         &mut self,
         ns: &str,
         server_packet_capacity: usize,
-    ) -> (crate::SocketSender, mpsc::Receiver<ServerPacket>) {
+    ) -> (SocketSender, mpsc::Receiver<ServerPacket>) {
         let (client_packet_tx, client_packet_rx) = mpsc::channel(32);
         let closed = CancellationToken::new();
         let (server_packet_tx, server_packet_rx) = mpsc::channel(server_packet_capacity);
@@ -74,7 +76,7 @@ impl Harness {
             server_packet_tx,
             reply_tx,
         };
-        let client_packet_tx = crate::SocketSender {
+        let client_packet_tx = SocketSender {
             client_packet_tx,
             closed,
         };

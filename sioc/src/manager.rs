@@ -6,8 +6,6 @@
 
 mod client_packet;
 mod server_message;
-#[cfg(test)]
-mod tests;
 
 use crate::error::{ManagerError, SocketError};
 use crate::packet::{ClientPacket, DynAck, ServerPacket};
