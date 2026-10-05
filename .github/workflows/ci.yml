@@ -55,7 +55,9 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
-      - run: just fmt-check-rs
+      - run: just _fmt-cargo --check
+      - if: ${{ !cancelled() }}
+        run: just _fmt-just --check
       - if: ${{ !cancelled() }}
         run: just lint
 
@@ -68,7 +70,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
-      - run: just fmt-check-py
+      - run: just _fmt-ruff --check
       - if: ${{ !cancelled() }}
         run: just lint-py
 
@@ -82,7 +84,7 @@ jobs:
         with:
           tool: just
       - run: bun install --frozen-lockfile
-      - run: just fmt-check-js
+      - run: just _fmt-oxfmt --check
       - if: ${{ !cancelled() }}
         run: just lint-js
 
