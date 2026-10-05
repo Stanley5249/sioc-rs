@@ -39,6 +39,7 @@ Name a channel's ends after the items it carries, such as `frame_tx` and `client
 - Shut down by half-close: a task stops by dropping its senders and finishes only when its receivers return `None`. Between our tasks a send never fails during a graceful shutdown, so every send error is a real error. A receiver the caller owns may drop at any time, so delivery to it discards on a closed channel.
 - Keep every channel fed by the server bounded, so a flood slows the connection instead of growing memory.
 - Lock a `std::sync::Mutex` only inside a synchronous method that never returns the guard, so no lock is held across an `.await`.
+- Keep reconnection application-controlled. The application chooses its retry delay and policy, reopens a namespace with `Client::connect` on a live session, and opens a new `Client` after the session ends. Use `tokio::time::sleep` for retry delays instead of adding a backoff dependency.
 
 ## Commits
 

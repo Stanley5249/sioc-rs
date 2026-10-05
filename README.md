@@ -175,10 +175,6 @@ while let Some(event) = rx.listen::<ChatEvent>().await? {
 
 Early development. Expect breaking changes. Benchmarks and test coverage are not yet comprehensive. This does not attempt to pass the JavaScript Socket.IO test suite.
 
-Long polling respects the handshake's `maxPayload` when combining packets. A single oversized packet is sent alone, matching the JavaScript client.
-
-Automatic reconnection is deliberately left to the application, which chooses its retry delay and policy. Reopen a namespace with `Client::connect` while its session is alive; open a new `Client` after the session ends. Retry delays can use `tokio::time::sleep`, with no additional backoff dependency.
-
 ## Comparison
 
 ### Rust-socketio-client
