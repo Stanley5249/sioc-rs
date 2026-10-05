@@ -287,28 +287,43 @@ async fn client_frames_to_websocket(
                 let Some(frame) = frame else {
                     tracing::debug!("client frame channel closed");
 
-                    sink.send(encode_frame(Packet::Close.into()))
-                        .await
-                        .map_err(WebSocketError::from)?;
+                    finish_websocket_write(sink.send(encode_frame(Packet::Close.into())).await)?;
 
                     break;
                 };
 
-                sink.send(encode_frame(frame))
-                    .await
-                    .map_err(WebSocketError::from)?;
+                if !finish_websocket_write(sink.send(encode_frame(frame)).await)? {
+                    break;
+                }
             }
 
             () = stream_closed.cancelled() => {
-                while client_frame_rx.recv().await.is_some() {}
                 break;
             }
         }
     }
 
-    sink.close().await.map_err(WebSocketError::from)?;
+    // Each terminal write outcome follows the same half-close path.
+    while client_frame_rx.recv().await.is_some() {}
+    finish_websocket_write(sink.close().await)?;
 
     Ok(())
+}
+
+/// Returns whether another write is possible after tungstenite completes one.
+fn finish_websocket_write(result: Result<(), TungsteniteError>) -> Result<bool, WebSocketError> {
+    use tokio_tungstenite::tungstenite::error::ProtocolError;
+
+    match result {
+        Ok(()) => Ok(true),
+        // These errors report the peer's close state, just like stream EOF.
+        Err(
+            TungsteniteError::ConnectionClosed
+            | TungsteniteError::AlreadyClosed
+            | TungsteniteError::Protocol(ProtocolError::SendAfterClosing),
+        ) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg(test)]
@@ -320,6 +335,26 @@ mod tests {
     use tokio::sync::{mpsc, oneshot};
     use tokio_tungstenite::tungstenite::Message as WsMsg;
     use tokio_tungstenite::{MaybeTlsStream, accept_async, client_async};
+
+    #[tokio::test]
+    async fn writer_drains_after_reader_observes_peer_close() {
+        let (client, mut server) = ws_pair().await;
+        let (sink, mut stream) = client.0.split();
+        server.close(None).await.unwrap();
+        assert!(next_server_frame(&mut stream).await.unwrap().is_none());
+
+        // The reader has changed tungstenite's state before its stop signal
+        // reaches the writer. A queued frame must still finish gracefully.
+        let (client_frame_tx, client_frame_rx) = mpsc::channel(1);
+        client_frame_tx
+            .send(Packet::Message("late".into()).into())
+            .await
+            .unwrap();
+        drop(client_frame_tx);
+        client_frames_to_websocket(sink, client_frame_rx, CancellationToken::new())
+            .await
+            .unwrap();
+    }
 
     async fn ws_pair() -> (
         WebSocketStream,
