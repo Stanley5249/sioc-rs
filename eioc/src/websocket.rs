@@ -47,8 +47,6 @@ impl WebSocketConnector for () {
     }
 }
 
-type TungsteniteStream = tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>;
-
 /// An open WebSocket connection that carries Engine.IO [`Frame`]s.
 pub type WebSocketStream = tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -253,7 +251,7 @@ pub async fn transport(
 ///
 /// Returning drops `server_frame_tx`, which tells the engine the transport has finished.
 async fn websocket_to_server_frames(
-    mut stream: SplitStream<TungsteniteStream>,
+    mut stream: SplitStream<WebSocketStream>,
     server_frame_tx: mpsc::Sender<Frame>,
     stream_closed: CancellationToken,
 ) -> Result<(), TransportError> {
@@ -274,7 +272,7 @@ async fn websocket_to_server_frames(
 /// If the stream ends first, discards frames until the engine closes `client_frame_rx`,
 /// because the closed socket cannot send them.
 async fn client_frames_to_websocket(
-    mut sink: SplitSink<TungsteniteStream, WebSocketMessage>,
+    mut sink: SplitSink<WebSocketStream, WebSocketMessage>,
     mut client_frame_rx: mpsc::Receiver<Frame>,
     stream_closed: CancellationToken,
 ) -> Result<(), TransportError> {
