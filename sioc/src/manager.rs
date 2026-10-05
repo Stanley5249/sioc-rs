@@ -30,47 +30,6 @@ pub(crate) struct ConnectRequest {
     pub reply_tx: oneshot::Sender<Result<(), SocketError>>,
 }
 
-/// The client packet sender of a namespace, as every [`SocketSender`](crate::client::SocketSender) clone holds it.
-///
-/// Every clone shares the `closed` token. Once it is cancelled, sends fail and
-/// the manager closes the channel, then drains the packets sent before.
-#[derive(Clone, Debug)]
-pub(crate) struct ClientPacketTx {
-    client_packet_tx: mpsc::Sender<ClientPacket>,
-    closed: CancellationToken,
-}
-
-impl ClientPacketTx {
-    pub fn new(client_packet_tx: mpsc::Sender<ClientPacket>, closed: CancellationToken) -> Self {
-        Self {
-            client_packet_tx,
-            closed,
-        }
-    }
-
-    /// Sends a client packet, failing once the namespace has closed.
-    pub async fn send(&self, client_packet: ClientPacket) -> Result<(), SocketError> {
-        if self.closed.is_cancelled() {
-            return Err(SocketError::Closed);
-        }
-
-        self.client_packet_tx
-            .send(client_packet)
-            .await
-            .map_err(|_| SocketError::Closed)
-    }
-
-    /// Closes the namespace for every clone. Closing again does nothing.
-    pub fn close(&self) {
-        self.closed.cancel();
-    }
-
-    /// Waits until the namespace closes, by either side.
-    pub async fn closed(&self) {
-        self.closed.cancelled().await;
-    }
-}
-
 /// Routes packets between the namespace handles and the engine until the session ends.
 ///
 /// Closes the session by dropping `client_message_tx` once the client handle

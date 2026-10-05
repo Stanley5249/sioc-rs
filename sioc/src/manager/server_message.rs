@@ -16,7 +16,7 @@ pub(super) async fn server_messages_to_packets(
     routes: &Routes,
     connected_generation_tx: mpsc::UnboundedSender<u64>,
 ) -> Result<(), ManagerError> {
-    let mut reconstructor = Reconstructor::new();
+    let mut reconstructor = None;
 
     while let Some(message) = server_message_rx.recv().await {
         match message {
@@ -40,9 +40,9 @@ async fn route_text(
     text: ByteString,
     routes: &Routes,
     connected_generation_tx: &mpsc::UnboundedSender<u64>,
-    reconstructor: &mut Reconstructor,
+    reconstructor: &mut Option<Ns<BinaryPacket>>,
 ) -> Result<(), ManagerError> {
-    if reconstructor.is_pending() {
+    if reconstructor.is_some() {
         return Err(ManagerError::UnexpectedText(text));
     }
 
@@ -89,10 +89,10 @@ async fn route_text(
             send_server_packet(routes.close(&ns), &ns, ServerPacket::ConnectError(error)).await;
         }
         Packet::BinaryEvent { payload, id, count } => {
-            reconstructor.insert(ns, BinaryPacket::event(payload, id, count));
+            *reconstructor = Some(Ns(ns, BinaryPacket::event(payload, id, count)));
         }
         Packet::BinaryAck { payload, id, count } => {
-            reconstructor.insert(ns, BinaryPacket::ack(payload, id, count));
+            *reconstructor = Some(Ns(ns, BinaryPacket::ack(payload, id, count)));
         }
     }
 
@@ -102,11 +102,11 @@ async fn route_text(
 async fn route_binary(
     attachment: Bytes,
     routes: &Routes,
-    reconstructor: &mut Reconstructor,
+    reconstructor: &mut Option<Ns<BinaryPacket>>,
 ) -> Result<(), ManagerError> {
     let bytes = attachment.len();
 
-    let Some(Ns(ns, packet)) = reconstructor.attach_and_take(attachment)? else {
+    let Some(Ns(ns, packet)) = attach_and_take(reconstructor, attachment)? else {
         tracing::trace!(bytes, status = "pending", "received attachment");
         return Ok(());
     };
@@ -227,37 +227,18 @@ impl BinaryPacket {
     }
 }
 
-struct Reconstructor {
-    pending: Option<Ns<BinaryPacket>>,
-}
-
-impl Reconstructor {
-    fn new() -> Self {
-        Self { pending: None }
-    }
-
-    fn is_pending(&self) -> bool {
-        self.pending.is_some()
-    }
-
-    fn insert(&mut self, ns: ByteString, packet: BinaryPacket) {
-        self.pending = Some(Ns(ns, packet));
-    }
-
-    fn attach_and_take(&mut self, bytes: Bytes) -> Result<Option<Ns<BinaryPacket>>, ManagerError> {
-        match std::mem::take(&mut self.pending) {
-            Some(Ns(ns, mut packet)) => {
-                packet.attach(bytes);
-
-                if packet.is_complete() {
-                    Ok(Some(Ns(ns, packet)))
-                } else {
-                    self.pending = Some(Ns(ns, packet));
-
-                    Ok(None)
-                }
-            }
-            None => Err(ManagerError::UnexpectedBinary(bytes)),
-        }
+fn attach_and_take(
+    pending: &mut Option<Ns<BinaryPacket>>,
+    bytes: Bytes,
+) -> Result<Option<Ns<BinaryPacket>>, ManagerError> {
+    let Some(Ns(ns, mut packet)) = pending.take() else {
+        return Err(ManagerError::UnexpectedBinary(bytes));
+    };
+    packet.attach(bytes);
+    if packet.is_complete() {
+        Ok(Some(Ns(ns, packet)))
+    } else {
+        *pending = Some(Ns(ns, packet));
+        Ok(None)
     }
 }

@@ -1,9 +1,10 @@
 //! Socket.IO client and namespace handles.
 
+pub use crate::SocketSender;
 use crate::ack::AckType;
 use crate::error::ManagerError;
 use crate::error::{ClientBuilderError, ClientError, PayloadError, SocketError};
-use crate::manager::{self, ClientPacketTx, ConnectRequest};
+use crate::manager::{self, ConnectRequest};
 use crate::marker::{AckId, AckMarker, BinaryMarker};
 use crate::packet::{ClientPacket, DynEvent, ServerPacket};
 use bytestring::ByteString;
@@ -304,8 +305,6 @@ impl Client {
             reply_tx,
         };
 
-        let client_packet_tx = ClientPacketTx::new(client_packet_tx, closed);
-
         self.connect_request_tx
             .send(connect_request)
             .await
@@ -314,7 +313,10 @@ impl Client {
         reply_rx.await.map_err(|_| SocketError::Closed)??;
 
         Ok((
-            SocketSender { client_packet_tx },
+            SocketSender {
+                client_packet_tx,
+                closed,
+            },
             SocketReceiver { server_packet_rx },
         ))
     }
@@ -336,21 +338,7 @@ impl Client {
     }
 }
 
-/// Sender for a Socket.IO namespace.
-///
-/// Cloning is cheap, and all clones share the namespace. The namespace
-/// disconnects when any clone calls [`disconnect`](Self::disconnect) or the
-/// last clone is dropped.
-#[derive(Clone, Debug)]
-pub struct SocketSender {
-    client_packet_tx: ClientPacketTx,
-}
-
 impl SocketSender {
-    async fn send(&self, client_packet: ClientPacket) -> Result<(), SocketError> {
-        self.client_packet_tx.send(client_packet).await
-    }
-
     /// Emits an event; returns `()` or an [`AckHandle`](crate::ack::AckHandle) depending on the ack policy.
     ///
     /// # Errors
@@ -388,7 +376,7 @@ impl SocketSender {
     /// DISCONNECT packet. Later sends fail with [`SocketError::Closed`]. Calling
     /// it after the namespace has closed, by either side, does nothing.
     pub fn disconnect(&self) {
-        self.client_packet_tx.close();
+        self.closed.cancel();
     }
 
     /// Waits until the namespace closes, by either side, or the session ends.
@@ -396,7 +384,7 @@ impl SocketSender {
     /// Resolves as soon as the namespace stops accepting packets, which can be
     /// before its DISCONNECT packet reaches the server.
     pub async fn closed(&self) {
-        self.client_packet_tx.closed().await;
+        self.closed.cancelled().await;
     }
 }
 
@@ -478,8 +466,14 @@ mod tests {
 
     fn socket_sender() -> (SocketSender, mpsc::Receiver<ClientPacket>) {
         let (client_packet_tx, client_packet_rx) = mpsc::channel(8);
-        let client_packet_tx = ClientPacketTx::new(client_packet_tx, CancellationToken::new());
-        (SocketSender { client_packet_tx }, client_packet_rx)
+        let closed = CancellationToken::new();
+        (
+            SocketSender {
+                client_packet_tx,
+                closed,
+            },
+            client_packet_rx,
+        )
     }
 
     struct Pass(DynEvent);

@@ -53,7 +53,7 @@ fn event(payload: &'static str, ack_tx: Option<oneshot::Sender<DynAck>>) -> Clie
 
 impl Harness {
     /// Opens a namespace and consumes its CONNECT packet.
-    async fn open(&mut self, ns: &str) -> (ClientPacketTx, mpsc::Receiver<ServerPacket>) {
+    async fn open(&mut self, ns: &str) -> (crate::SocketSender, mpsc::Receiver<ServerPacket>) {
         self.open_with(ns, 32).await
     }
 
@@ -61,7 +61,7 @@ impl Harness {
         &mut self,
         ns: &str,
         server_packet_capacity: usize,
-    ) -> (ClientPacketTx, mpsc::Receiver<ServerPacket>) {
+    ) -> (crate::SocketSender, mpsc::Receiver<ServerPacket>) {
         let (client_packet_tx, client_packet_rx) = mpsc::channel(32);
         let closed = CancellationToken::new();
         let (server_packet_tx, server_packet_rx) = mpsc::channel(server_packet_capacity);
@@ -74,7 +74,10 @@ impl Harness {
             server_packet_tx,
             reply_tx,
         };
-        let client_packet_tx = ClientPacketTx::new(client_packet_tx, closed);
+        let client_packet_tx = crate::SocketSender {
+            client_packet_tx,
+            closed,
+        };
         self.connect_request_tx.send(connect_request).await.unwrap();
         assert!(self.text().await.starts_with('0'));
         reply_rx.await.unwrap().unwrap();
@@ -140,7 +143,7 @@ async fn closes_when_client_handle_drops_with_no_namespace() {
 async fn stays_open_after_last_namespace_while_client_handle_lives() {
     let mut h = spawn();
     let (client_packet_tx, _server_packet_rx) = h.open("/").await;
-    client_packet_tx.close();
+    client_packet_tx.disconnect();
     assert_eq!(&*h.text().await, "1");
     assert_quiet(&mut h.client_message_rx).await;
     assert!(matches!(
@@ -386,7 +389,7 @@ async fn client_close_sends_earlier_packets_first() {
         .send(event(r#"["a"]"#, None))
         .await
         .unwrap();
-    client_packet_tx.close();
+    client_packet_tx.disconnect();
     assert_eq!(&*h.text().await, r#"2["a"]"#);
     assert_eq!(&*h.text().await, "1");
     assert!(server_packet_rx.recv().await.is_none());

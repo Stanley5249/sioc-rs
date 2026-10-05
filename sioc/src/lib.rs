@@ -13,6 +13,28 @@ pub mod marker;
 pub mod packet;
 pub mod payload;
 
+/// Sender for a Socket.IO namespace.
+///
+/// Clones share the namespace. Disconnecting any clone closes all of them;
+/// dropping the last clone also disconnects the namespace.
+#[derive(Clone, Debug)]
+pub struct SocketSender {
+    client_packet_tx: tokio::sync::mpsc::Sender<packet::ClientPacket>,
+    closed: tokio_util::sync::CancellationToken,
+}
+
+impl SocketSender {
+    async fn send(&self, packet: packet::ClientPacket) -> Result<(), error::SocketError> {
+        if self.closed.is_cancelled() {
+            return Err(error::SocketError::Closed);
+        }
+        self.client_packet_tx
+            .send(packet)
+            .await
+            .map_err(|_| error::SocketError::Closed)
+    }
+}
+
 /// Convenience re-exports for common usage.
 pub mod prelude {
     pub use crate::ack::{Ack, AckHandle, AckType};
