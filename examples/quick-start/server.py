@@ -1,9 +1,6 @@
 """Quick-start Socket.IO chat server with a bot, paired with a Rust client."""
 
-import argparse
-import asyncio
 import logging
-import shlex
 
 import socketio
 import uvicorn
@@ -77,41 +74,9 @@ async def image(sid: str, name: str, data: bytes) -> None:
     await sio.emit("image", (name, data), room=room)
 
 
-async def serve_client(command: str) -> int:
-    """Serve until a client command finishes, for smoke tests.
-
-    The client starts only after uvicorn binds the port, so no sleep or retry
-    is needed, and the server exits even when the client fails.
-
-    Args:
-        command: Shell-style client command line.
-
-    Returns:
-        The client exit code, or 1 when the server fails to start.
-    """
-    server = uvicorn.Server(
-        uvicorn.Config(app, host="localhost", port=3000, log_level="warning")
-    )
-    serving = asyncio.create_task(server.serve())
-    while not server.started:
-        if serving.done():
-            return 1
-        await asyncio.sleep(0.1)
-    client = await asyncio.create_subprocess_exec(*shlex.split(command))
-    code = await client.wait()
-    server.should_exit = True
-    await serving
-    return code
-
-
 def main() -> None:
-    """Serve forever, or serve one client command with `--client`."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--client", help="run this command, then exit with its code")
-    args = parser.parse_args()
+    """Run the example chat server."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    if args.client:
-        raise SystemExit(asyncio.run(serve_client(args.client)))
     logger.info("listening on http://localhost:3000")
     uvicorn.run(app, host="localhost", port=3000, log_level="warning")
 

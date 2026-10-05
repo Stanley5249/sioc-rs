@@ -55,8 +55,7 @@ sio.on("connection", (socket) => {
     }
     console.info(`server <- ack       confirm: ${leave ? "yes" : "no"}`);
     if (leave) {
-      // Close the whole connection, not just the namespace, so smoke tests
-      // cover the client shutting down after a server-closed transport.
+      // This example ends the whole session after the client confirms.
       socket.disconnect(true);
     }
   });
@@ -74,27 +73,7 @@ function listen(): Promise<void> {
   });
 }
 
-/**
- * Serve until a client command finishes, for smoke tests.
- *
- * The client starts only after the port is bound, so no sleep or retry is
- * needed, and the server exits even when the client fails.
- */
-async function serveClient(command: string[]): Promise<number> {
-  await listen();
-  const child = Bun.spawn(command, { stdio: ["inherit", "inherit", "inherit"] });
-  const code = await child.exited;
-  await sio.close();
-  return code;
-}
-
 async function main(): Promise<void> {
-  // Everything after `--client` is the client command, so smoke tests need
-  // no shell quoting.
-  const clientIndex = Bun.argv.indexOf("--client");
-  if (clientIndex !== -1) {
-    process.exit(await serveClient(Bun.argv.slice(clientIndex + 1)));
-  }
   await listen();
   console.info("listening on http://localhost:3000");
 }
