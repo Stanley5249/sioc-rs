@@ -10,10 +10,10 @@ just lint
 just lint-py
 just lint-js
 just test
-just smoke
+just test-servers
 ```
 
-Python and TypeScript test servers share the root `pyproject.toml` and `package.json`; `just smoke` runs the example clients against them.
+Python and TypeScript test servers share the root `pyproject.toml` and `package.json`; `just test-servers` runs protocol and pressure tests against them.
 
 ## Running examples
 

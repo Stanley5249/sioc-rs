@@ -6,7 +6,7 @@ set default-list
 quick_start := "cargo run --locked -p quick-start --example quick_start"
 
 # Run the local merge gate.
-ci: fmt-check _ci-lint test smoke doc deny
+ci: fmt-check _ci-lint test test-servers doc deny
 
 # The linters read disjoint sources. Cargo work stays in order, because cargo
 # serializes on the target directory lock anyway.
@@ -51,20 +51,9 @@ test *args:
     cargo nextest run --locked --workspace --all-targets {{ args }}
     cargo test --locked --workspace --doc {{ args }}
 
-# Run every smoke test against a real Socket.IO server.
-smoke: smoke-py smoke-js
-
-# Run the quick-start client against the python-socketio server.
-smoke-py: _build-quick-start
-    uv run --locked python examples/quick-start/server.py --client "{{ quick_start }}"
-
-# Run the quick-start client against the reference socket.io server.
-smoke-js: _build-quick-start
-    bun examples/quick-start/server.ts --client {{ quick_start }}
-
-# Build the client first so the server's startup does not wait on cargo.
-_build-quick-start:
-    cargo build --locked -p quick-start --example quick_start
+# Run protocol and pressure tests against JavaScript and Python Socket.IO servers.
+test-servers *args:
+    cargo nextest run --locked --workspace --all-targets --run-ignored only -E 'binary(servers)' {{ args }}
 
 # Check documentation with warnings denied.
 [env("RUSTDOCFLAGS", "-D warnings")]

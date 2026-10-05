@@ -2,3 +2,7 @@
 # stalling the whole run.
 [profile.default]
 slow-timeout = { period = "10s", terminate-after = 3 }
+
+[[profile.default.overrides]]
+filter = 'binary(servers)'
+slow-timeout = { period = "20s", terminate-after = 6 }
