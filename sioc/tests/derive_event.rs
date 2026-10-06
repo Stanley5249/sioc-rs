@@ -19,6 +19,21 @@ struct Join {
 struct AutoName;
 
 #[derive(Debug, PartialEq, EventType, SerializePayload, DeserializePayload)]
+#[sioc(event(name = "custom:event"))]
+struct Renamed(u32);
+
+#[derive(Debug, AckType)]
+struct Reply;
+
+#[derive(Debug, EventType)]
+#[sioc(event(ack = "Reply"))]
+struct Request;
+
+#[derive(Debug, EventType)]
+#[sioc(event(ack = "Reply", binary))]
+struct BinaryRequest;
+
+#[derive(Debug, PartialEq, EventType, SerializePayload, DeserializePayload)]
 struct Payload<T: serde::Serialize + serde::de::DeserializeOwned> {
     value: T,
 }
@@ -44,6 +59,24 @@ struct Stream {
 }
 
 fn assert_binary_marker<E: EventType<Binary = HasBinary>>() {}
+fn assert_default_policy<E: EventType<Ack = NoAck, Binary = NoBinary>>() {}
+fn assert_ack_policy<E: EventType<Ack = HasAck<Reply>, Binary = NoBinary>>() {}
+fn assert_combined_policy<E: EventType<Ack = HasAck<Reply>, Binary = HasBinary>>() {}
+
+#[test]
+fn event_policies() {
+    assert_default_policy::<Hello>();
+    assert_ack_policy::<Request>();
+    assert_combined_policy::<BinaryRequest>();
+}
+
+#[test]
+fn explicit_name_override() {
+    assert_eq!(Renamed::NAME, "custom:event");
+    assert_eq!(event_to_json(&Renamed(7)).unwrap(), r#"["custom:event",7]"#);
+    roundtrip(&Renamed(7));
+    event_from_json::<Renamed>(r#"["renamed",7]"#).unwrap_err();
+}
 
 fn roundtrip<E>(val: &E)
 where
@@ -59,7 +92,7 @@ fn binary_event_marker() {
 }
 
 #[test]
-fn name_explicit() {
+fn default_names() {
     assert_eq!(Hello::NAME, "hello");
     assert_eq!(Moved::NAME, "moved");
     assert_eq!(Join::NAME, "join");

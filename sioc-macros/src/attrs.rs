@@ -47,3 +47,31 @@ pub struct EventMeta {
 pub struct AckMeta {
     pub binary: darling::util::Flag,
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn all_derives_reject_invalid_attributes() {
+        for source in [
+            "#[sioc(unknown)] struct Input;",
+            "#[sioc(event(unknown))] struct Input;",
+            "#[sioc(event(name = 7))] struct Input;",
+            "#[sioc(event(ack = 7))] struct Input;",
+            "#[sioc(ack(unknown))] struct Input;",
+            "struct Input { #[sioc(unknown)] value: u32 }",
+        ] {
+            let input: syn::DeriveInput = syn::parse_str(source).unwrap();
+            assert!(crate::event_type::expand(&input).is_err(), "{source}");
+            assert!(crate::ack_type::expand(&input).is_err(), "{source}");
+            assert!(
+                crate::serialize_payload::expand(&input).is_err(),
+                "{source}"
+            );
+            assert!(
+                crate::deserialize_payload::expand(&input).is_err(),
+                "{source}"
+            );
+            assert!(crate::event_router::expand(&input).is_err(), "{source}");
+        }
+    }
+}

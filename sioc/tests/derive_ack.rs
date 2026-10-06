@@ -6,6 +6,14 @@ use sioc::prelude::*;
 struct Empty;
 
 #[derive(Debug, PartialEq, AckType, SerializePayload, DeserializePayload)]
+struct Generic<T>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    value: T,
+}
+
+#[derive(Debug, PartialEq, AckType, SerializePayload, DeserializePayload)]
 struct Status(bool, u32);
 
 #[derive(Debug, PartialEq, AckType, SerializePayload, DeserializePayload)]
@@ -33,6 +41,18 @@ struct Flex {
 }
 
 fn assert_binary_marker<A: AckType<Binary = HasBinary>>() {}
+fn assert_default_policy<A: AckType<Binary = NoBinary>>() {}
+
+#[test]
+fn default_ack_policy() {
+    assert_default_policy::<Empty>();
+    assert_default_policy::<Generic<u32>>();
+}
+
+#[test]
+fn generic_ack_roundtrip() {
+    roundtrip(&Generic { value: 42_u32 });
+}
 
 fn roundtrip<A>(val: &A)
 where
