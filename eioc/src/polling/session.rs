@@ -67,7 +67,7 @@ where
     let stream = if crate::polling::forward::send_server_frames(frames, &server_frame_tx).await? {
         None
     } else if can_upgrade {
-        let upgrade = crate::websocket::connect(base_url, Some(&sid), connector);
+        let upgrade = crate::websocket::stream::connect(base_url, Some(&sid), connector);
 
         crate::polling::forward::forward_frames_until_upgrade(
             &client,
@@ -95,7 +95,8 @@ where
     if let Some(stream) = stream {
         tracing::debug!("paused polling transport");
 
-        return crate::websocket::transport(stream, None, server_frame_tx, client_frame_rx).await;
+        return crate::websocket::session::run(stream, None, server_frame_tx, client_frame_rx)
+            .await;
     }
 
     // The engine may queue frames before it learns the server ended the

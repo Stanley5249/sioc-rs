@@ -52,9 +52,9 @@ where
             .await
         }
         TransportStrategy::WebSocket => {
-            let stream = crate::websocket::connect(base_url, None, connector).await?;
+            let stream = crate::websocket::stream::connect(base_url, None, connector).await?;
 
-            crate::websocket::transport(
+            crate::websocket::session::run(
                 stream,
                 Some(handshake_tx),
                 server_frame_tx,
