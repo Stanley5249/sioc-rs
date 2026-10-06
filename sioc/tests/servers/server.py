@@ -6,6 +6,7 @@ import sys
 from typing import override
 
 import socketio
+import socketio.exceptions
 import uvicorn
 
 sio = socketio.AsyncServer(
