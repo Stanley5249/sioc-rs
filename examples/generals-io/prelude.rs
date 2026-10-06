@@ -1,4 +1,4 @@
-//! Convenience re-exports for the generals.io schema crate.
+//! Convenience re-exports of the generals.io schema modules.
 
 pub use crate::client::event::*;
 pub use crate::client::socket::*;

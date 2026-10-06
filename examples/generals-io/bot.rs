@@ -1,7 +1,8 @@
-use generals_io::prelude::*;
 use miette::Result;
 use tokio::sync::mpsc;
 use tracing::instrument;
+
+use crate::prelude::*;
 
 pub struct Bot {
     tx: GeneralsIoSender,

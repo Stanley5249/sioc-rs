@@ -1,14 +1,35 @@
+//! Generals.io bot that plays through the `sioc` Socket.IO client.
+//!
+//! `client` and `server` type every client-to-server and server-to-client
+//! event in the generals.io protocol with the `sioc` derive macros.
+
 mod bot;
+#[expect(
+    dead_code,
+    reason = "the schema covers the whole generals.io protocol, and the bot uses only some of it"
+)]
+mod client;
+#[expect(
+    dead_code,
+    reason = "the schema covers the whole generals.io protocol, and the bot uses only some of it"
+)]
+mod constants;
+mod prelude;
+#[expect(
+    dead_code,
+    reason = "the schema covers the whole generals.io protocol, and the bot uses only some of it"
+)]
+mod server;
 mod session;
 
 use bytestring::ByteString;
-use generals_io::prelude::*;
 use miette::{IntoDiagnostic, Result, WrapErr};
 use sioc::prelude::*;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 use url::Url;
 
+use crate::prelude::*;
 use crate::session::Session;
 
 const ENDPOINT: &str = "https://ws.generals.io";

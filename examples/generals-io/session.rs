@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-use generals_io::prelude::*;
 use miette::{IntoDiagnostic, Result, WrapErr, bail};
 use sioc::prelude::*;
 use tokio::sync::mpsc;
@@ -8,6 +7,7 @@ use tokio::task::JoinHandle;
 use tracing::instrument;
 
 use crate::bot::Bot;
+use crate::prelude::*;
 
 #[derive(Debug, Clone)]
 pub enum GameMode {
