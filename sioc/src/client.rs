@@ -480,6 +480,7 @@ impl std::ops::DerefMut for SocketReceiver {
 
 #[cfg(test)]
 mod tests {
+    use eioc::error::{Error as EngineIoError, TransportError, WebSocketError};
     use eioc::transport::TransportStrategy;
     use serde_json::Map;
     use tokio::sync::mpsc;
@@ -659,6 +660,65 @@ mod tests {
             .http_client(reqwest::Client::new())
             .open();
         result.unwrap();
+    }
+
+    #[test]
+    fn builder_rejects_url_without_relative_path_support() {
+        let url = Url::parse("mailto:client@example.com").unwrap();
+        assert!(matches!(
+            ClientBuilder::new(url).open(),
+            Err(ClientBuilderError::Url(
+                url::ParseError::RelativeUrlWithCannotBeABaseBase
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn custom_connector_error_reaches_join() {
+        let client = ClientBuilder::new(Url::parse("http://localhost:3000/").unwrap())
+            .path("custom/")
+            .transport(TransportStrategy::WebSocket)
+            .websocket_connector(async |url: Url| {
+                assert_eq!(url.scheme(), "ws");
+                assert_eq!(url.path(), "/custom/");
+                Err(
+                    std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connector refused")
+                        .into(),
+                )
+            })
+            .open()
+            .unwrap();
+
+        assert!(matches!(
+            client.join().await,
+            Err(ClientError::Manager(ManagerError::Engine(
+                EngineIoError::Transport(TransportError::WebSocket(WebSocketError::Tungstenite(
+                    error
+                )))
+            ))) if error.to_string().contains("connector refused")
+        ));
+    }
+
+    #[tokio::test]
+    async fn connect_returns_closed_after_connector_failure() {
+        let client = ClientBuilder::new(Url::parse("http://localhost:3000/").unwrap())
+            .transport(TransportStrategy::WebSocket)
+            .websocket_connector(async |_| {
+                Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused).into())
+            })
+            .open()
+            .unwrap();
+        client.connect_request_tx.closed().await;
+
+        assert!(matches!(
+            client.connect("/").await,
+            Err(SocketError::Closed)
+        ));
+        assert!(matches!(
+            client.connect_with("/chat", r#"{"token":"secret"}"#).await,
+            Err(SocketError::Closed)
+        ));
+        client.join().await.unwrap_err();
     }
 
     #[tokio::test]

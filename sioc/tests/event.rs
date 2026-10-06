@@ -133,6 +133,31 @@ fn strict_rejects_trailing() {
 }
 
 #[test]
+fn named_payload_rejects_missing_field() {
+    let error = event_from_json::<Join>(r#"["join","lobby"]"#)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("invalid length 1"));
+}
+
+#[test]
+fn tuple_payload_reports_invalid_element_path() {
+    let error = event_from_json::<Moved>(r#"["moved",1,"two"]"#)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("[2]"));
+    assert!(error.contains("invalid type"));
+}
+
+#[test]
+fn strict_accepts_exact_length() {
+    assert_eq!(
+        event_from_json::<Chat>(r#"["chat","hi"]"#).unwrap(),
+        Chat("hi".into())
+    );
+}
+
+#[test]
 fn flexible_discards_trailing() {
     assert_eq!(
         event_from_json::<Hello>("[\"hello\",null,42]").unwrap(),

@@ -252,6 +252,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::marker::NoBinary;
 
@@ -301,6 +303,23 @@ mod tests {
     #[test]
     fn serializes_to_json() {
         assert_eq!(to_json(&42u32).unwrap(), "42");
+    }
+
+    #[test]
+    fn serialization_error_preserves_type_and_cause() {
+        let payload = BTreeMap::from([(vec![1u8], 42u32)]);
+        let error = to_json(&payload).unwrap_err().to_string();
+        assert!(error.contains(std::any::type_name::<BTreeMap<Vec<u8>, u32>>()));
+        assert!(error.contains("key must be a string"));
+    }
+
+    #[test]
+    fn deserialization_error_preserves_element_path() {
+        let error = from_json::<Vec<u32>>(r#"[1,"two"]"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("[1]"));
+        assert!(error.contains("invalid type"));
     }
 
     #[test]

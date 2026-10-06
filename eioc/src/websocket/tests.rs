@@ -4,13 +4,48 @@ use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
-use tokio_tungstenite::tungstenite::Message as WsMsg;
+use tokio_tungstenite::tungstenite::{Error as TungsteniteError, Message as WsMsg};
 use tokio_tungstenite::{MaybeTlsStream, accept_async, client_async};
 use tokio_util::sync::CancellationToken;
 
 use crate::connector::WebSocketStream;
 use crate::error::{TransportError, WebSocketError};
 use crate::packet::{Frame, Handshake, Packet};
+
+#[tokio::test]
+async fn next_frame_skips_control_messages() {
+    let mut stream = futures_util::stream::iter([
+        Ok(WsMsg::Ping(Bytes::from_static(b"probe"))),
+        Ok(WsMsg::Pong(Bytes::from_static(b"probe"))),
+        Ok(WsMsg::text("4hello")),
+    ]);
+    let frame = crate::websocket::message::next_frame(&mut stream)
+        .await
+        .unwrap();
+    assert!(matches!(frame, Some(Frame::Packet(Packet::Message(payload))) if payload == "hello"));
+}
+
+#[tokio::test]
+async fn next_frame_ends_at_exhausted_stream() {
+    let mut stream = futures_util::stream::iter([Ok(WsMsg::Ping(Bytes::new()))]);
+    assert!(
+        crate::websocket::message::next_frame(&mut stream)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn next_frame_propagates_stream_error() {
+    let mut stream = futures_util::stream::iter([Err(TungsteniteError::ConnectionClosed)]);
+    assert!(matches!(
+        crate::websocket::message::next_frame(&mut stream).await,
+        Err(WebSocketError::Tungstenite(
+            TungsteniteError::ConnectionClosed
+        ))
+    ));
+}
 
 #[tokio::test]
 async fn forward_client_frames_drains_after_peer_close() {

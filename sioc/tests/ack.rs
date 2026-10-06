@@ -83,6 +83,23 @@ fn strict_rejects_trailing() {
 }
 
 #[test]
+fn tuple_rejects_missing_element() {
+    let error = ack_from_json::<Status>("[true]").unwrap_err().to_string();
+    assert!(error.contains("invalid length 1"));
+}
+
+#[test]
+fn non_array_reports_expected_ack_payload() {
+    let error = ack_from_json::<Status>("true").unwrap_err().to_string();
+    assert!(error.contains("a Socket.IO ack payload"));
+}
+
+#[test]
+fn strict_accepts_exact_length() {
+    assert_eq!(ack_from_json::<Strict>("[true]").unwrap(), Strict(true));
+}
+
+#[test]
 fn flexible_discards_trailing() {
     assert_eq!(ack_from_json::<Empty>("[null]").unwrap(), Empty);
 }
