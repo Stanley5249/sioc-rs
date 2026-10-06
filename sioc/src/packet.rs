@@ -473,7 +473,7 @@ fn namespace_size(ns: &str) -> usize {
     if ns == "/" { 0 } else { ns.len() + 1 }
 }
 
-pub(crate) fn hint_packet_size(ns: &str, binary: bool, ack: bool, payload: Option<&str>) -> usize {
+fn hint_packet_size(ns: &str, binary: bool, ack: bool, payload: Option<&str>) -> usize {
     let mut n = 1 + namespace_size(ns);
     if ack {
         n += ack_size_hint();
@@ -510,7 +510,7 @@ fn write_payload(buffer: &mut String, payload: &str) {
     buffer.push_str(payload);
 }
 
-pub(crate) fn write_packet(
+fn write_packet(
     buffer: &mut String,
     type_id: u8,
     count: Option<usize>,
