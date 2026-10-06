@@ -24,6 +24,16 @@ RUST_LOG=glhf=trace,sioc=trace cargo run --example glhf
 
 Example recipes live in `examples/justfile`, such as `just examples::generals-io`, which loads `examples/.env`. Use `--example <name>` at workspace root; omit `-p`. `sioc=trace` shows all wire packets; `eioc=trace` is library internals only.
 
+## Tests
+
+Test each behavior at the lowest layer that can show it. Pick the layer in this order:
+
+1. **Unit test:** one function or type, with no spawned task and no socket. Keep it in a `#[cfg(test)] mod tests` at the bottom of the file it tests.
+2. **Component test:** one async unit, such as the engine, the manager, or a transport, with fake neighbors: the test holds the far ends of the unit's channels, or plays a loopback HTTP or WebSocket server, so a neighbor can stay silent, misbehave, or hang up mid-session. Keep these in `<module>/tests.rs`, and turn a single-file module into `<module>/mod.rs` once it has component tests. Wrap the spawned unit and the far ends of its channels in a `Test<Unit>` type, such as `TestManager`, and name each method after the channel it uses, such as `send_server_message`.
+3. **End-to-end test:** the public API, from `ClientBuilder` to `SocketReceiver`, against the reference TypeScript server in `sioc/tests/servers/server.ts`. Keep these in `sioc/tests/` and run them with `just test-servers`. A case that a correct server can produce belongs here, and a case that needs a broken or silent peer belongs in a component test.
+
+Unit tests of the derive macros live in `sioc/tests/`, because `sioc-macros` cannot use its own derives. Doc tests keep the README and rustdoc examples compiling, and `just test` runs them.
+
 ## Code style
 
 Re-export public surface through `prelude`. Never put `Result` or `Error` aliases in `prelude` because they shadow `std` and cause ambiguity; import by explicit path (`use eioc::error::{Error, Result}`).
