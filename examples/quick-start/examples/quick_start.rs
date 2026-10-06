@@ -5,10 +5,11 @@
 //! [`SerializePayload`]/[`DeserializePayload`] handle wire encoding, and
 //! [`EventRouter`] dispatches incoming events by name.
 
+use std::time::Duration;
+
 use bytes::Bytes;
 use miette::{IntoDiagnostic, Result};
 use sioc::prelude::*;
-use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 use url::Url;
 
@@ -153,7 +154,8 @@ async fn run() -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Logs go to stderr so they never interleave with the chat transcript on stdout.
+    // Logs go to stderr so they never interleave with the chat transcript on
+    // stdout.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .pretty()

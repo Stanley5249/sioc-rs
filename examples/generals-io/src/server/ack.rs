@@ -100,7 +100,8 @@ pub struct GenericSuccessAckInner {
     pub error: Option<String>,
 }
 
-/// Generic success/error ack used by `decline_friend_request`, `cancel_friend_request`, and `remove_friend`.
+/// Generic success/error ack used by `decline_friend_request`,
+/// `cancel_friend_request`, and `remove_friend`.
 #[derive(Debug, AckType, DeserializePayload)]
 pub struct GenericSuccessAck {
     pub data: GenericSuccessAckInner,

@@ -1,13 +1,15 @@
 mod bot;
 mod session;
 
-use crate::session::Session;
 use bytestring::ByteString;
 use generals_io::prelude::*;
 use miette::{IntoDiagnostic, Result, WrapErr};
 use sioc::prelude::*;
-use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::format::FmtSpan;
 use url::Url;
+
+use crate::session::Session;
 
 const ENDPOINT: &str = "https://ws.generals.io";
 

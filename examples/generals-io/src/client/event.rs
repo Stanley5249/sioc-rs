@@ -1,8 +1,9 @@
 //! Client-to-server event definitions.
 
-use crate::prelude::*;
 use serde::{Deserialize, Serialize};
 use sioc::prelude::*;
+
+use crate::prelude::*;
 
 /// Game options sent when joining a queue.
 #[derive(Debug, Serialize)]
@@ -125,7 +126,8 @@ pub struct Join1v1 {
     pub options: Option<GameOptions>,
     /// Reserved null slot in the wire format.
     pub reserved: (),
-    /// Whether the player allows bots in their queue (`queue_1v1_allow_bots` feature flag).
+    /// Whether the player allows bots in their queue (`queue_1v1_allow_bots`
+    /// feature flag).
     pub allow_bots: bool,
 }
 
@@ -407,7 +409,8 @@ pub struct GetSeason {
     pub season_id: serde_json::Value,
 }
 
-/// Requests a stars/rank refresh; server responds with `stars` and `rank` events.
+/// Requests a stars/rank refresh; server responds with `stars` and `rank`
+/// events.
 #[derive(EventType, SerializePayload)]
 pub struct StarsAndRank {
     pub user_id: String,

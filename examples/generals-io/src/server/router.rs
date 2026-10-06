@@ -1,8 +1,9 @@
 //! Server-to-client event router.
 
-use crate::prelude::*;
 use miette::Result;
 use sioc::prelude::*;
+
+use crate::prelude::*;
 
 /// Dispatches a server-to-client event by name.
 #[derive(Debug, EventRouter)]
@@ -89,7 +90,8 @@ pub enum GeneralsIoEvent {
 }
 
 impl GeneralsIoEvent {
-    /// Converts error events into a [`miette::Report`]; passes non-error events through as `Ok`.
+    /// Converts error events into a [`miette::Report`]; passes non-error events
+    /// through as `Ok`.
     pub fn into_result(self) -> Result<Self> {
         match self {
             GeneralsIoEvent::ErrorSetUsername(e) => Err(e.payload.into()),

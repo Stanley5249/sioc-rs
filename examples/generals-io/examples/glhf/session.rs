@@ -1,12 +1,13 @@
 #![allow(dead_code)]
 
-use crate::bot::Bot;
 use generals_io::prelude::*;
 use miette::{IntoDiagnostic, Result, WrapErr, bail};
 use sioc::prelude::*;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::instrument;
+
+use crate::bot::Bot;
 
 #[derive(Debug, Clone)]
 pub enum GameMode {

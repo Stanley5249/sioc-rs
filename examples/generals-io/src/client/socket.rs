@@ -1,7 +1,9 @@
-use crate::prelude::*;
+use std::time::Duration;
+
 use sioc::error::Result;
 use sioc::prelude::*;
-use std::time::Duration;
+
+use crate::prelude::*;
 
 #[derive(Debug, Clone)]
 pub struct GeneralsIoSender {

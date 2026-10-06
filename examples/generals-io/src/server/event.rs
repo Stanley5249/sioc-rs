@@ -1,10 +1,11 @@
 //! Server-to-client event definitions.
 
-use crate::prelude::*;
 use miette::Diagnostic;
 use serde::Deserialize;
 use sioc::prelude::*;
 use thiserror::Error;
+
+use crate::prelude::*;
 
 // Game state
 
