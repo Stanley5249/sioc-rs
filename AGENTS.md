@@ -22,7 +22,7 @@ RUST_LOG=info cargo run --example glhf
 RUST_LOG=glhf=trace,sioc=trace cargo run --example glhf
 ```
 
-Use `--example <name>` at workspace root; omit `-p`. `sioc=trace` shows all wire packets; `eioc=trace` is library internals only.
+Example recipes live in `examples/justfile`, such as `just examples::generals-io`, which loads `examples/.env`. Use `--example <name>` at workspace root; omit `-p`. `sioc=trace` shows all wire packets; `eioc=trace` is library internals only.
 
 ## Code style
 
