@@ -11,18 +11,18 @@ use tokio::net::TcpListener;
 use url::Url;
 
 // sioc wire format: tuple struct fields become positional JSON args.
-// Echo(42) -> ["echo", 42], Reply(42) -> ["reply", 42].
+// Echo(42) -> ["echo", 42], Item(42) -> ["item", 42].
 // On the socketioxide side we mirror this with (u32,) tuples.
 
 #[derive(Debug, PartialEq, EventType, SerializePayload, DeserializePayload)]
 struct Echo(u32);
 
 #[derive(Debug, PartialEq, EventType, SerializePayload, DeserializePayload)]
-struct Reply(u32);
+struct Item(u32);
 
 #[derive(Debug, PartialEq, EventType, SerializePayload, DeserializePayload)]
 #[sioc(event(ack = "Confirm"))]
-struct EchoWithAck(u32);
+struct Ask(u32);
 
 #[derive(Debug, PartialEq, EventType, SerializePayload, DeserializePayload)]
 #[sioc(event(ack = "Confirm"))]
@@ -33,7 +33,7 @@ struct Confirm(bool);
 
 #[derive(Debug, EventRouter)]
 enum MyEvent {
-    Reply(Event<Reply>),
+    Item(Event<Item>),
     ServerAsk(Event<ServerAsk>),
 }
 
@@ -64,7 +64,7 @@ async fn ws_emit_echo() {
     let port = spawn_server(|io| {
         io.ns("/", async |socket: SocketRef| {
             socket.on("echo", async |socket: SocketRef, Data::<(u32,)>((seq,))| {
-                socket.emit("reply", &(seq,)).ok();
+                socket.emit("item", &(seq,)).ok();
             });
         });
     })
@@ -77,8 +77,8 @@ async fn ws_emit_echo() {
     let event = rx.listen::<MyEvent>().await.unwrap().unwrap();
     assert!(matches!(
         event,
-        MyEvent::Reply(Event {
-            payload: Reply(7),
+        MyEvent::Item(Event {
+            payload: Item(7),
             ..
         })
     ));
@@ -89,7 +89,7 @@ async fn ws_client_ack() {
     let port = spawn_server(|io| {
         io.ns("/", async |socket: SocketRef| {
             socket.on(
-                "echo_with_ack",
+                "ask",
                 async |_: SocketRef, Data::<(u32,)>(_), ack: AckSender| {
                     ack.send(&(true,)).ok();
                 },
@@ -101,7 +101,7 @@ async fn ws_client_ack() {
     let client = ClientBuilder::new(url).open().unwrap();
     let (tx, mut rx) = client.connect("/").await.unwrap();
     rx.recv().await.unwrap();
-    let handle = tx.emit(EchoWithAck(1)).await.unwrap();
+    let handle = tx.emit(Ask(1)).await.unwrap();
     let Ack {
         payload: Confirm(ok),
         ..
@@ -151,7 +151,7 @@ async fn polling_emit_echo() {
     let port = spawn_server(|io| {
         io.ns("/", async |socket: SocketRef| {
             socket.on("echo", async |socket: SocketRef, Data::<(u32,)>((seq,))| {
-                socket.emit("reply", &(seq,)).ok();
+                socket.emit("item", &(seq,)).ok();
             });
         });
     })
@@ -167,8 +167,8 @@ async fn polling_emit_echo() {
     let event = rx.listen::<MyEvent>().await.unwrap().unwrap();
     assert!(matches!(
         event,
-        MyEvent::Reply(Event {
-            payload: Reply(99),
+        MyEvent::Item(Event {
+            payload: Item(99),
             ..
         })
     ));

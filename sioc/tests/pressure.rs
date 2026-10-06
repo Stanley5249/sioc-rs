@@ -15,27 +15,27 @@ const FLOOD: u32 = 2000;
 const CAPACITIES: [usize; 3] = [1, 4, 32];
 
 #[derive(Debug, PartialEq, EventType, SerializePayload, DeserializePayload)]
-struct Echo(u32);
+struct Seen(u32);
 
 #[derive(Debug, PartialEq, EventType, SerializePayload, DeserializePayload)]
-struct Reply(u32);
+struct Item(u32);
 
 #[derive(Debug, EventRouter)]
 enum FloodEvent {
-    Reply(Event<Reply>),
+    Item(Event<Item>),
 }
 
-/// Serves a namespace that floods `reply` events and counts the `echo`s it gets
+/// Serves a namespace that floods `item` events and counts the `seen`s it gets
 /// back.
-async fn flood_server(echoes: Arc<AtomicU32>) -> Url {
+async fn flood_server(seen: Arc<AtomicU32>) -> Url {
     let (layer, io) = SocketIo::new_layer();
     io.ns("/", async move |socket: SocketRef| {
-        socket.on("echo", async move |_: SocketRef, Data::<(u32,)>(_)| {
-            echoes.fetch_add(1, Ordering::Relaxed);
+        socket.on("seen", async move |_: SocketRef, Data::<(u32,)>(_)| {
+            seen.fetch_add(1, Ordering::Relaxed);
         });
         tokio::spawn(async move {
             for i in 0..FLOOD {
-                if socket.emit("reply", &(i,)).is_err() {
+                if socket.emit("item", &(i,)).is_err() {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -49,29 +49,29 @@ async fn flood_server(echoes: Arc<AtomicU32>) -> Url {
     Url::parse(&format!("http://127.0.0.1:{port}")).unwrap()
 }
 
-/// Echoes every event from the receive loop while reading slower than the
-/// server floods.
-async fn echo_flood(capacity: usize) {
-    let echoes = Arc::new(AtomicU32::new(0));
-    let url = flood_server(echoes.clone()).await;
+/// Sends a `seen` for every item from the receive loop while reading slower
+/// than the server floods.
+async fn seen_flood(capacity: usize) {
+    let seen = Arc::new(AtomicU32::new(0));
+    let url = flood_server(seen.clone()).await;
     let client = ClientBuilder::new(url).channels(capacity).open().unwrap();
     let (tx, mut rx) = client.connect("/").await.unwrap();
 
     let mut received = 0;
     while received < FLOOD {
-        if let Some(FloodEvent::Reply(Event {
-            payload: Reply(i), ..
+        if let Some(FloodEvent::Item(Event {
+            payload: Item(i), ..
         })) = rx.listen::<FloodEvent>().await.unwrap()
         {
             received += 1;
             if received % 50 == 0 {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
-            tx.emit(Echo(i)).await.unwrap();
+            tx.emit(Seen(i)).await.unwrap();
         }
     }
 
-    while echoes.load(Ordering::Relaxed) < FLOOD {
+    while seen.load(Ordering::Relaxed) < FLOOD {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
@@ -88,9 +88,9 @@ async fn drop_during_flood(capacity: usize) {
 }
 
 #[tokio::test]
-async fn echo_under_flood() {
+async fn seen_under_flood() {
     for capacity in CAPACITIES {
-        tokio::time::timeout(Duration::from_secs(20), echo_flood(capacity))
+        tokio::time::timeout(Duration::from_secs(20), seen_flood(capacity))
             .await
             .unwrap_or_else(|_| panic!("stalled with capacity {capacity}"));
     }
