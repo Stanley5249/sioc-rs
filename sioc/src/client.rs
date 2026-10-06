@@ -229,7 +229,7 @@ where
         let manager_future =
             crate::manager::session::run(connect_request_rx, server_message_rx, client_message_tx);
 
-        let engine_future = eioc::engine::connect(
+        let engine_future = eioc::engine::session::connect(
             url,
             http_client,
             websocket_connector,
