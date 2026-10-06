@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use miette::{IntoDiagnostic, Result, WrapErr, bail};
 use sioc::prelude::*;
 use tokio::sync::mpsc;

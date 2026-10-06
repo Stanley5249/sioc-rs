@@ -29,7 +29,7 @@ use tracing_subscriber::fmt::format::FmtSpan;
 use url::Url;
 
 use crate::client::socket::GeneralsIoSender;
-use crate::session::Session;
+use crate::session::{GameMode, Session};
 
 const ENDPOINT: &str = "https://ws.generals.io";
 
@@ -61,7 +61,17 @@ async fn main() -> Result<()> {
         .into_diagnostic()
         .wrap_err("GENERALS_IO_USER_ID not set")?;
 
-    let session = Session::new(gio_tx, rx, user_id);
+    let mut session = Session::new(gio_tx, rx, user_id);
+
+    if let Ok(username) = std::env::var("GENERALS_IO_USERNAME") {
+        session = session.with_username(username);
+    }
+
+    match std::env::var("GENERALS_IO_MODE").ok().as_deref() {
+        None | Some("private") => {}
+        Some("1v1") => session = session.with_mode(GameMode::OneVsOne),
+        Some(other) => miette::bail!("GENERALS_IO_MODE must be private or 1v1, not {other}"),
+    }
 
     tokio::try_join!(session.run(), disconnect(socket_tx))?;
 
