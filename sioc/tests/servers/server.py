@@ -1,9 +1,8 @@
 """Reference server for protocol and backpressure integration tests."""
 
-import asyncio
 import socket
 import sys
-from typing import override
+import threading
 
 import socketio
 import socketio.exceptions
@@ -12,6 +11,7 @@ import uvicorn
 sio = socketio.AsyncServer(
     async_mode="asgi", max_http_buffer_size=256, allow_upgrades=False
 )
+app = socketio.ASGIApp(sio)
 counts: dict[str, int] = {}
 
 
@@ -81,32 +81,24 @@ async def disconnect(sid: str, _reason: str) -> None:
     await sio.emit("gone", namespace="/observe")
 
 
-class ReadyServer(uvicorn.Server):
-    """Report readiness after uvicorn has installed its socket listeners."""
+def main() -> None:
+    """Serve on an ephemeral port until the Rust test closes stdin."""
+    # Binding here leaves no gap in which another process could take the port.
+    listener = socket.create_server(("127.0.0.1", 0))
+    # The Rust test reads the port from the first stdout line.
+    sys.stdout.write(f"{listener.getsockname()[1]}\n")
+    sys.stdout.flush()
+    config = uvicorn.Config(app, log_level="error", timeout_graceful_shutdown=1)
+    server = uvicorn.Server(config)
 
-    @override
-    async def startup(self, sockets: list[socket.socket] | None = None) -> None:
-        """Start listeners and report the bound ephemeral port."""
-        await super().startup(sockets=sockets)
-        if sockets:
-            sys.stdout.write(f"{sockets[0].getsockname()[1]}\n")
-            sys.stdout.flush()
-
-
-async def main() -> None:
-    """Bind an ephemeral port, report readiness, and serve until stdin closes."""
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        server = ReadyServer(
-            uvicorn.Config(
-                socketio.ASGIApp(sio), log_level="error", timeout_graceful_shutdown=1
-            )
-        )
-        task = asyncio.create_task(server.serve(sockets=[listener]))
-        await asyncio.to_thread(sys.stdin.readline)
+    # Closing stdin shuts down the server, including when a Rust test unwinds.
+    def stop_on_eof() -> None:
+        sys.stdin.read()
         server.should_exit = True
-        await task
+
+    threading.Thread(target=stop_on_eof, daemon=True).start()
+    server.run(sockets=[listener])
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use sioc::prelude::*;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use url::Url;
 
@@ -43,7 +43,7 @@ enum Received {
     Blob(Event<IncomingBlob>),
 }
 
-/// Owns the child, its readiness handshake, and shutdown through stdin EOF.
+/// Owns a reference server child, which exits once its stdin closes.
 struct Server {
     child: Child,
     url: Url,
@@ -62,36 +62,27 @@ impl Server {
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
             .kill_on_drop(true)
             .spawn()
             .unwrap();
+        // The server prints its port once it listens on it.
         let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
         let port = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
             .await
+            .expect("the reference server listens within 10 seconds")
             .unwrap()
-            .unwrap()
-            .unwrap();
+            .expect("the reference server prints its port");
         let url = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
         Self { child, url }
     }
 
     async fn stop(mut self) {
-        self.child
-            .stdin
-            .as_mut()
-            .unwrap()
-            .write_all(b"stop\n")
-            .await
-            .unwrap();
         drop(self.child.stdin.take());
-        assert!(
-            tokio::time::timeout(Duration::from_secs(10), self.child.wait())
-                .await
-                .unwrap()
-                .unwrap()
-                .success()
-        );
+        let status = tokio::time::timeout(Duration::from_secs(10), self.child.wait())
+            .await
+            .expect("the reference server exits within 10 seconds")
+            .unwrap();
+        assert!(status.success());
     }
 
     fn client(&self, transport: TransportStrategy, capacity: usize) -> Client {

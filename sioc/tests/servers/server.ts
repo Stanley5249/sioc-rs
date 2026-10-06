@@ -5,6 +5,7 @@
  */
 
 import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { Server } from "socket.io";
 
 interface ClientToServer {
@@ -70,28 +71,19 @@ sio.on("connection", (socket) => {
   });
 });
 
-function listen(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    app.listen(0, "127.0.0.1", () => {
-      const address = app.address();
-      if (!address || typeof address === "string") {
-        reject(new Error("expected TCP address"));
-        return;
-      }
-      resolve(address.port);
-    });
+function main(): void {
+  app.listen(0, "127.0.0.1", () => {
+    const { port } = app.address() as AddressInfo;
+    // The Rust test reads the port from the first stdout line.
+    console.log(port);
   });
-}
-
-async function main(): Promise<void> {
-  const port = await listen();
-  // The Rust test reads the ephemeral port from the first stdout line.
-  console.log(port);
   // Closing stdin shuts down the server, including when a Rust test unwinds.
-  await Bun.stdin.stream().getReader().read();
-  await sio.close();
+  process.stdin.on("end", () => {
+    void sio.close();
+  });
+  process.stdin.resume();
 }
 
 if (import.meta.main) {
-  await main();
+  main();
 }
