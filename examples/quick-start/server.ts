@@ -1,6 +1,6 @@
 /**
  * Quick-start Socket.IO chat server with a bot on the reference JavaScript
- * implementation, serving the same events as `server.py`.
+ * implementation.
  */
 
 import { createServer } from "node:http";

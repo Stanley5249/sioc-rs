@@ -1,6 +1,6 @@
 # Quick Start
 
-A chat client in Rust that joins a room, talks to a bot, and shares an image with a Socket.IO server. The same client runs against two servers: `server.py` on python-socketio and `server.ts` on the reference JavaScript implementation. The bot stands in for other room members, so one client still sees broadcasts.
+A chat client in Rust that joins a room, talks to a bot, and shares an image with `server.ts`, a Socket.IO server on the reference JavaScript implementation. The bot stands in for other room members, so one client still sees broadcasts.
 
 The example covers all five concepts from the main README:
 
@@ -12,22 +12,18 @@ The example covers all five concepts from the main README:
 
 ## Prerequisites
 
-- [uv](https://docs.astral.sh/uv/getting-started/installation/) for `server.py`
-- [Bun](https://bun.sh/docs/installation) for `server.ts`
-
-Both servers take their dependencies from the workspace root `pyproject.toml` and `package.json`.
+- [Bun](https://bun.sh/docs/installation) for `server.ts`, which takes its dependencies from the workspace root `package.json`
 
 ## Running
 
-From the workspace root, start either server in one terminal:
+From the workspace root, start the server in one terminal:
 
 ```bash
-just examples::quick-start-py
-# or, after bun install --frozen-lockfile
+bun install --frozen-lockfile
 just examples::quick-start-ts
 ```
 
-Both recipes keep the server running on `127.0.0.1:3000`. In a second terminal, run the Rust client:
+The recipe keeps the server running on `127.0.0.1:3000`. In a second terminal, run the Rust client:
 
 ```sh
 just examples::quick-start
@@ -69,4 +65,4 @@ server <- ack       confirm: yes
 2. The client shares `crab.png` as an `Image` event with one binary attachment. The server broadcasts it to the room, so the client receives it back.
 3. The client sends a `Say` message. The server broadcasts it to other members, and the bot replies with a `Message`.
 4. The server sends `Confirm` asking whether to leave the room. The client answers with an `Answer(true)` ack.
-5. The server disconnects the client and the loop exits cleanly. `server.py` disconnects the namespace, and `server.ts` closes the whole connection.
+5. The server closes the whole connection, and the loop exits cleanly.

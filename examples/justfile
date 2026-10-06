@@ -17,10 +17,6 @@ quick-start *args:
 quick-start-ts *args:
     bun quick-start/server.ts {{ args }}
 
-# Start the Python quick-start server on 127.0.0.1:3000.
-quick-start-py *args:
-    uv run --locked python quick-start/server.py {{ args }}
-
 # Run the generals.io bot with the settings in .env.
 generals-io *args:
     cargo run --locked --example glhf {{ args }}
