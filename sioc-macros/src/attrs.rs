@@ -27,7 +27,8 @@ pub struct SiocVariant {
 pub struct SiocField {
     pub ident: Option<syn::Ident>,
     pub ty: syn::Type,
-    /// Collect remaining sequence elements into this field via `#[sioc(flatten)]`.
+    /// Collect remaining sequence elements into this field via
+    /// `#[sioc(flatten)]`.
     ///
     /// Recommended on the last field. Placing it earlier means fields after it
     /// cannot be deserialized since the flatten field consumes all remaining

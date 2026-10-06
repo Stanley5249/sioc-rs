@@ -34,8 +34,9 @@ pub fn derive_ack_type(input: TokenStream) -> TokenStream {
 
 /// Derives the [`SerializePayload`](https://docs.rs/sioc/latest/sioc/payload/trait.SerializePayload.html) trait.
 ///
-/// Serializes the struct's fields as sequential JSON array elements for the emit (outbound) direction.
-/// See the [crate documentation](self) for the full attribute reference.
+/// Serializes the struct's fields as sequential JSON array elements for the
+/// emit (outbound) direction. See the [crate documentation](self) for the full
+/// attribute reference.
 #[proc_macro_derive(SerializePayload, attributes(sioc))]
 pub fn derive_serialize_payload(input: TokenStream) -> TokenStream {
     serialize_payload::expand(&parse_macro_input!(input))
@@ -45,8 +46,9 @@ pub fn derive_serialize_payload(input: TokenStream) -> TokenStream {
 
 /// Derives the [`DeserializePayload`](https://docs.rs/sioc/latest/sioc/payload/trait.DeserializePayload.html) trait.
 ///
-/// Deserializes the struct's fields from sequential JSON array elements for the recv (inbound) direction.
-/// See the [crate documentation](self) for the full attribute reference.
+/// Deserializes the struct's fields from sequential JSON array elements for the
+/// recv (inbound) direction. See the [crate documentation](self) for the full
+/// attribute reference.
 #[proc_macro_derive(DeserializePayload, attributes(sioc))]
 pub fn derive_deserialize_payload(input: TokenStream) -> TokenStream {
     deserialize_payload::expand(&parse_macro_input!(input))
@@ -57,7 +59,8 @@ pub fn derive_deserialize_payload(input: TokenStream) -> TokenStream {
 /// Derives [`EventRouter`](https://docs.rs/sioc/latest/sioc/event/trait.EventRouter.html),
 /// generating `TryFrom<DynEvent>` for a dispatcher enum.
 ///
-/// Each variant must be a newtype wrapping `Event<E>` where `E: EventType + DeserializePayload`.
+/// Each variant must be a newtype wrapping `Event<E>` where `E: EventType +
+/// DeserializePayload`.
 #[proc_macro_derive(EventRouter, attributes(sioc))]
 pub fn derive_from_event(input: TokenStream) -> TokenStream {
     event_router::expand(&parse_macro_input!(input))

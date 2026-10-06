@@ -1,7 +1,8 @@
-use crate::attrs::{SiocField, SiocInput};
 use darling::FromDeriveInput;
 use proc_macro2::TokenStream;
 use quote::quote;
+
+use crate::attrs::{SiocField, SiocInput};
 
 pub fn expand(input: &syn::DeriveInput) -> darling::Result<TokenStream> {
     let input = SiocInput::from_derive_input(input)?;

@@ -1,7 +1,8 @@
-use crate::attrs::SiocInput;
 use darling::FromDeriveInput;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
+
+use crate::attrs::SiocInput;
 
 struct ExpandData {
     enum_ident: syn::Ident,
