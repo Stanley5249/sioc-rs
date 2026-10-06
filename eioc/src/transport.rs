@@ -28,7 +28,6 @@ impl TransportStrategy {
     /// # Errors
     ///
     /// Returns an error if the transport encounters a protocol or I/O failure.
-    #[allow(clippy::too_many_arguments)]
     pub async fn run<C>(
         self,
         base_url: Url,

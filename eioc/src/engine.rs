@@ -24,7 +24,10 @@ use crate::websocket::WebSocketConnector;
 /// # Errors
 ///
 /// Returns an error if either the engine or transport task fails.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is a separate channel end or connection setting; an argument struct waits for the transport API review"
+)]
 pub async fn connect<C>(
     url: Url,
     http_client: reqwest::Client,
