@@ -1,14 +1,16 @@
 //! Delivers what the server sends to each namespace.
 
-use super::routes::Routes;
-use crate::error::{ManagerError, PacketError};
-use crate::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Packet, ServerPacket};
 use bytes::Bytes;
 use bytestring::ByteString;
 use eioc::prelude::Message;
 use tokio::sync::mpsc;
 
-/// Delivers server packets to the namespace receivers until the engine closes `server_message_rx`.
+use super::routes::Routes;
+use crate::error::{ManagerError, PacketError};
+use crate::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Packet, ServerPacket};
+
+/// Delivers server packets to the namespace receivers until the engine closes
+/// `server_message_rx`.
 ///
 /// Waiting on a full receiver holds up only this direction.
 pub async fn server_messages_to_packets(
@@ -145,7 +147,8 @@ async fn route_binary(
 /// Sends a server packet to a namespace receiver.
 ///
 /// The server may still send packets for a namespace the client already left,
-/// and the caller may drop a receiver it no longer reads, so both are discarded.
+/// and the caller may drop a receiver it no longer reads, so both are
+/// discarded.
 async fn send_server_packet(
     server_packet_tx: Option<mpsc::Sender<ServerPacket>>,
     ns: &ByteString,

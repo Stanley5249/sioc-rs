@@ -1,10 +1,12 @@
 //! Payload serialization and deserialization traits and helpers.
 
+use std::marker::PhantomData;
+
+use serde::ser::SerializeSeq;
+
 use crate::ack::AckType;
 use crate::error::PayloadError;
 use crate::event::EventType;
-use serde::ser::SerializeSeq;
-use std::marker::PhantomData;
 
 /// Serializes `payload` to JSON, returning the encoded string.
 ///
@@ -42,7 +44,8 @@ where
     }
 }
 
-/// Serializes an [`EventType`] + [`SerializePayload`] value into its wire-format string representation.
+/// Serializes an [`EventType`] + [`SerializePayload`] value into its
+/// wire-format string representation.
 ///
 /// # Errors
 ///
@@ -54,7 +57,8 @@ where
     to_json(&EventPayload(event))
 }
 
-/// Deserializes a wire-format string into a typed [`EventType`] + [`DeserializePayload`] value.
+/// Deserializes a wire-format string into a typed [`EventType`] +
+/// [`DeserializePayload`] value.
 ///
 /// # Errors
 ///
@@ -67,7 +71,8 @@ where
     Ok(event)
 }
 
-/// Serializes an [`AckType`] + [`SerializePayload`] value into its wire-format string representation.
+/// Serializes an [`AckType`] + [`SerializePayload`] value into its wire-format
+/// string representation.
 ///
 /// # Errors
 ///
@@ -79,7 +84,8 @@ where
     to_json(&AckPayload(payload))
 }
 
-/// Deserializes a wire-format string into a typed [`AckType`] + [`DeserializePayload`] value.
+/// Deserializes a wire-format string into a typed [`AckType`] +
+/// [`DeserializePayload`] value.
 ///
 /// # Errors
 ///
@@ -110,7 +116,8 @@ pub trait DeserializePayload: Sized {
     ///
     /// # Errors
     ///
-    /// Returns an error if the sequence is malformed or a field fails to deserialize.
+    /// Returns an error if the sequence is malformed or a field fails to
+    /// deserialize.
     fn deserialize_payload<'de, S>(seq: &mut S) -> std::result::Result<Self, S::Error>
     where
         S: serde::de::SeqAccess<'de>;

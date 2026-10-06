@@ -1,8 +1,8 @@
 //! Error types for the `sioc` crate.
 //!
 //! Each fallible operation returns a specific error type.  [`enum@Error`] is a
-//! top-level convenience wrapper that aggregates all of them via [`From`] impls,
-//! intended for application-level code that wants a single error type.
+//! top-level convenience wrapper that aggregates all of them via [`From`]
+//! impls, intended for application-level code that wants a single error type.
 
 use bytes::Bytes;
 use bytestring::ByteString;
@@ -48,13 +48,15 @@ pub enum Error {
     Client(#[from] ClientError),
     /// Error from a [`SocketSender`](crate::client::SocketSender) operation.
     Socket(#[from] SocketError),
-    /// Error converting a [`DynEvent`](crate::packet::DynEvent) into a typed event.
+    /// Error converting a [`DynEvent`](crate::packet::DynEvent) into a typed
+    /// event.
     Event(#[from] EventError),
     /// Error receiving or parsing an acknowledgement.
     Ack(#[from] AckError),
 }
 
-/// Error returned by [`ClientBuilder::open`](crate::client::ClientBuilder::open).
+/// Error returned by
+/// [`ClientBuilder::open`](crate::client::ClientBuilder::open).
 #[derive(Debug, Error, Diagnostic)]
 pub enum ClientBuilderError {
     /// URL construction failed.
@@ -101,7 +103,8 @@ pub enum SocketError {
     Payload(#[from] PayloadError),
 }
 
-/// Error converting a [`DynEvent`](crate::packet::DynEvent) into a typed [`Event`](crate::event::Event).
+/// Error converting a [`DynEvent`](crate::packet::DynEvent) into a typed
+/// [`Event`](crate::event::Event).
 #[derive(Debug, Error, Diagnostic)]
 pub enum EventError {
     /// Event payload deserialization failed.
@@ -147,7 +150,8 @@ pub enum AckError {
     Timeout(#[from] Elapsed),
 }
 
-/// Ack ID presence mismatch between the inbound packet and the event type's policy.
+/// Ack ID presence mismatch between the inbound packet and the event type's
+/// policy.
 #[derive(Debug, Error, Diagnostic)]
 pub enum AckIdError {
     /// Event declares `HasAck` but the server sent no ack ID.
@@ -171,7 +175,8 @@ pub enum AckIdError {
     Unexpected,
 }
 
-/// Attachment presence mismatch between the inbound packet and the type's binary policy.
+/// Attachment presence mismatch between the inbound packet and the type's
+/// binary policy.
 #[derive(Debug, Error, Diagnostic)]
 pub enum AttachmentsError {
     /// Type declares `HasBinary` but no attachments were in the packet.
@@ -266,7 +271,8 @@ pub enum ManagerError {
     #[diagnostic(transparent)]
     Packet(#[from] PacketError),
 
-    /// Sending a client message to the engine failed because the channel is closed.
+    /// Sending a client message to the engine failed because the channel is
+    /// closed.
     #[error("client message channel closed")]
     #[diagnostic(
         code(sioc::manager::client_message),
@@ -294,7 +300,8 @@ pub enum ManagerError {
     )]
     UnexpectedBinary(Bytes),
 
-    /// Telling the client-packet loop that the server confirmed a namespace failed because the channel is closed.
+    /// Telling the client-packet loop that the server confirmed a namespace
+    /// failed because the channel is closed.
     #[error("namespace status channel closed")]
     #[diagnostic(
         code(sioc::manager::namespace_status),

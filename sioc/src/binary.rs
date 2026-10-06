@@ -16,7 +16,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 ///
 /// Obtained from [`AttachmentsBuilder::attach`]. Embed this in your event or
 /// ack struct wherever you would normally put a `Bytes` field; the manager
-/// sends the real binary data as a follow-up frame referenced by its slot index.
+/// sends the real binary data as a follow-up frame referenced by its slot
+/// index.
 #[derive(Debug)]
 pub struct Placeholder {
     slot: usize,

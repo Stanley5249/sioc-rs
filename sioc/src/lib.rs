@@ -14,6 +14,9 @@ pub use client::SocketSender;
 
 /// Convenience re-exports for common usage.
 pub mod prelude {
+    pub use eioc::prelude::{TransportStrategy, WebSocketConnector, WebSocketStream};
+    pub use sioc_macros::{AckType, DeserializePayload, EventRouter, EventType, SerializePayload};
+
     pub use crate::ack::{Ack, AckHandle, AckType};
     pub use crate::binary::{AttachmentsBuilder, Placeholder};
     pub use crate::client::{
@@ -26,8 +29,4 @@ pub mod prelude {
         DeserializePayload, SerializePayload, ack_from_json, ack_to_json, event_from_json,
         event_to_json,
     };
-
-    pub use eioc::prelude::{TransportStrategy, WebSocketConnector, WebSocketStream};
-
-    pub use sioc_macros::{AckType, DeserializePayload, EventRouter, EventType, SerializePayload};
 }

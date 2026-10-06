@@ -1,13 +1,15 @@
 //! Runs both manager loops for one session.
 
+use eioc::prelude::Message;
+use tokio::sync::mpsc;
+
 use super::client_packet::{self, ConnectRequest};
 use super::routes::Routes;
 use super::server_message;
 use crate::error::ManagerError;
-use eioc::prelude::Message;
-use tokio::sync::mpsc;
 
-/// Routes packets between the namespace handles and the engine until the session ends.
+/// Routes packets between the namespace handles and the engine until the
+/// session ends.
 ///
 /// Closes the session by dropping `client_message_tx` once the client handle
 /// and every namespace are gone, then returns when the engine closes
@@ -15,7 +17,8 @@ use tokio::sync::mpsc;
 ///
 /// # Errors
 ///
-/// Returns an error if the engine channel closes early or the server breaks the protocol.
+/// Returns an error if the engine channel closes early or the server breaks the
+/// protocol.
 pub async fn run(
     connect_request_rx: mpsc::Receiver<ConnectRequest>,
     server_message_rx: mpsc::Receiver<Message>,

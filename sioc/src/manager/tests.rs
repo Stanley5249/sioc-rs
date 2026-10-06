@@ -1,20 +1,22 @@
-use super::{ConnectRequest, run};
-use crate::client::SocketSender;
-use crate::error::ManagerError;
-use crate::error::SocketError;
-use crate::packet::{ClientPacket, DynAck, ServerPacket};
+use std::time::Duration;
+
 use bytes::Bytes;
 use bytestring::ByteString;
 use eioc::prelude::Message;
-use std::time::Duration;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use super::{ConnectRequest, run};
+use crate::client::SocketSender;
+use crate::error::{ManagerError, SocketError};
+use crate::packet::{ClientPacket, DynAck, ServerPacket};
+
 const CONNECT_RESPONSE: &str = "0{\"sid\":\"test\"}";
 
-/// A running manager with the client handle and both engine ends of its channels.
+/// A running manager with the client handle and both engine ends of its
+/// channels.
 struct Harness {
     connect_request_tx: mpsc::Sender<ConnectRequest>,
     server_message_tx: mpsc::Sender<Message>,

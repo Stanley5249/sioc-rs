@@ -1,16 +1,18 @@
 //! Sends what the namespace handles ask for.
 
-use super::routes::Routes;
-use crate::error::{ManagerError, SocketError};
-use crate::packet::{ClientPacket, Packet, ServerPacket};
+use std::collections::HashMap;
+
 use bytes::Bytes;
 use bytestring::ByteString;
 use eioc::prelude::Message;
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
-use std::collections::HashMap;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
+
+use super::routes::Routes;
+use crate::error::{ManagerError, SocketError};
+use crate::packet::{ClientPacket, Packet, ServerPacket};
 
 /// A namespace opened by [`Client::connect`](crate::client::Client::connect).
 #[derive(Debug)]
@@ -30,7 +32,8 @@ pub struct ConnectRequest {
 /// the namespace closed and was opened again.
 struct Namespace {
     ns: ByteString,
-    /// Set by the server's CONNECT response; events wait in `send_buffer` until then.
+    /// Set by the server's CONNECT response; events wait in `send_buffer` until
+    /// then.
     connected: bool,
     send_buffer: Vec<Message>,
     next_ack_id: u64,
@@ -170,7 +173,8 @@ pub async fn client_packets_to_messages(
     Ok(())
 }
 
-/// Encodes one event or ack, holding events until the server confirms the namespace.
+/// Encodes one event or ack, holding events until the server confirms the
+/// namespace.
 ///
 /// Discards packets the handles sent before the server closed the namespace,
 /// because the server no longer accepts them.

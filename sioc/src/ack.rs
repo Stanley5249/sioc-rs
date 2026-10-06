@@ -4,39 +4,43 @@
 //! response is called an **acknowledgement** ("ack").  On the wire, acks are
 //! JSON arrays `[arg0, arg1, ...]`, like events, but without a leading name.
 //!
-//! The [`AckType`] trait (or `#[derive(AckType)]`) maps a Rust struct to this format.
+//! The [`AckType`] trait (or `#[derive(AckType)]`) maps a Rust struct to this
+//! format.
 //!
 //! - [`Ack`]: inbound, decoded from a [`DynAck`] via [`TryFrom`].
 //! - [`AckHandle`]: a future that resolves when the server's ack arrives.
 //!
 //! Outbound acks are sent directly via
-//! [`SocketSender::acknowledge`](crate::client::SocketSender::acknowledge); blanket [`Acknowledge`] impls
-//! handle serialization automatically for both plain acks and binary closures.
+//! [`SocketSender::acknowledge`](crate::client::SocketSender::acknowledge);
+//! blanket [`Acknowledge`] impls handle serialization automatically for both
+//! plain acks and binary closures.
 
-use crate::binary::AttachmentsBuilder;
-use crate::client::Acknowledge;
-use crate::error::{AckError, PayloadError};
-use crate::marker::{BinaryMarker, HasBinary, NoBinary};
-use crate::packet::ClientPacket;
-use crate::packet::DynAck;
-use crate::payload::{DeserializePayload, SerializePayload, ack_from_json, ack_to_json};
-use pin_project::pin_project;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
+
+use pin_project::pin_project;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
+
+use crate::binary::AttachmentsBuilder;
+use crate::client::Acknowledge;
+use crate::error::{AckError, PayloadError};
+use crate::marker::{BinaryMarker, HasBinary, NoBinary};
+use crate::packet::{ClientPacket, DynAck};
+use crate::payload::{DeserializePayload, SerializePayload, ack_from_json, ack_to_json};
 
 /// Maps a Rust struct to the Socket.IO ack JSON-array encoding.
 ///
 /// Prefer `#[derive(AckType)]` over a manual implementation.  The derive
-/// generates the binary policy associated type.  Add `#[derive(SerializePayload)]`
-/// to send acks and `#[derive(DeserializePayload)]` to receive them.
+/// generates the binary policy associated type.  Add
+/// `#[derive(SerializePayload)]` to send acks and
+/// `#[derive(DeserializePayload)]` to receive them.
 ///
-/// Unlike [`EventType`](crate::event::EventType), ack arrays have no leading name
-/// element; the fields map directly to array positions.
+/// Unlike [`EventType`](crate::event::EventType), ack arrays have no leading
+/// name element; the fields map directly to array positions.
 ///
 /// # Example
 ///
@@ -165,7 +169,8 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`AckError::Timeout`] if `duration` elapses, or any error from the inner [`AckHandle`].
+    /// Returns [`AckError::Timeout`] if `duration` elapses, or any error from
+    /// the inner [`AckHandle`].
     ///
     /// # Example
     ///
@@ -189,7 +194,8 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`AckError::Timeout`] if `deadline` passes, or any error from the inner [`AckHandle`].
+    /// Returns [`AckError::Timeout`] if `deadline` passes, or any error from
+    /// the inner [`AckHandle`].
     ///
     /// # Example
     ///
@@ -221,11 +227,12 @@ where
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
+    use bytestring::ByteString;
+
     use super::*;
     use crate::error::AckError;
     use crate::marker::{AckMarker, HasAck, HasBinary, NoBinary};
-    use bytes::Bytes;
-    use bytestring::ByteString;
 
     #[derive(Debug, PartialEq)]
     struct BinaryBoolAck(bool);
@@ -400,6 +407,7 @@ mod tests {
     #[tokio::test]
     async fn ack_handle_timeout_at_resolves() {
         use std::time::Duration;
+
         use tokio::time::Instant;
         let (tx, rx) = oneshot::channel::<DynAck>();
         let handle = AckHandle::<()>::new(rx);
@@ -416,6 +424,7 @@ mod tests {
     #[tokio::test]
     async fn ack_handle_timeout_at_past_deadline_times_out() {
         use std::time::Duration;
+
         use tokio::time::Instant;
         let (_tx, rx) = oneshot::channel::<DynAck>();
         let handle = AckHandle::<()>::new(rx);

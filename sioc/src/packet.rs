@@ -1,6 +1,5 @@
 //! Socket.IO v4 packet types and wire encoding.
 
-use crate::error::PacketError;
 use bytes::Bytes;
 use bytestring::ByteString;
 use miette::Diagnostic;
@@ -8,6 +7,8 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 use thiserror::Error;
 use tokio::sync::oneshot;
+
+use crate::error::PacketError;
 
 /// A value tagged with a Socket.IO namespace path (e.g. `"/chat"`).
 #[derive(Debug)]
@@ -129,7 +130,8 @@ impl DynAck {
     }
 }
 
-/// A packet the server sent to one namespace, as delivered to its [`SocketReceiver`](crate::client::SocketReceiver).
+/// A packet the server sent to one namespace, as delivered to its
+/// [`SocketReceiver`](crate::client::SocketReceiver).
 ///
 /// Unlike the wire [`Packet`], acks are already resolved into their
 /// [`AckHandle`](crate::ack::AckHandle) and binary attachments are reassembled.
@@ -142,9 +144,11 @@ pub enum ServerPacket<E = DynEvent> {
     /// Identifies a server-initiated namespace disconnect. The receiver ends
     /// after this packet; a client disconnect or a session ending simply ends
     /// the receiver. Reconnection is application-controlled: open a new
-    /// namespace handle with [`Client::connect`](crate::client::Client::connect).
+    /// namespace handle with
+    /// [`Client::connect`](crate::client::Client::connect).
     Disconnect,
-    /// The server refused the namespace. The receiver ends right after this packet.
+    /// The server refused the namespace. The receiver ends right after this
+    /// packet.
     ConnectError(ConnectError),
     /// An application-level event (possibly with binary attachments).
     Event(E),
@@ -171,7 +175,8 @@ where
 }
 
 impl<E> ServerPacket<E> {
-    /// Returns the inner event if this is [`Event`](ServerPacket::Event), otherwise `None`.
+    /// Returns the inner event if this is [`Event`](ServerPacket::Event),
+    /// otherwise `None`.
     pub fn take_event(self) -> Option<E> {
         match self {
             Self::Event(e) => Some(e),
@@ -179,7 +184,8 @@ impl<E> ServerPacket<E> {
         }
     }
 
-    /// Applies `f` to the inner event if this is [`Event`](ServerPacket::Event), otherwise returns `None`.
+    /// Applies `f` to the inner event if this is
+    /// [`Event`](ServerPacket::Event), otherwise returns `None`.
     pub fn and_then<F, T>(self, f: F) -> Option<T>
     where
         F: FnOnce(E) -> Option<T>,
@@ -190,7 +196,8 @@ impl<E> ServerPacket<E> {
         }
     }
 
-    /// Applies `f` to the event in [`Event`](ServerPacket::Event), passing other variants through unchanged.
+    /// Applies `f` to the event in [`Event`](ServerPacket::Event), passing
+    /// other variants through unchanged.
     pub fn map<F, U>(self, f: F) -> ServerPacket<U>
     where
         F: FnOnce(E) -> U,
@@ -204,11 +211,13 @@ impl<E> ServerPacket<E> {
     }
 }
 
-/// A packet this client sends to one namespace, before it is encoded as a wire [`Packet`].
+/// A packet this client sends to one namespace, before it is encoded as a wire
+/// [`Packet`].
 #[derive(Debug)]
 #[allow(missing_docs)]
 pub enum ClientPacket {
-    /// Emits an event; if `ack_tx` is set, an ack ID is assigned and the response routed to it.
+    /// Emits an event; if `ack_tx` is set, an ack ID is assigned and the
+    /// response routed to it.
     Event {
         payload: ByteString,
         ack_tx: Option<oneshot::Sender<DynAck>>,
@@ -259,7 +268,8 @@ pub enum Packet {
 }
 
 impl Packet {
-    /// Returns a conservative upper bound on the serialised text-frame byte length.
+    /// Returns a conservative upper bound on the serialised text-frame byte
+    /// length.
     pub fn size_hint(&self, ns: &str) -> usize {
         match self {
             Self::Connect(payload) | Self::ConnectError(payload) => {
@@ -440,7 +450,8 @@ const fn binary_size_hint() -> usize {
     U64_MAX_LEN + 1
 }
 
-/// Returns the encoded byte length of a namespace field (`0` for the default `"/"`).
+/// Returns the encoded byte length of a namespace field (`0` for the default
+/// `"/"`).
 fn namespace_size(ns: &str) -> usize {
     if ns == "/" { 0 } else { ns.len() + 1 }
 }
@@ -538,7 +549,8 @@ pub fn split_attachments(bytes: ByteString) -> Result<(Option<usize>, ByteString
 ///
 /// # Errors
 ///
-/// Returns an error if the namespace is present but missing its trailing `,` delimiter.
+/// Returns an error if the namespace is present but missing its trailing `,`
+/// delimiter.
 pub fn split_namespace(bytes: ByteString) -> Result<(ByteString, ByteString), PacketError> {
     match bytes.chars().next() {
         Some('/') => match bytes.split_once(',') {
@@ -572,11 +584,11 @@ pub fn split_id(bytes: ByteString) -> Result<(Option<u64>, ByteString), PacketEr
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use bytes::Bytes;
     use bytestring::ByteString;
     use serde_json::Map;
 
+    use super::*;
     use crate::error::PacketError;
 
     fn bss(s: &'static str) -> ByteString {

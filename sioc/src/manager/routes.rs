@@ -1,11 +1,13 @@
 //! Where the server's packets for each open namespace go.
 
-use crate::packet::{DynAck, ServerPacket};
-use bytestring::ByteString;
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
+
+use bytestring::ByteString;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::{CancellationToken, DropGuard};
+
+use crate::packet::{DynAck, ServerPacket};
 
 /// Where the server's packets for each open namespace go.
 ///
@@ -105,7 +107,8 @@ impl Routes {
             .map(|route| route.server_packet_tx.clone())
     }
 
-    /// Registers an ack receiver. Without an open route it is dropped, which fails the [`AckHandle`](crate::ack::AckHandle).
+    /// Registers an ack receiver. Without an open route it is dropped, which
+    /// fails the [`AckHandle`](crate::ack::AckHandle).
     pub fn register_ack(
         &self,
         ns: &str,

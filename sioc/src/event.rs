@@ -9,17 +9,21 @@
 //!
 //! The [`EventType`] trait (derived with `#[derive(EventType)]`) maps a Rust
 //! struct to this wire format.  [`Event`] wraps an inbound event with
-//! compile-time policy markers for ack and binary handling.  The [`EventHandler`]
-//! trait constructs typed events from raw parts and powers the `EventRouter`
-//! derive macro for multi-event dispatch enums.
+//! compile-time policy markers for ack and binary handling.  The
+//! [`EventHandler`] trait constructs typed events from raw parts and powers the
+//! `EventRouter` derive macro for multi-event dispatch enums.
 //!
-//! Outbound events are sent directly via [`SocketSender::emit`](crate::client::SocketSender::emit);
-//! blanket [`Emit`] impls handle serialization automatically for both
-//! plain events and binary closures.
+//! Outbound events are sent directly via
+//! [`SocketSender::emit`](crate::client::SocketSender::emit); blanket [`Emit`]
+//! impls handle serialization automatically for both plain events and binary
+//! closures.
 //!
 //! The generic parameters `A` ([`AckMarker`]) and `B` ([`BinaryMarker`])
 //! let the type system enforce whether a packet carries binary attachments
 //! or expects an acknowledgement; no runtime checks needed.
+
+use bytes::Bytes;
+use tokio::sync::oneshot;
 
 use crate::ack::{AckHandle, AckType};
 use crate::binary::AttachmentsBuilder;
@@ -28,14 +32,13 @@ use crate::error::{EventError, PayloadError};
 use crate::marker::{AckMarker, BinaryMarker, HasAck, HasBinary, NoAck, NoBinary};
 use crate::packet::{ClientPacket, DynEvent};
 use crate::payload::{DeserializePayload, SerializePayload, event_from_json, event_to_json};
-use bytes::Bytes;
-use tokio::sync::oneshot;
 
 /// Maps a Rust struct to a Socket.IO event name and compile-time policies.
 ///
 /// Prefer `#[derive(EventType)]` over a manual implementation.  The derive
-/// generates `NAME` and the associated types.  Add `#[derive(SerializePayload)]`
-/// for emit and `#[derive(DeserializePayload)]` for recv.
+/// generates `NAME` and the associated types.  Add
+/// `#[derive(SerializePayload)]` for emit and `#[derive(DeserializePayload)]`
+/// for recv.
 pub trait EventType: Sized {
     /// The Socket.IO event name used as the first element of the wire array.
     const NAME: &'static str;
@@ -95,16 +98,19 @@ where
     }
 }
 
-/// Constructs a typed event from raw parts; used by the `EventRouter` derive macro.
+/// Constructs a typed event from raw parts; used by the `EventRouter` derive
+/// macro.
 pub trait EventHandler: Sized {
     /// The event type this handler processes.
     type Payload: EventType;
 
-    /// Builds `Self` from a deserialized payload, raw ack ID, and raw attachments.
+    /// Builds `Self` from a deserialized payload, raw ack ID, and raw
+    /// attachments.
     ///
     /// # Errors
     ///
-    /// Returns an error if the ack ID or attachment policy is violated, or deserialization fails.
+    /// Returns an error if the ack ID or attachment policy is violated, or
+    /// deserialization fails.
     fn handle(
         payload: Self::Payload,
         id: Option<u64>,
@@ -229,6 +235,9 @@ where
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
+    use bytestring::ByteString;
+
     use super::*;
     use crate::binary::AttachmentsBuilder;
     use crate::client::Emit;
@@ -236,8 +245,6 @@ mod tests {
     use crate::marker::{HasAck, HasBinary, NoAck, NoBinary};
     use crate::packet::DynEvent;
     use crate::payload::{DeserializePayload, SerializePayload};
-    use bytes::Bytes;
-    use bytestring::ByteString;
 
     fn bss(s: &'static str) -> ByteString {
         ByteString::from_static(s)

@@ -1,11 +1,5 @@
 //! Socket.IO client and namespace handles.
 
-use crate::ack::AckType;
-use crate::error::ManagerError;
-use crate::error::{ClientBuilderError, ClientError, PayloadError, SocketError};
-use crate::manager::{self, ConnectRequest};
-use crate::marker::{AckId, AckMarker, BinaryMarker};
-use crate::packet::{ClientPacket, DynEvent, ServerPacket};
 use bytestring::ByteString;
 use eioc::transport::TransportStrategy;
 use eioc::websocket::WebSocketConnector;
@@ -15,10 +9,17 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+use crate::ack::AckType;
+use crate::error::{ClientBuilderError, ClientError, ManagerError, PayloadError, SocketError};
+use crate::manager::{self, ConnectRequest};
+use crate::marker::{AckId, AckMarker, BinaryMarker};
+use crate::packet::{ClientPacket, DynEvent, ServerPacket};
+
 /// Converts a typed event into a [`ClientPacket`] for emission.
 ///
-/// `Output` is `()` for fire-and-forget events and [`AckHandle`](crate::ack::AckHandle)
-/// for events that expect an acknowledgement.
+/// `Output` is `()` for fire-and-forget events and
+/// [`AckHandle`](crate::ack::AckHandle) for events that expect an
+/// acknowledgement.
 pub trait Emit<A, B>
 where
     A: AckMarker,
@@ -55,13 +56,16 @@ where
 /// or build manually for per-channel control.
 #[derive(Clone, Copy, Debug)]
 pub struct ChannelConfig {
-    /// Engine task inboxes: frames from the transport and messages from the manager.
+    /// Engine task inboxes: frames from the transport and messages from the
+    /// manager.
     pub engine: usize,
     /// Transport channel: encoded frames to send to the transport.
     pub transport: usize,
-    /// Manager inboxes: messages from the engine, new namespaces, and each namespace's client packets.
+    /// Manager inboxes: messages from the engine, new namespaces, and each
+    /// namespace's client packets.
     pub manager: usize,
-    /// Per-namespace inbox: server packets delivered to each [`SocketReceiver`].
+    /// Per-namespace inbox: server packets delivered to each
+    /// [`SocketReceiver`].
     pub socket: usize,
 }
 
@@ -150,7 +154,8 @@ where
 
     /// Override the WebSocket connector used for transport upgrade.
     ///
-    /// Pass any type implementing [`WebSocketConnector`], including async closures.
+    /// Pass any type implementing [`WebSocketConnector`], including async
+    /// closures.
     ///
     /// ```rust,no_run
     /// # async fn run() -> sioc::error::Result<()> {
@@ -181,7 +186,8 @@ where
         }
     }
 
-    /// Override the initial transport strategy (default: HTTP long-polling with WebSocket upgrade).
+    /// Override the initial transport strategy (default: HTTP long-polling with
+    /// WebSocket upgrade).
     pub fn transport(mut self, strategy: TransportStrategy) -> Self {
         self.transport_strategy = strategy;
         self
@@ -189,8 +195,8 @@ where
 
     /// Override the channel buffer capacities (default: 32 for all channels).
     ///
-    /// Accepts `()` for defaults, a `usize` for uniform sizing, or a [`ChannelConfig`] for
-    /// per-channel control.
+    /// Accepts `()` for defaults, a `usize` for uniform sizing, or a
+    /// [`ChannelConfig`] for per-channel control.
     pub fn channels(mut self, config: impl Into<ChannelConfig>) -> Self {
         self.channels = config.into();
         self
@@ -198,7 +204,8 @@ where
 
     /// Connects to the Engine.IO server and returns a [`Client`].
     ///
-    /// Spawns the manager task, which drives the engine and transport concurrently.
+    /// Spawns the manager task, which drives the engine and transport
+    /// concurrently.
     ///
     /// # Errors
     ///
@@ -263,7 +270,8 @@ impl Client {
 
     /// Opens a namespace and returns a sender/receiver pair.
     ///
-    /// The namespace is not confirmed until a [`ServerPacket::Connect`] arrives on the [`SocketReceiver`].
+    /// The namespace is not confirmed until a [`ServerPacket::Connect`] arrives
+    /// on the [`SocketReceiver`].
     ///
     /// # Errors
     ///
@@ -349,7 +357,8 @@ pub struct SocketSender {
 
 #[cfg(test)]
 impl SocketSender {
-    /// Wraps raw channel ends, so manager tests can drive a namespace without a client.
+    /// Wraps raw channel ends, so manager tests can drive a namespace without a
+    /// client.
     #[must_use]
     pub fn from_parts(
         client_packet_tx: mpsc::Sender<ClientPacket>,
@@ -384,7 +393,8 @@ impl SocketSender {
 }
 
 impl SocketSender {
-    /// Emits an event; returns `()` or an [`AckHandle`](crate::ack::AckHandle) depending on the ack policy.
+    /// Emits an event; returns `()` or an [`AckHandle`](crate::ack::AckHandle)
+    /// depending on the ack policy.
     ///
     /// # Errors
     ///
@@ -418,8 +428,9 @@ impl SocketSender {
     /// Disconnects the namespace for every clone.
     ///
     /// Events and acks sent before the call still go out, followed by a
-    /// DISCONNECT packet. Later sends fail with [`SocketError::Closed`]. Calling
-    /// it after the namespace has closed, by either side, does nothing.
+    /// DISCONNECT packet. Later sends fail with [`SocketError::Closed`].
+    /// Calling it after the namespace has closed, by either side, does
+    /// nothing.
     pub fn disconnect(&self) {
         self.closed.cancel();
     }
@@ -443,12 +454,14 @@ pub struct SocketReceiver {
 }
 
 impl SocketReceiver {
-    /// Returns the next application event. [`ServerPacket::Connect`], [`ServerPacket::Disconnect`], and
-    /// [`ServerPacket::ConnectError`] are skipped.
-    /// Returns `None` once the namespace closes, by either side, or the session ends.
+    /// Returns the next application event. [`ServerPacket::Connect`],
+    /// [`ServerPacket::Disconnect`], and [`ServerPacket::ConnectError`] are
+    /// skipped. Returns `None` once the namespace closes, by either side,
+    /// or the session ends.
     ///
-    /// Cancel safe: the only suspend point is `recv`; skipped protocol packets have no
-    /// suspend point after consumption, so no events are lost on cancellation.
+    /// Cancel safe: the only suspend point is `recv`; skipped protocol packets
+    /// have no suspend point after consumption, so no events are lost on
+    /// cancellation.
     ///
     /// # Errors
     ///
@@ -483,14 +496,15 @@ impl std::ops::DerefMut for SocketReceiver {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::error::PayloadError;
-    use crate::marker::{HasAck, NoAck, NoBinary};
-    use crate::packet::{ClientPacket, Connect, ConnectError, DynEvent, ServerPacket};
     use eioc::transport::TransportStrategy;
     use serde_json::Map;
     use tokio::sync::mpsc;
     use url::Url;
+
+    use super::*;
+    use crate::error::PayloadError;
+    use crate::marker::{HasAck, NoAck, NoBinary};
+    use crate::packet::{ClientPacket, Connect, ConnectError, DynEvent, ServerPacket};
 
     struct TestEmit;
 
@@ -609,7 +623,8 @@ mod tests {
             clone.emit(TestEmit).await,
             Err(SocketError::Closed)
         ));
-        // The manager drains what was sent before; `client_close_sends_earlier_packets_first` covers the rest.
+        // The manager drains what was sent before;
+        // `client_close_sends_earlier_packets_first` covers the rest.
         assert!(matches!(
             client_packet_rx.try_recv(),
             Ok(ClientPacket::Event { .. })
