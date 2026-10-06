@@ -321,10 +321,7 @@ impl Client {
         reply_rx.await.map_err(|_| SocketError::Closed)??;
 
         Ok((
-            SocketSender {
-                client_packet_tx,
-                closed,
-            },
+            SocketSender::new(client_packet_tx, closed),
             SocketReceiver { server_packet_rx },
         ))
     }
@@ -348,41 +345,33 @@ impl Client {
 
 /// Sender for a Socket.IO namespace.
 ///
-/// Clones share the namespace. Disconnecting any clone closes all of them;
-/// dropping the last clone also disconnects the namespace.
+/// Clone it to emit from several tasks: clones share the namespace.
+/// Disconnecting any clone closes all of them, and dropping the last clone
+/// also disconnects the namespace.
 #[derive(Clone, Debug)]
 pub struct SocketSender {
+    /// Carries packets to the manager task, which encodes and sends them.
     client_packet_tx: mpsc::Sender<ClientPacket>,
     closed: CancellationToken,
 }
 
-#[cfg(test)]
 impl SocketSender {
-    /// Wraps raw channel ends, so manager tests can drive a namespace without a
-    /// client.
+    /// Wraps the channel to a namespace and the token that marks it closed.
     #[must_use]
-    pub fn from_parts(
-        client_packet_tx: mpsc::Sender<ClientPacket>,
-        closed: CancellationToken,
-    ) -> Self {
+    pub fn new(client_packet_tx: mpsc::Sender<ClientPacket>, closed: CancellationToken) -> Self {
         Self {
             client_packet_tx,
             closed,
         }
     }
 
-    /// Sends one raw client packet, as the public methods do.
+    /// Sends one raw client packet; [`emit`](Self::emit) and
+    /// [`acknowledge`](Self::acknowledge) build theirs and call this.
     ///
     /// # Errors
     ///
     /// Returns [`SocketError::Closed`] once the namespace is closed.
-    pub async fn send_packet(&self, packet: ClientPacket) -> Result<(), SocketError> {
-        self.send(packet).await
-    }
-}
-
-impl SocketSender {
-    async fn send(&self, packet: ClientPacket) -> Result<(), SocketError> {
+    pub async fn send(&self, packet: ClientPacket) -> Result<(), SocketError> {
         if self.closed.is_cancelled() {
             return Err(SocketError::Closed);
         }
