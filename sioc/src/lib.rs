@@ -5,6 +5,8 @@ pub mod binary;
 pub mod client;
 pub mod error;
 pub mod event;
+// The manager runs inside the task that `ClientBuilder::open` spawns, behind
+// `Client::join` and the namespace handles, so it has no public surface.
 mod manager;
 pub mod marker;
 pub mod packet;

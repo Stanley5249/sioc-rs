@@ -98,7 +98,6 @@ impl From<usize> for ChannelConfig {
 }
 
 /// Builder for a [`Client`] connection.
-#[must_use = "call open() to connect"]
 ///
 /// # Example
 ///
@@ -113,6 +112,7 @@ impl From<usize> for ChannelConfig {
 /// # Ok(())
 /// # }
 /// ```
+#[must_use = "call open() to connect"]
 pub struct ClientBuilder<C = ()> {
     url: Url,
     path: String,

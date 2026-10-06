@@ -87,6 +87,7 @@ impl Routes {
         true
     }
 
+    /// Returns whether this generation of the namespace is still open.
     pub fn is_open(&self, ns: &str, generation: u64) -> bool {
         self.lock()
             .get(ns)
@@ -101,6 +102,8 @@ impl Routes {
         (!std::mem::replace(&mut route.connected, true)).then_some(route.generation)
     }
 
+    /// Returns the sender to the namespace's receiver, if the namespace is
+    /// open.
     pub fn server_packet_tx(&self, ns: &str) -> Option<mpsc::Sender<ServerPacket>> {
         self.lock()
             .get(ns)
@@ -125,10 +128,13 @@ impl Routes {
         }
     }
 
+    /// Removes the ack receiver for `id`, so each ack is delivered at most
+    /// once.
     pub fn take_ack(&self, ns: &str, id: u64) -> Option<oneshot::Sender<DynAck>> {
         self.lock().get_mut(ns)?.ack_txs.remove(&id)
     }
 
+    /// Closes every namespace, for when the session ends.
     pub fn clear(&self) {
         self.lock().clear();
     }

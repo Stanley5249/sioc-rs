@@ -17,12 +17,19 @@ use crate::packet::{ClientPacket, Packet, ServerPacket};
 /// A namespace opened by [`Client::connect`](crate::client::Client::connect).
 #[derive(Debug)]
 pub struct ConnectRequest {
+    /// The namespace to open, such as `/` or `/chat`.
     pub ns: ByteString,
+    /// The JSON auth payload sent with the CONNECT packet.
     pub payload: ByteString,
+    /// What the namespace's [`SocketSender`](crate::client::SocketSender)
+    /// clones send.
     pub client_packet_rx: mpsc::Receiver<ClientPacket>,
     /// Cancelled once the namespace closes, by either side.
     pub closed: CancellationToken,
+    /// Delivers the server's packets to the namespace's
+    /// [`SocketReceiver`](crate::client::SocketReceiver).
     pub server_packet_tx: mpsc::Sender<ServerPacket>,
+    /// Reports whether the namespace opened, before its CONNECT goes out.
     pub reply_tx: oneshot::Sender<Result<(), SocketError>>,
 }
 
@@ -71,6 +78,15 @@ async fn recv_client_packet(
 ///
 /// Closes the session once the client handle and every namespace are gone, so
 /// having no namespace at startup or between namespaces keeps it open.
+///
+/// # Errors
+///
+/// Returns an error if the engine channel closes early.
+///
+/// # Panics
+///
+/// Panics if a client packet arrives for a generation this loop never opened,
+/// which the generation counter rules out.
 pub async fn client_packets_to_messages(
     mut connect_request_rx: mpsc::Receiver<ConnectRequest>,
     mut connected_generation_rx: mpsc::UnboundedReceiver<u64>,

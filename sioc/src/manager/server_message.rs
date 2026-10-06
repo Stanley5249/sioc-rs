@@ -13,6 +13,11 @@ use crate::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Packet, ServerP
 /// `server_message_rx`.
 ///
 /// Waiting on a full receiver holds up only this direction.
+///
+/// # Errors
+///
+/// Returns an error if the server breaks the protocol, or if the client-packet
+/// loop stopped while a namespace was still connecting.
 pub async fn server_messages_to_packets(
     mut server_message_rx: mpsc::Receiver<Message>,
     routes: &Routes,
