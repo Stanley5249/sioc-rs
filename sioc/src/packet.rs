@@ -214,19 +214,24 @@ impl<E> ServerPacket<E> {
 /// A packet this client sends to one namespace, before it is encoded as a wire
 /// [`Packet`].
 #[derive(Debug)]
-#[allow(missing_docs)]
 pub enum ClientPacket {
     /// Emits an event; if `ack_tx` is set, an ack ID is assigned and the
     /// response routed to it.
     Event {
+        /// The JSON array of the event name and arguments.
         payload: ByteString,
+        /// Receives the server's ack, if the event asks for one.
         ack_tx: Option<oneshot::Sender<DynAck>>,
+        /// Binary attachments, sent as frames after the packet.
         attachments: Option<Vec<Bytes>>,
     },
     /// Acknowledges a previously received event.
     Ack {
+        /// The JSON array of the ack arguments.
         payload: ByteString,
+        /// The ack ID of the event being acknowledged.
         id: u64,
+        /// Binary attachments, sent as frames after the packet.
         attachments: Option<Vec<Bytes>>,
     },
 }
@@ -236,7 +241,6 @@ pub enum ClientPacket {
 /// Binary variants carry an attachment count; the socket router collects
 /// the follow-up binary frames and reassembles them into a [`ServerPacket`].
 #[derive(Debug)]
-#[allow(missing_docs)]
 pub enum Packet {
     /// Type `0`: namespace connection confirmed.
     Connect(ByteString),
@@ -244,25 +248,38 @@ pub enum Packet {
     Disconnect,
     /// Type `2`: event (text or binary).
     Event {
+        /// The JSON array of the event name and arguments.
         payload: ByteString,
+        /// The ack ID, if the sender asks for an ack.
         id: Option<u64>,
     },
     /// Type `3`: acknowledgement (text or binary).
-    Ack { payload: ByteString, id: u64 },
+    Ack {
+        /// The JSON array of the ack arguments.
+        payload: ByteString,
+        /// The ack ID of the event being acknowledged.
+        id: u64,
+    },
     /// Type `4`: namespace connection rejected.
     ConnectError(ByteString),
 
     /// Type `5`: binary event with `count` follow-up binary frames.
     BinaryEvent {
+        /// The JSON array of the event name and arguments, with placeholders.
         payload: ByteString,
+        /// The ack ID, if the sender asks for an ack.
         id: Option<u64>,
+        /// The number of binary frames that follow.
         count: usize,
     },
 
     /// Type `6`: binary acknowledgement with `count` follow-up binary frames.
     BinaryAck {
+        /// The JSON array of the ack arguments, with placeholders.
         payload: ByteString,
+        /// The ack ID of the event being acknowledged.
         id: u64,
+        /// The number of binary frames that follow.
         count: usize,
     },
 }

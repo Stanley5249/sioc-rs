@@ -204,7 +204,6 @@ pub enum AttachmentsError {
 ///
 /// Callers receive this wrapped in [`ManagerError::Packet`].
 #[derive(Debug, Error, Diagnostic)]
-#[allow(missing_docs)]
 pub enum PacketError {
     /// JSON payload in the packet is malformed.
     #[error(transparent)]
@@ -224,7 +223,10 @@ pub enum PacketError {
     /// First byte does not map to any known packet type.
     #[error("unknown packet type {id}")]
     #[diagnostic(code(sioc::parse::unknown_packet_type))]
-    InvalidId { id: char },
+    InvalidId {
+        /// The first byte of the packet.
+        id: char,
+    },
 
     /// Binary packet header has no attachment count before the `-` separator.
     #[error("binary packet missing attachment count prefix")]
@@ -234,7 +236,10 @@ pub enum PacketError {
     /// Text event packet carries a non-zero attachment count.
     #[error("text event packet has unexpected attachment count ({count})")]
     #[diagnostic(code(sioc::parse::unexpected_attachments))]
-    UnexpectedAttachments { count: usize },
+    UnexpectedAttachments {
+        /// The attachment count the packet declared.
+        count: usize,
+    },
 
     /// Attachment count prefix is present but not a valid integer.
     #[error("attachment count is not a valid integer")]
@@ -259,7 +264,6 @@ pub enum PacketError {
 
 /// The top-level error type for Socket.IO manager operations.
 #[derive(Debug, Error, Diagnostic)]
-#[allow(missing_docs)]
 pub enum ManagerError {
     /// Error propagated from the Engine.IO transport layer.
     #[error(transparent)]

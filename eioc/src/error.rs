@@ -176,7 +176,6 @@ pub enum PollingError {
 
 /// Errors from decoding a raw Engine.IO packet.
 #[derive(Debug, Error, Diagnostic)]
-#[allow(missing_docs)]
 pub enum PacketError {
     /// Packet bytes are empty.
     #[error("empty packet")]
@@ -186,7 +185,10 @@ pub enum PacketError {
     /// First char of a packet is not a valid Engine.IO type id.
     #[error("invalid type id {id}")]
     #[diagnostic(code(eioc::packet::invalid_id))]
-    InvalidId { id: char },
+    InvalidId {
+        /// The first char of the packet.
+        id: char,
+    },
 
     /// Open packet's JSON payload is malformed.
     #[error("failed to parse Open payload")]
@@ -196,7 +198,12 @@ pub enum PacketError {
     /// Unexpected payload for the packet type.
     #[error("unexpected payload for type id {id}")]
     #[diagnostic(code(eioc::packet::payload))]
-    Payload { id: char, payload: ByteString },
+    Payload {
+        /// The packet type id.
+        id: char,
+        /// The payload that the type does not accept.
+        payload: ByteString,
+    },
 }
 
 #[cfg(test)]
