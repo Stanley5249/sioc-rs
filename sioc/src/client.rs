@@ -298,31 +298,25 @@ impl Client {
         S: Into<ByteString>,
         B: Into<ByteString>,
     {
-        let (client_packet_tx, client_packet_rx) = mpsc::channel(self.channels.manager);
-        let closed = CancellationToken::new();
-
-        let (server_packet_tx, server_packet_rx) = mpsc::channel(self.channels.socket);
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-
-        let connect_request = ConnectRequest {
-            ns: ns.into(),
-            payload: payload.into(),
-            client_packet_rx,
-            closed: closed.clone(),
-            server_packet_tx,
-            reply_tx,
-        };
+        let (connect_request, handles) = ConnectRequest::new(
+            ns.into(),
+            payload.into(),
+            self.channels.manager,
+            self.channels.socket,
+        );
 
         self.connect_request_tx
             .send(connect_request)
             .await
             .map_err(|_| SocketError::Closed)?;
 
-        reply_rx.await.map_err(|_| SocketError::Closed)??;
+        handles.reply_rx.await.map_err(|_| SocketError::Closed)??;
 
         Ok((
-            SocketSender::new(client_packet_tx, closed),
-            SocketReceiver { server_packet_rx },
+            SocketSender::new(handles.client_packet_tx, handles.closed),
+            SocketReceiver {
+                server_packet_rx: handles.server_packet_rx,
+            },
         ))
     }
 
@@ -517,10 +511,7 @@ mod tests {
         let (client_packet_tx, client_packet_rx) = mpsc::channel(8);
         let closed = CancellationToken::new();
         (
-            SocketSender {
-                client_packet_tx,
-                closed,
-            },
+            SocketSender::new(client_packet_tx, closed),
             client_packet_rx,
         )
     }
