@@ -43,10 +43,10 @@ _rustfmt-stdin:
 lint *args:
     cargo clippy --quiet --locked --workspace --all-targets {{ args }} -- -D warnings
 
-# Lint and type-check Python test servers.
+# Lint and type-check the Python servers; pyrefly warnings fail too.
 lint-py:
     uv run --locked ruff check -q
-    uv run --locked pyrefly check --summary=none
+    uv run --locked pyrefly check --summary=none --min-severity warn
 
 # Lint TypeScript test servers with type-aware rules.
 lint-js *args:
