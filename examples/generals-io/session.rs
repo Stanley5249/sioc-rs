@@ -1,13 +1,15 @@
 #![allow(dead_code)]
 
 use miette::{IntoDiagnostic, Result, WrapErr, bail};
-use sioc::prelude::*;
+use sioc::prelude::{Event, EventRouter, SocketReceiver};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::instrument;
 
 use crate::bot::Bot;
-use crate::prelude::*;
+use crate::client::socket::GeneralsIoSender;
+use crate::server::event::{GameStart, GameUpdateData};
+use crate::server::router::GeneralsIoEvent;
 
 #[derive(Debug, Clone)]
 pub enum GameMode {
@@ -100,7 +102,7 @@ async fn update_username(
 }
 
 async fn join_private(tx: &GeneralsIoSender, user_id: String, queue_id: String) -> Result<()> {
-    let url = format!("https://generals.io/games/{}", queue_id);
+    let url = format!("https://generals.io/games/{queue_id}");
 
     tracing::info!(%url, "joining private");
 
@@ -167,19 +169,18 @@ async fn handle_game(
 ) -> Result<Phase> {
     match event {
         GeneralsIoEvent::GameUpdate(Event { payload, .. }) => {
-            match bot_tx.send(payload.data).await {
-                Ok(()) => Ok(Phase::Game {
+            if bot_tx.send(payload.data).await.is_ok() {
+                Ok(Phase::Game {
                     mode,
                     bot_tx,
                     bot_handle,
-                }),
-                Err(_) => {
-                    bot_handle
-                        .await
-                        .into_diagnostic()
-                        .wrap_err("bot task failed")??;
-                    Ok(Phase::GameOver { mode })
-                }
+                })
+            } else {
+                bot_handle
+                    .await
+                    .into_diagnostic()
+                    .wrap_err("bot task failed")??;
+                Ok(Phase::GameOver { mode })
             }
         }
         GeneralsIoEvent::GameOver(Event { payload, .. }) => {

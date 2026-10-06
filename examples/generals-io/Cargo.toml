@@ -23,3 +23,6 @@ url.workspace = true
 [[example]]
 name = "glhf"
 path = "main.rs"
+
+[lints]
+workspace = true

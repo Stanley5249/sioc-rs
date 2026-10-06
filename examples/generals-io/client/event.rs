@@ -1,9 +1,13 @@
 //! Client-to-server event definitions.
 
 use serde::{Deserialize, Serialize};
-use sioc::prelude::*;
+use sioc::prelude::{EventType, SerializePayload};
 
-use crate::prelude::*;
+use crate::constants::ForceFlag;
+use crate::server::ack::{
+    AcceptFriendRequestAck, CheckModerationAck, GenericSuccessAck, GetNotifsAck, GetUsernameAck,
+    IsSupporterAck, LeaderboardAck, LoadSocialDataAck, SendFriendRequestAck,
+};
 
 /// Game options sent when joining a queue.
 #[derive(Debug, Serialize)]

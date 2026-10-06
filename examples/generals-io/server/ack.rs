@@ -1,7 +1,7 @@
 //! Server acknowledgement types.
 
 use serde::Deserialize;
-use sioc::prelude::*;
+use sioc::prelude::{AckType, DeserializePayload};
 
 /// Ack for `get_username`: returns the username or null.
 #[derive(Debug, AckType, DeserializePayload)]
@@ -126,7 +126,8 @@ pub struct LeaderboardAck {
 pub struct Notification {
     pub id: String,
     pub message: String,
-    pub notification_type: String,
+    #[serde(rename = "notification_type")]
+    pub kind: String,
     pub timestamp: i64,
 }
 

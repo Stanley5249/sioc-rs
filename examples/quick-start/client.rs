@@ -9,68 +9,71 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use miette::{IntoDiagnostic, Result};
-use sioc::prelude::*;
+use sioc::prelude::{
+    Ack, AckType, AttachmentsBuilder, ClientBuilder, DeserializePayload, Event, EventRouter,
+    EventType, Placeholder, SerializePayload,
+};
 use tracing_subscriber::EnvFilter;
 use url::Url;
 
 /// Asks the server to join a chat room, expecting a [`RoomInfo`] ack.
 #[derive(Debug, EventType, SerializePayload)]
 #[sioc(event(name = "join", ack = "RoomInfo"))]
-pub struct Join {
-    pub room: String,
-    pub name: String,
+struct Join {
+    room: String,
+    name: String,
 }
 
 /// Ack for the [`Join`] event, counting the bot as a member.
 #[derive(Debug, AckType, DeserializePayload)]
-pub struct RoomInfo {
-    pub members: u32,
+struct RoomInfo {
+    members: u32,
 }
 
 /// Sends a chat message to the room.
 #[derive(Debug, EventType, SerializePayload)]
 #[sioc(event(name = "message"))]
-pub struct Say {
-    pub text: String,
+struct Say {
+    text: String,
 }
 
 /// Carries a chat message from another room member.
 #[derive(Debug, EventType, DeserializePayload)]
 #[sioc(event(name = "message"))]
-pub struct Message {
-    pub from: String,
-    pub text: String,
+struct Message {
+    from: String,
+    text: String,
 }
 
 /// Carries a room announcement from the server.
 #[derive(Debug, EventType, DeserializePayload)]
 #[sioc(event(name = "notice"))]
-pub struct Notice {
-    pub text: String,
+struct Notice {
+    text: String,
 }
 
 /// Carries a yes-or-no question from the server, expecting an [`Answer`] ack.
 #[derive(Debug, EventType, DeserializePayload)]
 #[sioc(event(name = "confirm", ack = "Answer"))]
-pub struct Confirm {
-    pub question: String,
+struct Confirm {
+    question: String,
 }
 
 /// Ack for the [`Confirm`] event.
 #[derive(Debug, AckType, SerializePayload)]
-pub struct Answer(pub bool);
+struct Answer(bool);
 
 /// Carries an image as a binary attachment, both to and from the room.
 #[derive(Debug, EventType, SerializePayload, DeserializePayload)]
 #[sioc(event(name = "image", binary))]
-pub struct Image {
-    pub name: String,
-    pub data: Placeholder,
+struct Image {
+    name: String,
+    data: Placeholder,
 }
 
 /// Routes incoming server events by name.
 #[derive(Debug, EventRouter)]
-pub enum ChatEvent {
+enum ChatEvent {
     Message(Event<Message>),
     Notice(Event<Notice>),
     Confirm(Event<Confirm>),

@@ -14,7 +14,6 @@ mod client;
     reason = "the schema covers the whole generals.io protocol, and the bot uses only some of it"
 )]
 mod constants;
-mod prelude;
 #[expect(
     dead_code,
     reason = "the schema covers the whole generals.io protocol, and the bot uses only some of it"
@@ -24,12 +23,12 @@ mod session;
 
 use bytestring::ByteString;
 use miette::{IntoDiagnostic, Result, WrapErr};
-use sioc::prelude::*;
+use sioc::prelude::{ClientBuilder, SocketSender, TransportStrategy};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 use url::Url;
 
-use crate::prelude::*;
+use crate::client::socket::GeneralsIoSender;
 use crate::session::Session;
 
 const ENDPOINT: &str = "https://ws.generals.io";

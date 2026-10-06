@@ -2,7 +2,8 @@ use miette::Result;
 use tokio::sync::mpsc;
 use tracing::instrument;
 
-use crate::prelude::*;
+use crate::client::socket::GeneralsIoSender;
+use crate::server::event::GameUpdateData;
 
 pub struct Bot {
     tx: GeneralsIoSender,
