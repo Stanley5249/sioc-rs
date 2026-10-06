@@ -33,6 +33,7 @@
 
 - When updating the public API, check the `README.md` examples and the doc tests.
 - When updating a `justfile` recipe, check every reference to that recipe.
+- Keep the rustfmt nightly toolchain version synchronized across `justfile`, `.github/workflows/ci.yml`, and `.zed/settings.json`.
 
 ## Commits
 

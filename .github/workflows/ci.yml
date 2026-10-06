@@ -55,7 +55,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
-      - run: rustup toolchain install "$(just --evaluate rustfmt_toolchain)" --profile minimal --component rustfmt
+      - run: rustup toolchain install nightly-2026-07-20 --profile minimal --component rustfmt
       - run: just _fmt-cargo --check
       - if: ${{ !cancelled() }}
         run: just _fmt-just --check

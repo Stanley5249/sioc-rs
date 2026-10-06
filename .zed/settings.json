@@ -69,9 +69,9 @@
         "check": {
           "command": "clippy"
         },
-        // The recipe pins the nightly that rustfmt.toml needs.
+        // rustfmt.toml requires nightly; keep this pin in sync with justfile.
         "rustfmt": {
-          "overrideCommand": ["just", "_rustfmt-stdin"]
+          "overrideCommand": ["rustfmt", "+nightly-2026-07-20", "--edition", "2024"]
         }
       }
     }

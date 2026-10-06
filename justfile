@@ -7,7 +7,7 @@ set default-list
 mod examples
 
 # rustfmt.toml uses nightly-only options, so formatting pins one nightly.
-# CI installs this toolchain, and Zed formats through _rustfmt-stdin.
+# Keep the CI and Zed toolchain pins in sync with this value.
 rustfmt_toolchain := "nightly-2026-07-20"
 
 # Run the local merge gate.
@@ -38,10 +38,6 @@ _fmt-oxfmt *args:
 _fmt-just *args:
     just --fmt {{ args }}
     just --fmt --justfile examples/justfile {{ args }}
-
-# Format Rust from stdin to stdout, for rust-analyzer in .zed/settings.json.
-_rustfmt-stdin:
-    @rustfmt +{{ rustfmt_toolchain }} --edition 2024
 
 # Lint libraries, examples, and tests with warnings denied.
 lint *args:
