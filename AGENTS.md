@@ -13,7 +13,7 @@ just test
 just test-servers
 ```
 
-Python and TypeScript test servers share the root `pyproject.toml` and `package.json`; `just test-servers` runs protocol and pressure tests against them.
+The TypeScript reference server takes its dependencies from the root `package.json`; `just test-servers` runs the end-to-end tests against it.
 
 ## Running examples
 

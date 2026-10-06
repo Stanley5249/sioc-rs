@@ -61,7 +61,7 @@ test *args:
     cargo nextest run --locked --workspace --all-targets {{ args }}
     cargo test --locked --workspace --doc {{ args }}
 
-# Run protocol and pressure tests against JavaScript and Python Socket.IO servers.
+# Run the end-to-end tests against the TypeScript reference server.
 test-servers *args:
     cargo nextest run --locked --workspace --all-targets --run-ignored only -E 'binary(servers)' {{ args }}
 

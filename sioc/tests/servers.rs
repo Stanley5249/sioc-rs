@@ -1,8 +1,7 @@
-//! Reference-server tests run through `just test-servers`; normal tests stay
-//! self-contained.
+//! End-to-end tests against the TypeScript reference server, run through
+//! `just test-servers`.
 //!
-//! Each scenario runs as one test per backend, such as
-//! `py::kick_closes_namespace`, against its own server and over every transport
+//! Each test starts its own server and runs its scenario over every transport
 //! and channel capacity.
 
 use std::path::Path;
@@ -41,10 +40,18 @@ struct Blob(Placeholder);
 #[derive(Debug, EventType, DeserializePayload)]
 #[sioc(event(name = "blob", binary))]
 struct IncomingBlob(Placeholder);
+#[derive(Debug, EventType, SerializePayload)]
+struct Ask(u32);
+#[derive(Debug, AckType, SerializePayload)]
+struct Answer(u32);
+#[derive(Debug, EventType, DeserializePayload)]
+#[sioc(event(ack = "Answer"))]
+struct Question(u32);
 #[derive(Debug, EventRouter)]
 enum Received {
     Item(Event<Item>),
     Blob(Event<IncomingBlob>),
+    Question(Event<Question>),
 }
 
 /// Owns a reference server child, which exits once its stdin closes.
@@ -54,15 +61,10 @@ struct Server {
 }
 
 impl Server {
-    async fn start(backend: &str) -> Self {
+    async fn start() -> Self {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let mut command = Command::new(if backend == "js" { "bun" } else { "uv" });
-        if backend == "js" {
-            command.arg("sioc/tests/servers/server.ts");
-        } else {
-            command.args(["run", "--locked", "python", "sioc/tests/servers/server.py"]);
-        }
-        let mut child = command
+        let mut child = Command::new("bun")
+            .arg("sioc/tests/servers/server.ts")
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -103,53 +105,15 @@ const PRESSURE: [usize; 3] = [1, 4, 32];
 /// One ordinary capacity, for scenarios about protocol behavior.
 const ORDINARY: [usize; 1] = [4];
 
-/// Runs `scenario` against one backend over every transport and capacity.
-async fn run(
-    backend: &str,
-    capacities: &[usize],
-    scenario: impl AsyncFn(&Server, TransportStrategy, usize),
-) {
-    let server = Server::start(backend).await;
+/// Runs `scenario` against its own server over every transport and capacity.
+async fn run(capacities: &[usize], scenario: impl AsyncFn(&Server, TransportStrategy, usize)) {
+    let server = Server::start().await;
     for &capacity in capacities {
         for transport in [TransportStrategy::WebSocket, TransportStrategy::Polling] {
             scenario(&server, transport, capacity).await;
         }
     }
     server.stop().await;
-}
-
-macro_rules! scenarios {
-    ($($scenario:ident: $capacities:ident),* $(,)?) => {
-        mod js {
-            $(
-                #[tokio::test]
-                #[ignore = "requires bun; run just test-servers"]
-                async fn $scenario() {
-                    super::run("js", &super::$capacities, super::$scenario).await;
-                }
-            )*
-        }
-
-        mod py {
-            $(
-                #[tokio::test]
-                #[ignore = "requires uv; run just test-servers"]
-                async fn $scenario() {
-                    super::run("py", &super::$capacities, super::$scenario).await;
-                }
-            )*
-        }
-    };
-}
-
-scenarios! {
-    flood_and_count: PRESSURE,
-    echo_while_receiving_full: PRESSURE,
-    drop_sender_mid_flood: PRESSURE,
-    binary_roundtrip: ORDINARY,
-    client_disconnect_notifies_observer: ORDINARY,
-    kick_closes_namespace: ORDINARY,
-    connect_error_closes_namespace: ORDINARY,
 }
 
 async fn connected(client: &Client, ns: &str) -> (SocketSender, SocketReceiver) {
@@ -166,133 +130,186 @@ async fn finish(client: Client, tx: SocketSender, mut rx: SocketReceiver) {
 }
 
 /// The server floods items while the client answers each with `seen`.
-async fn flood_and_count(server: &Server, transport: TransportStrategy, capacity: usize) {
-    let client = server.client(transport, capacity);
-    let (tx, mut rx) = connected(&client, "/").await;
-    tx.emit(Flood(FLOOD)).await.unwrap();
-    for seq in 0..FLOOD {
-        let Some(Received::Item(event)) = rx.listen::<Received>().await.unwrap() else {
-            panic!("expected item {seq}");
-        };
-        assert_eq!(event.payload.0, seq);
-        tx.emit(Seen(seq)).await.unwrap();
-        if seq % 50 == 0 {
-            tokio::time::sleep(Duration::from_millis(1)).await;
+#[tokio::test]
+#[ignore = "requires bun; run just test-servers"]
+async fn flood_and_count() {
+    run(&PRESSURE, async |server: &Server, transport, capacity| {
+        let client = server.client(transport, capacity);
+        let (tx, mut rx) = connected(&client, "/").await;
+        tx.emit(Flood(FLOOD)).await.unwrap();
+        for seq in 0..FLOOD {
+            let Some(Received::Item(event)) = rx.listen::<Received>().await.unwrap() else {
+                panic!("expected item {seq}");
+            };
+            assert_eq!(event.payload.0, seq);
+            tx.emit(Seen(seq)).await.unwrap();
+            if seq % 50 == 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
         }
-    }
-    assert_eq!(
-        tx.emit(Count).await.unwrap().await.unwrap().payload.0,
-        FLOOD
-    );
-    finish(client, tx, rx).await;
+        assert_eq!(
+            tx.emit(Count).await.unwrap().await.unwrap().payload.0,
+            FLOOD
+        );
+        finish(client, tx, rx).await;
+    })
+    .await;
 }
 
 /// A separate task keeps sending while the receive direction fills up.
-async fn echo_while_receiving_full(server: &Server, transport: TransportStrategy, capacity: usize) {
-    let client = server.client(transport, capacity);
-    let (tx, mut rx) = connected(&client, "/").await;
-    let sending = tx.clone();
-    let feeder = tokio::spawn(async move {
+#[tokio::test]
+#[ignore = "requires bun; run just test-servers"]
+async fn echo_while_receiving_full() {
+    run(&PRESSURE, async |server: &Server, transport, capacity| {
+        let client = server.client(transport, capacity);
+        let (tx, mut rx) = connected(&client, "/").await;
+        let sending = tx.clone();
+        let feeder = tokio::spawn(async move {
+            for seq in 0..FLOOD {
+                sending.emit(Echo(seq)).await.unwrap();
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
         for seq in 0..FLOOD {
-            sending.emit(Echo(seq)).await.unwrap();
+            let Some(Received::Item(event)) = rx.listen::<Received>().await.unwrap() else {
+                panic!("expected echo {seq}");
+            };
+            assert_eq!(event.payload.0, seq);
         }
-    });
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    for seq in 0..FLOOD {
-        let Some(Received::Item(event)) = rx.listen::<Received>().await.unwrap() else {
-            panic!("expected echo {seq}");
-        };
-        assert_eq!(event.payload.0, seq);
-    }
-    feeder.await.unwrap();
-    assert_eq!(
-        tx.emit(Count).await.unwrap().await.unwrap().payload.0,
-        FLOOD
-    );
-    finish(client, tx, rx).await;
+        feeder.await.unwrap();
+        assert_eq!(
+            tx.emit(Count).await.unwrap().await.unwrap().payload.0,
+            FLOOD
+        );
+        finish(client, tx, rx).await;
+    })
+    .await;
 }
 
 /// Dropping the only sender mid-flood still ends the session.
-async fn drop_sender_mid_flood(server: &Server, transport: TransportStrategy, capacity: usize) {
-    let client = server.client(transport, capacity);
-    let (tx, mut rx) = connected(&client, "/").await;
-    tx.emit(Flood(FLOOD)).await.unwrap();
-    assert!(matches!(rx.recv().await, Some(ServerPacket::Event(_))));
-    drop(tx);
-    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
-    client.join().await.unwrap();
-    drain.await.unwrap();
+#[tokio::test]
+#[ignore = "requires bun; run just test-servers"]
+async fn drop_sender_mid_flood() {
+    run(&PRESSURE, async |server: &Server, transport, capacity| {
+        let client = server.client(transport, capacity);
+        let (tx, mut rx) = connected(&client, "/").await;
+        tx.emit(Flood(FLOOD)).await.unwrap();
+        assert!(matches!(rx.recv().await, Some(ServerPacket::Event(_))));
+        drop(tx);
+        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        client.join().await.unwrap();
+        drain.await.unwrap();
+    })
+    .await;
 }
 
 /// A binary event comes back both as an event and as its ack.
-async fn binary_roundtrip(server: &Server, transport: TransportStrategy, capacity: usize) {
-    let client = server.client(transport, capacity);
-    let (tx, mut rx) = connected(&client, "/").await;
-    let data = Bytes::from_static(b"binary roundtrip");
-    let expected = data.clone();
-    let handle = tx
-        .emit(|builder: &mut AttachmentsBuilder| Blob(builder.attach(data)))
-        .await
-        .unwrap();
-    let Some(Received::Blob(event)) = rx.listen::<Received>().await.unwrap() else {
-        panic!("expected blob");
-    };
-    assert_eq!(event.attachments[event.payload.0.slot()], expected);
-    let ack = handle.await.unwrap();
-    assert_eq!(ack.attachments[ack.payload.0.slot()], expected);
-    finish(client, tx, rx).await;
+#[tokio::test]
+#[ignore = "requires bun; run just test-servers"]
+async fn binary_roundtrip() {
+    run(&ORDINARY, async |server: &Server, transport, capacity| {
+        let client = server.client(transport, capacity);
+        let (tx, mut rx) = connected(&client, "/").await;
+        let data = Bytes::from_static(b"binary roundtrip");
+        let expected = data.clone();
+        let handle = tx
+            .emit(|builder: &mut AttachmentsBuilder| Blob(builder.attach(data)))
+            .await
+            .unwrap();
+        let Some(Received::Blob(event)) = rx.listen::<Received>().await.unwrap() else {
+            panic!("expected blob");
+        };
+        assert_eq!(event.attachments[event.payload.0.slot()], expected);
+        let ack = handle.await.unwrap();
+        assert_eq!(ack.attachments[ack.payload.0.slot()], expected);
+        finish(client, tx, rx).await;
+    })
+    .await;
 }
 
 /// Leaving one namespace keeps the session, and the server sees the leave.
-async fn client_disconnect_notifies_observer(
-    server: &Server,
-    transport: TransportStrategy,
-    capacity: usize,
-) {
-    let client = server.client(transport, capacity);
-    let (observer_tx, mut observer_rx) = connected(&client, "/observe").await;
-    let (tx, mut rx) = connected(&client, "/").await;
-    tx.disconnect();
-    assert!(rx.recv().await.is_none());
-    assert!(matches!(
-        observer_rx.recv().await,
-        Some(ServerPacket::Event(_))
-    ));
-    finish(client, observer_tx, observer_rx).await;
+#[tokio::test]
+#[ignore = "requires bun; run just test-servers"]
+async fn client_disconnect_notifies_observer() {
+    run(&ORDINARY, async |server: &Server, transport, capacity| {
+        let client = server.client(transport, capacity);
+        let (observer_tx, mut observer_rx) = connected(&client, "/observe").await;
+        let (tx, mut rx) = connected(&client, "/").await;
+        tx.disconnect();
+        assert!(rx.recv().await.is_none());
+        assert!(matches!(
+            observer_rx.recv().await,
+            Some(ServerPacket::Event(_))
+        ));
+        finish(client, observer_tx, observer_rx).await;
+    })
+    .await;
 }
 
 /// A server-side disconnect closes the namespace and its senders.
-async fn kick_closes_namespace(server: &Server, transport: TransportStrategy, capacity: usize) {
-    let client = server.client(transport, capacity);
-    let (tx, mut rx) = connected(&client, "/").await;
-    tx.emit(Kick).await.unwrap();
-    assert!(matches!(rx.recv().await, Some(ServerPacket::Disconnect)));
-    assert!(rx.recv().await.is_none());
-    assert!(matches!(
-        tx.emit(Count).await,
-        Err(sioc::error::SocketError::Closed)
-    ));
-    client.join().await.unwrap();
-}
-
-/// A refused namespace closes, and the session lets the client try again.
-async fn connect_error_closes_namespace(
-    server: &Server,
-    transport: TransportStrategy,
-    capacity: usize,
-) {
-    let client = server.client(transport, capacity);
-    for _ in 0..2 {
-        let (tx, mut rx) = client.connect("/denied").await.unwrap();
-        assert!(matches!(
-            rx.recv().await,
-            Some(ServerPacket::ConnectError(_))
-        ));
+#[tokio::test]
+#[ignore = "requires bun; run just test-servers"]
+async fn kick_closes_namespace() {
+    run(&ORDINARY, async |server: &Server, transport, capacity| {
+        let client = server.client(transport, capacity);
+        let (tx, mut rx) = connected(&client, "/").await;
+        tx.emit(Kick).await.unwrap();
+        assert!(matches!(rx.recv().await, Some(ServerPacket::Disconnect)));
         assert!(rx.recv().await.is_none());
         assert!(matches!(
             tx.emit(Count).await,
             Err(sioc::error::SocketError::Closed)
         ));
-    }
-    client.join().await.unwrap();
+        client.join().await.unwrap();
+    })
+    .await;
+}
+
+/// A refused namespace closes, and the session lets the client try again.
+#[tokio::test]
+#[ignore = "requires bun; run just test-servers"]
+async fn connect_error_closes_namespace() {
+    run(&ORDINARY, async |server: &Server, transport, capacity| {
+        let client = server.client(transport, capacity);
+        for _ in 0..2 {
+            let (tx, mut rx) = client.connect("/denied").await.unwrap();
+            assert!(matches!(
+                rx.recv().await,
+                Some(ServerPacket::ConnectError(_))
+            ));
+            assert!(rx.recv().await.is_none());
+            assert!(matches!(
+                tx.emit(Count).await,
+                Err(sioc::error::SocketError::Closed)
+            ));
+        }
+        client.join().await.unwrap();
+    })
+    .await;
+}
+
+/// The server asks the client back, and the client's ack reaches it.
+#[tokio::test]
+#[ignore = "requires bun; run just test-servers"]
+async fn server_ack_reaches_server() {
+    run(&ORDINARY, async |server: &Server, transport, capacity| {
+        let client = server.client(transport, capacity);
+        let (tx, mut rx) = connected(&client, "/").await;
+        tx.emit(Ask(7)).await.unwrap();
+        let Some(Received::Question(Event {
+            payload: Question(n),
+            id,
+            ..
+        })) = rx.listen::<Received>().await.unwrap()
+        else {
+            panic!("expected question");
+        };
+        tx.acknowledge(id, Answer(n * 2)).await.unwrap();
+        let Some(Received::Item(event)) = rx.listen::<Received>().await.unwrap() else {
+            panic!("expected the answer back");
+        };
+        assert_eq!(event.payload.0, 14);
+        finish(client, tx, rx).await;
+    })
+    .await;
 }

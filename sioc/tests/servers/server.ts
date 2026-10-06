@@ -1,7 +1,5 @@
 /**
- * Reference Socket.IO server for protocol and backpressure integration tests
- * on the reference JavaScript implementation, serving the same events as
- * `server.py`.
+ * Reference Socket.IO server for the end-to-end tests in `sioc/tests/servers.rs`.
  */
 
 import { createServer } from "node:http";
@@ -15,12 +13,14 @@ interface ClientToServer {
   count: (ack: (count: number) => void) => void;
   blob: (data: Buffer, ack: (data: Buffer) => void) => void;
   kick: () => void;
+  ask: (n: number) => void;
 }
 
 interface ServerToClient {
   item: (seq: number) => void;
   blob: (data: Buffer) => void;
   gone: () => void;
+  question: (n: number, ack: (answer: number) => void) => void;
 }
 
 const app = createServer();
@@ -64,6 +64,12 @@ sio.on("connection", (socket) => {
 
   socket.on("kick", () => {
     socket.disconnect();
+  });
+
+  // Asks the client back, then reports the client's answer as an item.
+  socket.on("ask", async (n) => {
+    const answer = await socket.timeout(5000).emitWithAck("question", n);
+    socket.emit("item", answer);
   });
 
   socket.on("disconnect", () => {
