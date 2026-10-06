@@ -14,7 +14,13 @@ Demonstrates real-world use of stateful clients. The bot manages a complete game
 
 - `RUST_LOG` - Log verbosity. See [filter directives](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#directives).
 
-On Bash:
+Copy `.env.example` to `.env`, fill in your user ID, and run the bot. `.env` stays out of Git.
+
+```sh
+just generals-io
+```
+
+Without `just`, set the variables in your shell. On Bash:
 
 ```bash
 GENERALS_IO_USER_ID=your-user-id RUST_LOG=info cargo run --example glhf

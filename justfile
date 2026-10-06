@@ -3,6 +3,9 @@ set shell := ["pwsh", "-NoLogo", "-NoProfile", "-Command"]
 
 set default-list
 
+# Run the generals.io bot with `just generals-io`.
+mod generals-io "examples/generals-io"
+
 # rustfmt.toml uses nightly-only options, so formatting pins one nightly.
 # CI installs this toolchain, and Zed formats through _rustfmt-stdin.
 rustfmt_toolchain := "nightly-2026-07-20"
