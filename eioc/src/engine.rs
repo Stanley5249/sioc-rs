@@ -1,22 +1,25 @@
 //! Engine.IO protocol task.
 
-use crate::error::{EngineError, Error};
-use crate::packet::{Frame, Handshake, Message, Packet};
-use crate::transport::TransportStrategy;
-use crate::websocket::WebSocketConnector;
 use futures_util::TryFutureExt;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 use url::Url;
 
-/// Drives the engine protocol and transport concurrently until the session ends.
+use crate::error::{EngineError, Error};
+use crate::packet::{Frame, Handshake, Message, Packet};
+use crate::transport::TransportStrategy;
+use crate::websocket::WebSocketConnector;
+
+/// Drives the engine protocol and transport concurrently until the session
+/// ends.
 ///
 /// `server_message_tx` receives what the server sends, and `client_message_rx`
 /// carries what the client sends. Dropping the sender of `client_message_rx`
 /// closes the session, and the engine drops `server_message_tx` once the
 /// session has ended, whichever side closed it.
 ///
-/// Returns once the transport has finished and the sender of `client_message_rx` is dropped.
+/// Returns once the transport has finished and the sender of
+/// `client_message_rx` is dropped.
 ///
 /// # Errors
 ///
@@ -170,7 +173,8 @@ async fn server_frames_to_messages(
     Ok(())
 }
 
-/// Forwards client messages and pongs as frames until either side ends the session.
+/// Forwards client messages and pongs as frames until either side ends the
+/// session.
 ///
 /// Then drops `client_frame_tx`, which tells the transport to send the server
 /// a `Close` packet, and drains both inputs until their senders hang up.
@@ -231,11 +235,13 @@ async fn drain<T>(rx: &mut mpsc::Receiver<T>) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use bytes::Bytes;
     use std::time::Duration;
+
+    use bytes::Bytes;
     use tokio::sync::{mpsc, oneshot};
     use tokio::task::JoinHandle;
+
+    use super::*;
 
     fn make_handshake() -> Handshake {
         Handshake {
@@ -247,7 +253,8 @@ mod tests {
         }
     }
 
-    /// A running engine with the transport and upper-layer ends of its channels.
+    /// A running engine with the transport and upper-layer ends of its
+    /// channels.
     struct Harness {
         server_frame_tx: mpsc::Sender<Frame>,
         server_message_rx: mpsc::Receiver<Message>,

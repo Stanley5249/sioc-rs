@@ -1,10 +1,11 @@
 //! Error types for Engine.IO operations.
 
-use crate::packet::{Frame, Handshake, Message, Packet};
 use bytestring::ByteString;
 use miette::Diagnostic;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
+
+use crate::packet::{Frame, Handshake, Message, Packet};
 
 /// Top-level error aggregator for `eioc`.
 #[derive(Debug, Error, Diagnostic)]
@@ -21,7 +22,8 @@ pub enum Error {
 /// Errors that occur during an active Engine.IO session.
 #[derive(Debug, Error, Diagnostic)]
 pub enum EngineError {
-    /// Sending a client frame to the transport task failed because the channel is closed.
+    /// Sending a client frame to the transport task failed because the channel
+    /// is closed.
     #[error("client frame channel closed")]
     #[diagnostic(
         code(eioc::engine::client_frame),
@@ -29,7 +31,8 @@ pub enum EngineError {
     )]
     ClientFrame(#[from] mpsc::error::SendError<Frame>),
 
-    /// Delivering a server message to the upper layer failed because its receiver is gone.
+    /// Delivering a server message to the upper layer failed because its
+    /// receiver is gone.
     #[error("server message channel closed")]
     #[diagnostic(
         code(eioc::engine::server_message),
@@ -66,7 +69,8 @@ pub enum EngineError {
     Server(Packet),
 }
 
-/// Errors that occur during Engine.IO connection setup and transport coordination.
+/// Errors that occur during Engine.IO connection setup and transport
+/// coordination.
 #[derive(Debug, Error, Diagnostic)]
 pub enum TransportError {
     /// A WebSocket transport error.
@@ -79,7 +83,8 @@ pub enum TransportError {
     #[diagnostic(transparent)]
     Polling(#[from] PollingError),
 
-    /// Sending a server frame to the engine task failed because the channel is closed.
+    /// Sending a server frame to the engine task failed because the channel is
+    /// closed.
     #[error("server frame channel closed")]
     #[diagnostic(
         code(eioc::transport::server_frame),

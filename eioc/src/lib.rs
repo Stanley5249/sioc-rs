@@ -7,7 +7,8 @@ pub mod polling;
 pub mod transport;
 pub mod websocket;
 
-/// The Engine.IO protocol version implemented by this crate (`EIO` query parameter).
+/// The Engine.IO protocol version implemented by this crate (`EIO` query
+/// parameter).
 pub const ENGINE_IO_VERSION: &str = "4";
 
 /// Convenience re-exports for common usage.

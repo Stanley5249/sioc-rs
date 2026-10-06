@@ -1,20 +1,21 @@
 //! WebSocket transport for Engine.IO v4.
 
-use crate::ENGINE_IO_VERSION;
-use crate::error::{TransportError, WebSocketError};
-use crate::packet::{Frame, Handshake, PROBE, Packet};
+use std::future::Future;
+
 use bytestring::ByteString;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, Stream, StreamExt, TryStreamExt};
-use std::future::Future;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
-use tokio_tungstenite::tungstenite::Error as TungsteniteError;
-use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
+use tokio_tungstenite::tungstenite::{Error as TungsteniteError, Message as WebSocketMessage};
 use tokio_tungstenite::{MaybeTlsStream, connect_async};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use url::Url;
+
+use crate::ENGINE_IO_VERSION;
+use crate::error::{TransportError, WebSocketError};
+use crate::packet::{Frame, Handshake, PROBE, Packet};
 
 /// A WebSocket connector that can open a stream from a [`Url`].
 pub trait WebSocketConnector: Send + 'static {
@@ -50,7 +51,8 @@ impl WebSocketConnector for () {
 /// An open WebSocket connection that carries Engine.IO [`Frame`]s.
 pub type WebSocketStream = tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-/// Converts a WebSocket text frame from the server into a [`ByteString`] without copying.
+/// Converts a WebSocket text frame from the server into a [`ByteString`]
+/// without copying.
 fn bytestring_from_utf8_bytes(utf8: tokio_tungstenite::tungstenite::Utf8Bytes) -> ByteString {
     // SAFETY: `tungstenite::Utf8Bytes` guarantees the inner `Bytes` is valid UTF-8.
     unsafe { ByteString::from_bytes_unchecked(utf8.into()) }
@@ -115,7 +117,8 @@ fn encode_frame(frame: Frame) -> WebSocketMessage {
     }
 }
 
-/// Builds the WebSocket URL by converting the scheme and appending EIO/transport/sid parameters.
+/// Builds the WebSocket URL by converting the scheme and appending
+/// EIO/transport/sid parameters.
 fn websocket_url(mut url: Url, sid: Option<&str>) -> Url {
     let scheme = match url.scheme() {
         "http" => Some("ws"),
@@ -142,7 +145,8 @@ fn websocket_url(mut url: Url, sid: Option<&str>) -> Url {
     url
 }
 
-/// Opens a [`WebSocketStream`], running the upgrade probe when `sid` is present.
+/// Opens a [`WebSocketStream`], running the upgrade probe when `sid` is
+/// present.
 ///
 /// # Errors
 ///
@@ -180,7 +184,8 @@ async fn send(stream: &mut WebSocketStream, frame: Frame) -> Result<(), WebSocke
     Ok(stream.send(encode_frame(frame)).await?)
 }
 
-/// Sends a probe `Ping` and expects a matching `Pong`, confirming the WebSocket path is live.
+/// Sends a probe `Ping` and expects a matching `Pong`, confirming the WebSocket
+/// path is live.
 #[tracing::instrument(level = "debug", skip_all)]
 async fn probe(stream: &mut WebSocketStream) -> Result<(), WebSocketError> {
     tracing::debug!("sent probe ping");
@@ -198,15 +203,17 @@ async fn probe(stream: &mut WebSocketStream) -> Result<(), WebSocketError> {
     Ok(())
 }
 
-/// Drives the WebSocket I/O until the engine closes `client_frame_rx` and the stream ends.
+/// Drives the WebSocket I/O until the engine closes `client_frame_rx` and the
+/// stream ends.
 ///
-/// When `handshake_tx` is `Some`, reads the first `Open` frame and forwards the handshake
-/// (direct WebSocket transport). When `None`, sends `Upgrade` immediately (polling upgrade path).
+/// When `handshake_tx` is `Some`, reads the first `Open` frame and forwards the
+/// handshake (direct WebSocket transport). When `None`, sends `Upgrade`
+/// immediately (polling upgrade path).
 ///
 /// Server and client frames flow independently. When the engine closes
 /// `client_frame_rx`, the socket closes and server frames flow until the server
-/// answers. If the server ends the stream first, drops `server_frame_tx` and discards
-/// client frames until the engine closes `client_frame_rx`.
+/// answers. If the server ends the stream first, drops `server_frame_tx` and
+/// discards client frames until the engine closes `client_frame_rx`.
 ///
 /// # Errors
 ///
@@ -249,7 +256,8 @@ pub async fn transport(
 }
 /// Forwards server frames to the engine until the stream ends.
 ///
-/// Returning drops `server_frame_tx`, which tells the engine the transport has finished.
+/// Returning drops `server_frame_tx`, which tells the engine the transport has
+/// finished.
 async fn websocket_to_server_frames(
     mut stream: SplitStream<WebSocketStream>,
     server_frame_tx: mpsc::Sender<Frame>,
@@ -269,8 +277,8 @@ async fn websocket_to_server_frames(
 /// Sends engine frames until the engine closes `client_frame_rx`, then sends
 /// the server a `Close` packet and closes the socket.
 ///
-/// If the stream ends first, discards frames until the engine closes `client_frame_rx`,
-/// because the closed socket cannot send them.
+/// If the stream ends first, discards frames until the engine closes
+/// `client_frame_rx`, because the closed socket cannot send them.
 async fn client_frames_to_websocket(
     mut sink: SplitSink<WebSocketStream, WebSocketMessage>,
     mut client_frame_rx: mpsc::Receiver<Frame>,
@@ -323,13 +331,14 @@ fn finish_websocket_write(result: Result<(), TungsteniteError>) -> Result<bool, 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use bytes::Bytes;
     use futures_util::{SinkExt, StreamExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::{mpsc, oneshot};
     use tokio_tungstenite::tungstenite::Message as WsMsg;
     use tokio_tungstenite::{MaybeTlsStream, accept_async, client_async};
+
+    use super::*;
 
     #[tokio::test]
     async fn writer_drains_after_reader_observes_peer_close() {

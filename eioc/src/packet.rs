@@ -2,12 +2,14 @@
 
 use std::time::Duration;
 
-use crate::error::PacketError;
 use bytes::Bytes;
 use bytestring::ByteString;
 use serde::Deserialize;
 
-/// Payload sent in the WebSocket upgrade probe ping and expected in the pong reply.
+use crate::error::PacketError;
+
+/// Payload sent in the WebSocket upgrade probe ping and expected in the pong
+/// reply.
 pub const PROBE: ByteString = ByteString::from_static("probe");
 
 /// Content exchanged between the Socket.IO and Engine.IO layers.
@@ -30,8 +32,9 @@ impl std::fmt::Display for Message {
 
 /// A wire-level frame exchanged with the transport layer.
 ///
-/// [`Frame::Packet`] carries a fully-encoded Engine.IO text packet (e.g. `"4hello"`).
-/// [`Frame::Binary`] carries a raw binary payload with no packet-type prefix.
+/// [`Frame::Packet`] carries a fully-encoded Engine.IO text packet (e.g.
+/// `"4hello"`). [`Frame::Binary`] carries a raw binary payload with no
+/// packet-type prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frame {
     /// A UTF-8 text frame (contains a complete Engine.IO packet).
@@ -67,7 +70,8 @@ impl From<Bytes> for Frame {
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Handshake {
-    /// Session identifier; sent as the `sid` query parameter in all subsequent requests.
+    /// Session identifier; sent as the `sid` query parameter in all subsequent
+    /// requests.
     pub sid: ByteString,
 
     /// Available transport upgrades (e.g. `["websocket"]`).
@@ -81,7 +85,8 @@ pub struct Handshake {
     #[serde(rename = "pingTimeout")]
     pub ping_timeout: u64,
 
-    /// Maximum bytes per chunk, used by the client to aggregate packets into payloads.
+    /// Maximum bytes per chunk, used by the client to aggregate packets into
+    /// payloads.
     #[serde(rename = "maxPayload")]
     pub max_payload: u64,
 }
@@ -105,7 +110,8 @@ pub enum Packet {
     Open(Handshake),
     /// `1`: The transport can be closed.
     Close,
-    /// `2`: Heartbeat from the server (client must reply with [`Packet::Pong`]).
+    /// `2`: Heartbeat from the server (client must reply with
+    /// [`Packet::Pong`]).
     Ping(ByteString),
     /// `3`: Heartbeat reply.
     Pong(ByteString),
@@ -160,7 +166,8 @@ impl Packet {
     ///
     /// # Errors
     ///
-    /// Returns an error if the byte string is empty, has an unrecognised type ID, or the payload is malformed.
+    /// Returns an error if the byte string is empty, has an unrecognised type
+    /// ID, or the payload is malformed.
     pub fn decode(bytes: &ByteString) -> Result<Self, PacketError> {
         let mut chars = bytes.chars();
 

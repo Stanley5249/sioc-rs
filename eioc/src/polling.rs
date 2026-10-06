@@ -1,19 +1,20 @@
 //! HTTP long-polling transport tasks for Engine.IO v4.
 
-use crate::ENGINE_IO_VERSION;
-use crate::error::{PollingError, TransportError, WebSocketError};
-use crate::packet::{Frame, Handshake, Packet};
-use crate::websocket::WebSocketConnector;
-use crate::websocket::{self, WebSocketStream};
+use std::pin::pin;
+
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use bytes::Bytes;
 use bytestring::ByteString;
 use reqwest::Client;
-use std::pin::pin;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use url::Url;
+
+use crate::ENGINE_IO_VERSION;
+use crate::error::{PollingError, TransportError, WebSocketError};
+use crate::packet::{Frame, Handshake, Packet};
+use crate::websocket::{self, WebSocketConnector, WebSocketStream};
 
 const SEPARATOR: char = '\x1e';
 
@@ -87,7 +88,8 @@ fn take_batch(
     (batch, None)
 }
 
-/// Builds the polling URL by appending the EIO version and transport parameters.
+/// Builds the polling URL by appending the EIO version and transport
+/// parameters.
 fn polling_url(mut base_url: Url) -> Url {
     base_url
         .query_pairs_mut()
@@ -143,12 +145,15 @@ async fn post(client: &Client, url: &Url, frames: &[Frame]) -> Result<(), Pollin
     Ok(())
 }
 
-/// Batches client frames into POST requests until `pause` fires or the engine closes `client_frame_rx`.
+/// Batches client frames into POST requests until `pause` fires or the engine
+/// closes `client_frame_rx`.
 ///
-/// When the engine closes `client_frame_rx`, posts a `Close` packet to end the session.
+/// When the engine closes `client_frame_rx`, posts a `Close` packet to end the
+/// session.
 ///
-/// Batches contain at most sixteen frames and respect the handshake's wire-byte limit. A single oversized frame
-/// travels alone, matching engine.io-client's batching behavior.
+/// Batches contain at most sixteen frames and respect the handshake's wire-byte
+/// limit. A single oversized frame travels alone, matching engine.io-client's
+/// batching behavior.
 #[tracing::instrument(level = "debug", skip_all)]
 async fn post_client_frames(
     client: &Client,
@@ -197,7 +202,8 @@ async fn post_client_frames(
     }
 }
 
-/// Forwards server frames to the engine until `pause` fires or the server sends `Close`.
+/// Forwards server frames to the engine until `pause` fires or the server sends
+/// `Close`.
 ///
 /// The `Close` packet itself stays here, because the transport ending is
 /// what tells the engine the session is over.
@@ -259,7 +265,8 @@ async fn poll(
     }
 }
 
-/// Polls until the session ends, or until `upgrade` connects and polling pauses.
+/// Polls until the session ends, or until `upgrade` connects and polling
+/// pauses.
 ///
 /// Returns the upgraded stream, or `None` if the session ended first. A failed
 /// upgrade falls back to long polling for the rest of the session.
@@ -306,10 +313,12 @@ async fn poll_until_upgraded(
     }
 }
 
-/// Runs the full polling transport lifecycle: handshake, GET/POST loops, and optional WebSocket upgrade.
+/// Runs the full polling transport lifecycle: handshake, GET/POST loops, and
+/// optional WebSocket upgrade.
 ///
-/// Finishes once the engine closes `client_frame_rx`. If the server ends the session first,
-/// drops `server_frame_tx` and discards client frames until the engine closes `client_frame_rx`.
+/// Finishes once the engine closes `client_frame_rx`. If the server ends the
+/// session first, drops `server_frame_tx` and discards client frames until the
+/// engine closes `client_frame_rx`.
 ///
 /// # Errors
 ///
@@ -472,6 +481,7 @@ mod tests {
         assert_eq!(server.await.unwrap(), ["4aaaa\x1e4bbbb", "4cccc", "1"]);
     }
     use std::time::Duration;
+
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -479,7 +489,8 @@ mod tests {
         ByteString::from_static(s)
     }
 
-    /// Answers every HTTP request with `body` after `delay`, or never when `body` is `None`.
+    /// Answers every HTTP request with `body` after `delay`, or never when
+    /// `body` is `None`.
     async fn http_server(body: Option<&'static str>, delay: Duration) -> Url {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();

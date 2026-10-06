@@ -1,19 +1,22 @@
 //! Engine.IO transport coordination.
 //!
 //! Manages the transport lifecycle: HTTP long-polling handshake, optional
-//! upgrade to WebSocket, and shutdown once the engine closes the transport channel.
+//! upgrade to WebSocket, and shutdown once the engine closes the transport
+//! channel.
+
+use tokio::sync::{mpsc, oneshot};
+use url::Url;
 
 use crate::error::TransportError;
 use crate::packet::{Frame, Handshake};
 use crate::polling;
 use crate::websocket::{self, WebSocketConnector};
-use tokio::sync::{mpsc, oneshot};
-use url::Url;
 
 /// Selects which transport to use when opening an Engine.IO connection.
 #[derive(Debug, Default)]
 pub enum TransportStrategy {
-    /// Start with HTTP long-polling, then upgrade to WebSocket when the server offers it.
+    /// Start with HTTP long-polling, then upgrade to WebSocket when the server
+    /// offers it.
     #[default]
     Polling,
     /// Connect directly over WebSocket, skipping the polling handshake.
@@ -65,11 +68,12 @@ impl TransportStrategy {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::error::TransportError;
     use tokio::sync::{mpsc, oneshot};
     use tokio_tungstenite::tungstenite::Error as TungsteniteError;
     use url::Url;
+
+    use super::*;
+    use crate::error::TransportError;
 
     #[test]
     fn transport_strategy_default_is_polling() {
