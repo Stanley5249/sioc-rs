@@ -29,7 +29,7 @@ The recipe keeps the server running on `127.0.0.1:3000`. In a second terminal, r
 just examples::quick-start
 ```
 
-Stop the server with Ctrl+C after the client finishes. CI runs protocol and pressure tests through `just test-servers`.
+Stop the server with Ctrl+C after the client finishes. CI runs protocol and pressure tests through `just test-e2e`.
 
 Each side logs only the events it receives, so every event appears once, with an arrow pointing at the receiver:
 

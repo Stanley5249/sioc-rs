@@ -25,7 +25,7 @@ convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 "examples/**" = ["INP001"]  # standalone scripts, not packages
-"sioc/tests/servers/**" = ["INP001"]  # standalone reference servers
+"sioc/tests/fixtures/**" = ["INP001"]  # standalone reference servers
 
 [tool.pyrefly]
 preset = "strict"

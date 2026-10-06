@@ -11,7 +11,7 @@ mod examples
 rustfmt_toolchain := "nightly-2026-07-20"
 
 # Run the local merge gate.
-ci: fmt-check _ci-lint test test-servers doc deny
+ci: fmt-check _ci-lint test test-e2e doc deny
 
 # The linters read disjoint sources. Cargo work stays in order, because cargo
 # serializes on the target directory lock anyway.
@@ -58,8 +58,8 @@ test *args:
     cargo test --locked --workspace --doc {{ args }}
 
 # Run the end-to-end tests against the TypeScript reference server.
-test-servers *args:
-    cargo nextest run --locked --workspace --all-targets --run-ignored only -E 'binary(servers)' {{ args }}
+test-e2e *args:
+    cargo nextest run --locked --workspace --all-targets --run-ignored only -E 'binary(e2e)' {{ args }}
 
 # Check documentation with warnings denied.
 [env("RUSTDOCFLAGS", "-D warnings")]

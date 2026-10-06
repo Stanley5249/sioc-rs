@@ -1,5 +1,5 @@
 //! End-to-end tests against the TypeScript reference server, run through
-//! `just test-servers`.
+//! `just test-e2e`.
 //!
 //! Each test starts its own server and runs its scenario over every transport
 //! and channel capacity.
@@ -64,7 +64,7 @@ impl Server {
     async fn start() -> Self {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let mut child = Command::new("bun")
-            .arg("sioc/tests/servers/server.ts")
+            .arg("sioc/tests/fixtures/server.ts")
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -131,7 +131,7 @@ async fn finish(client: Client, tx: SocketSender, mut rx: SocketReceiver) {
 
 /// The server floods items while the client answers each with `seen`.
 #[tokio::test]
-#[ignore = "requires bun; run just test-servers"]
+#[ignore = "requires bun; run just test-e2e"]
 async fn flood_and_count() {
     run(&PRESSURE, async |server: &Server, transport, capacity| {
         let client = server.client(transport, capacity);
@@ -158,7 +158,7 @@ async fn flood_and_count() {
 
 /// A separate task keeps sending while the receive direction fills up.
 #[tokio::test]
-#[ignore = "requires bun; run just test-servers"]
+#[ignore = "requires bun; run just test-e2e"]
 async fn echo_while_receiving_full() {
     run(&PRESSURE, async |server: &Server, transport, capacity| {
         let client = server.client(transport, capacity);
@@ -188,7 +188,7 @@ async fn echo_while_receiving_full() {
 
 /// Dropping the only sender mid-flood still ends the session.
 #[tokio::test]
-#[ignore = "requires bun; run just test-servers"]
+#[ignore = "requires bun; run just test-e2e"]
 async fn drop_sender_mid_flood() {
     run(&PRESSURE, async |server: &Server, transport, capacity| {
         let client = server.client(transport, capacity);
@@ -205,7 +205,7 @@ async fn drop_sender_mid_flood() {
 
 /// A binary event comes back both as an event and as its ack.
 #[tokio::test]
-#[ignore = "requires bun; run just test-servers"]
+#[ignore = "requires bun; run just test-e2e"]
 async fn binary_roundtrip() {
     run(&ORDINARY, async |server: &Server, transport, capacity| {
         let client = server.client(transport, capacity);
@@ -229,7 +229,7 @@ async fn binary_roundtrip() {
 
 /// Leaving one namespace keeps the session, and the server sees the leave.
 #[tokio::test]
-#[ignore = "requires bun; run just test-servers"]
+#[ignore = "requires bun; run just test-e2e"]
 async fn client_disconnect_notifies_observer() {
     run(&ORDINARY, async |server: &Server, transport, capacity| {
         let client = server.client(transport, capacity);
@@ -248,7 +248,7 @@ async fn client_disconnect_notifies_observer() {
 
 /// A server-side disconnect closes the namespace and its senders.
 #[tokio::test]
-#[ignore = "requires bun; run just test-servers"]
+#[ignore = "requires bun; run just test-e2e"]
 async fn kick_closes_namespace() {
     run(&ORDINARY, async |server: &Server, transport, capacity| {
         let client = server.client(transport, capacity);
@@ -267,7 +267,7 @@ async fn kick_closes_namespace() {
 
 /// A refused namespace closes, and the session lets the client try again.
 #[tokio::test]
-#[ignore = "requires bun; run just test-servers"]
+#[ignore = "requires bun; run just test-e2e"]
 async fn connect_error_closes_namespace() {
     run(&ORDINARY, async |server: &Server, transport, capacity| {
         let client = server.client(transport, capacity);
@@ -290,7 +290,7 @@ async fn connect_error_closes_namespace() {
 
 /// The server asks the client back, and the client's ack reaches it.
 #[tokio::test]
-#[ignore = "requires bun; run just test-servers"]
+#[ignore = "requires bun; run just test-e2e"]
 async fn server_ack_reaches_server() {
     run(&ORDINARY, async |server: &Server, transport, capacity| {
         let client = server.client(transport, capacity);

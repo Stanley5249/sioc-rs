@@ -1,5 +1,5 @@
 /**
- * Reference Socket.IO server for the end-to-end tests in `sioc/tests/servers.rs`.
+ * Reference Socket.IO server for the end-to-end tests in `sioc/tests/e2e.rs`.
  */
 
 import { createServer } from "node:http";
