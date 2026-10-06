@@ -173,7 +173,7 @@ while let Some(event) = rx.listen::<ChatEvent>().await? {
 
 ## Status
 
-Early development. Expect breaking changes. Benchmarks and test coverage are not yet comprehensive. This does not attempt to pass the JavaScript Socket.IO test suite.
+Early development. Expect breaking changes. End-to-end tests run against the reference JavaScript server, and benchmarks are not yet in place.
 
 ## Comparison
 
@@ -199,6 +199,16 @@ Server and client use fundamentally different architectures, so `socketioxide`'s
 [`quick-start`](examples/quick-start) is a minimal chat client paired with a JavaScript Socket.IO server.
 
 [`generals-io`](examples/generals-io) is the client for [generals.io](https://generals.io), the online strategy game that motivated this crate.
+
+## Development
+
+Requirements:
+
+- [just](https://just.systems/man/en/packages.html)
+- [Rust](https://rustup.rs/) stable channel with the nightly `rustfmt`
+- [cargo-nextest](https://nexte.st/docs/installation/pre-built-binaries/)
+- [cargo-deny](https://embarkstudios.github.io/cargo-deny/cli/index.html)
+- [Bun](https://bun.sh/docs/installation) for end-to-end tests.
 
 ## Origin
 
