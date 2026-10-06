@@ -1,7 +1,7 @@
 //! Server acknowledgement types.
 
 use serde::Deserialize;
-use sioc::prelude::{AckType, DeserializePayload};
+use sioc::prelude::*;
 
 /// Ack for `get_username`: returns the username or null.
 #[derive(Debug, AckType, DeserializePayload)]

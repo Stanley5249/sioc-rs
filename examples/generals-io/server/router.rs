@@ -1,7 +1,7 @@
 //! Server-to-client event router.
 
 use miette::Result;
-use sioc::prelude::{DeserializePayload, Event, EventRouter, EventType};
+use sioc::prelude::*;
 
 use crate::server::event::{
     AfkWarning, BigTeamUpdate, ChatColorChange, ChatRedaction, DisableRematch, DisableStayParty,

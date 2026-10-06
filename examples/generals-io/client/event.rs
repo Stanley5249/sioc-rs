@@ -1,7 +1,7 @@
 //! Client-to-server event definitions.
 
 use serde::{Deserialize, Serialize};
-use sioc::prelude::{EventType, SerializePayload};
+use sioc::prelude::*;
 
 use crate::constants::ForceFlag;
 use crate::server::ack::{

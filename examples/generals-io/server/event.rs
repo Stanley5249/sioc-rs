@@ -2,7 +2,7 @@
 
 use miette::Diagnostic;
 use serde::Deserialize;
-use sioc::prelude::{DeserializePayload, EventType};
+use sioc::prelude::*;
 use thiserror::Error;
 
 use crate::client::event::CustomGameOptions;

@@ -4,7 +4,7 @@
 use bytestring::ByteString;
 use serde::Deserialize;
 use sioc::error::EventError;
-use sioc::prelude::{DeserializePayload, DynEvent, Event, EventHandler, EventType};
+use sioc::prelude::*;
 
 // Event types for demonstration
 #[derive(Debug, EventType, DeserializePayload)]

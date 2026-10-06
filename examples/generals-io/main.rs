@@ -23,7 +23,7 @@ mod session;
 
 use bytestring::ByteString;
 use miette::{IntoDiagnostic, Result, WrapErr};
-use sioc::prelude::{ClientBuilder, SocketSender, TransportStrategy};
+use sioc::prelude::*;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 use url::Url;

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use sioc::error::Result;
-use sioc::prelude::SocketSender;
+use sioc::prelude::*;
 
 use crate::client::event::{
     AcceptFriendRequest, Attack, Cancel, CancelFriendRequest, CheckModeration, ClearMoves,
