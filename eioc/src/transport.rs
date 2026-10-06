@@ -9,8 +9,7 @@ use url::Url;
 
 use crate::error::TransportError;
 use crate::packet::{Frame, Handshake};
-use crate::polling;
-use crate::websocket::{self, WebSocketConnector};
+use crate::websocket::WebSocketConnector;
 
 /// Selects which transport to use when opening an Engine.IO connection.
 #[derive(Debug, Default)]
@@ -44,7 +43,7 @@ impl TransportStrategy {
     {
         match self {
             TransportStrategy::Polling => {
-                polling::transport(
+                crate::polling::transport(
                     http_client,
                     base_url,
                     connector,
@@ -55,10 +54,15 @@ impl TransportStrategy {
                 .await
             }
             TransportStrategy::WebSocket => {
-                let stream = websocket::connect(base_url, None, connector).await?;
+                let stream = crate::websocket::connect(base_url, None, connector).await?;
 
-                websocket::transport(stream, Some(handshake_tx), server_frame_tx, client_frame_rx)
-                    .await?;
+                crate::websocket::transport(
+                    stream,
+                    Some(handshake_tx),
+                    server_frame_tx,
+                    client_frame_rx,
+                )
+                .await?;
 
                 Ok(())
             }

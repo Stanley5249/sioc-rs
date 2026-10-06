@@ -11,7 +11,7 @@ use url::Url;
 
 use crate::ack::AckType;
 use crate::error::{ClientBuilderError, ClientError, ManagerError, PayloadError, SocketError};
-use crate::manager::{self, ConnectRequest};
+use crate::manager::client_packet::ConnectRequest;
 use crate::marker::{AckId, AckMarker, BinaryMarker};
 use crate::packet::{ClientPacket, DynEvent, ServerPacket};
 
@@ -226,7 +226,8 @@ where
 
         let (client_message_tx, client_message_rx) = mpsc::channel(self.channels.engine);
 
-        let manager_future = manager::run(connect_request_rx, server_message_rx, client_message_tx);
+        let manager_future =
+            crate::manager::session::run(connect_request_rx, server_message_rx, client_message_tx);
 
         let engine_future = eioc::engine::connect(
             url,

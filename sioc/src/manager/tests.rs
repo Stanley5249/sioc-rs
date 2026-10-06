@@ -8,9 +8,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::{ConnectRequest, run};
 use crate::client::SocketSender;
 use crate::error::{ManagerError, SocketError};
+use crate::manager::client_packet::ConnectRequest;
 use crate::packet::{ClientPacket, DynAck, ServerPacket};
 
 const CONNECT_RESPONSE: &str = "0{\"sid\":\"test\"}";
@@ -28,7 +28,7 @@ fn spawn() -> Harness {
     let (connect_request_tx, connect_request_rx) = mpsc::channel(32);
     let (server_message_tx, server_message_rx) = mpsc::channel(32);
     let (client_message_tx, client_message_rx) = mpsc::channel(32);
-    let manager = tokio::spawn(run(
+    let manager = tokio::spawn(crate::manager::session::run(
         connect_request_rx,
         server_message_rx,
         client_message_tx,

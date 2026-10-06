@@ -10,8 +10,8 @@ use futures_util::stream::FuturesUnordered;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use super::routes::Routes;
 use crate::error::{ManagerError, SocketError};
+use crate::manager::routes::Routes;
 use crate::packet::{ClientPacket, Packet, ServerPacket};
 
 /// A namespace opened by [`Client::connect`](crate::client::Client::connect).

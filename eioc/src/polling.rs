@@ -14,7 +14,7 @@ use url::Url;
 use crate::ENGINE_IO_VERSION;
 use crate::error::{PollingError, TransportError, WebSocketError};
 use crate::packet::{Frame, Handshake, Packet};
-use crate::websocket::{self, WebSocketConnector, WebSocketStream};
+use crate::websocket::{WebSocketConnector, WebSocketStream};
 
 const SEPARATOR: char = '\x1e';
 
@@ -354,7 +354,7 @@ where
         .map_err(TransportError::Handshake)?;
 
     let stream = if can_upgrade {
-        let upgrade = websocket::connect(base_url, Some(&sid), connector);
+        let upgrade = crate::websocket::connect(base_url, Some(&sid), connector);
 
         poll_until_upgraded(
             &client,
@@ -382,7 +382,7 @@ where
     if let Some(stream) = stream {
         tracing::debug!("paused polling transport");
 
-        return websocket::transport(stream, None, server_frame_tx, client_frame_rx).await;
+        return crate::websocket::transport(stream, None, server_frame_tx, client_frame_rx).await;
     }
 
     // The engine may queue frames before it learns the server ended the

@@ -3,10 +3,9 @@
 use eioc::prelude::Message;
 use tokio::sync::mpsc;
 
-use super::client_packet::{self, ConnectRequest};
-use super::routes::Routes;
-use super::server_message;
 use crate::error::ManagerError;
+use crate::manager::client_packet::ConnectRequest;
+use crate::manager::routes::Routes;
 
 /// Routes packets between the namespace handles and the engine until the
 /// session ends.
@@ -34,12 +33,12 @@ pub async fn run(
     let (connected_generation_tx, connected_generation_rx) = mpsc::unbounded_channel();
 
     tokio::try_join!(
-        server_message::server_messages_to_packets(
+        crate::manager::server_message::server_messages_to_packets(
             server_message_rx,
             &routes,
             connected_generation_tx
         ),
-        client_packet::client_packets_to_messages(
+        crate::manager::client_packet::client_packets_to_messages(
             connect_request_rx,
             connected_generation_rx,
             &routes,

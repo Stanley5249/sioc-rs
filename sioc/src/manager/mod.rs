@@ -4,12 +4,10 @@
 //! [`server_message`] delivers what the server sends to each namespace, and
 //! [`client_packet`] sends what the namespace handles ask for.
 
-mod client_packet;
-mod routes;
-mod server_message;
-mod session;
+pub mod client_packet;
+pub mod routes;
+pub mod server_message;
+pub mod session;
+
 #[cfg(test)]
 mod tests;
-
-pub use client_packet::ConnectRequest;
-pub use session::run;

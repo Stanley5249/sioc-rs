@@ -5,8 +5,8 @@ use bytestring::ByteString;
 use eioc::prelude::Message;
 use tokio::sync::mpsc;
 
-use super::routes::Routes;
 use crate::error::{ManagerError, PacketError};
+use crate::manager::routes::Routes;
 use crate::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Packet, ServerPacket};
 
 /// Delivers server packets to the namespace receivers until the engine closes
