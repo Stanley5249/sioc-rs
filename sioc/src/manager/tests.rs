@@ -1,7 +1,7 @@
-use super::SocketSender;
+use super::{ConnectRequest, run};
+use crate::client::SocketSender;
 use crate::error::ManagerError;
 use crate::error::SocketError;
-use crate::manager::{ConnectRequest, run};
 use crate::packet::{ClientPacket, DynAck, ServerPacket};
 use bytes::Bytes;
 use bytestring::ByteString;
@@ -76,10 +76,7 @@ impl Harness {
             server_packet_tx,
             reply_tx,
         };
-        let client_packet_tx = SocketSender {
-            client_packet_tx,
-            closed,
-        };
+        let client_packet_tx = SocketSender::from_parts(client_packet_tx, closed);
         self.connect_request_tx.send(connect_request).await.unwrap();
         assert!(self.text().await.starts_with('0'));
         reply_rx.await.unwrap().unwrap();
@@ -192,11 +189,11 @@ async fn events_wait_for_server_connect_in_order() {
     let mut h = spawn();
     let (client_packet_tx, mut server_packet_rx) = h.open("/").await;
     client_packet_tx
-        .send(event(r#"["a"]"#, None))
+        .send_packet(event(r#"["a"]"#, None))
         .await
         .unwrap();
     client_packet_tx
-        .send(event(r#"["b"]"#, None))
+        .send_packet(event(r#"["b"]"#, None))
         .await
         .unwrap();
     assert_quiet(&mut h.client_message_rx).await;
@@ -210,7 +207,7 @@ async fn events_wait_for_server_connect_in_order() {
     assert_eq!(&*h.text().await, r#"2["b"]"#);
 
     client_packet_tx
-        .send(event(r#"["c"]"#, None))
+        .send_packet(event(r#"["c"]"#, None))
         .await
         .unwrap();
     assert_eq!(&*h.text().await, r#"2["c"]"#);
@@ -226,7 +223,7 @@ async fn ack_roundtrip() {
 
     let (ack_tx, ack_rx) = oneshot::channel();
     client_packet_tx
-        .send(event(r#"["greet"]"#, Some(ack_tx)))
+        .send_packet(event(r#"["greet"]"#, Some(ack_tx)))
         .await
         .unwrap();
     assert_eq!(&*h.text().await, r#"20["greet"]"#);
@@ -245,7 +242,7 @@ async fn binary_ack_reassembly() {
 
     let (ack_tx, ack_rx) = oneshot::channel();
     client_packet_tx
-        .send(event(r#"["greet"]"#, Some(ack_tx)))
+        .send_packet(event(r#"["greet"]"#, Some(ack_tx)))
         .await
         .unwrap();
     h.text().await;
@@ -293,7 +290,7 @@ async fn binary_event_sends_attachments() {
         ack_tx: None,
         attachments: Some(vec![Bytes::from_static(b"\x01\x02")]),
     };
-    client_packet_tx.send(client_packet).await.unwrap();
+    client_packet_tx.send_packet(client_packet).await.unwrap();
     assert_eq!(&*h.text().await, r#"51-["img"]"#);
     assert_eq!(h.binary().await, Bytes::from_static(b"\x01\x02"));
     h.close_server().await.unwrap();
@@ -308,7 +305,7 @@ async fn ack_is_not_buffered() {
         id: 42,
         attachments: None,
     };
-    client_packet_tx.send(client_packet).await.unwrap();
+    client_packet_tx.send_packet(client_packet).await.unwrap();
     assert_eq!(&*h.text().await, "342[true]");
     h.close_server().await.unwrap();
 }
@@ -322,7 +319,7 @@ async fn binary_ack_sends_attachments() {
         id: 7,
         attachments: Some(vec![Bytes::from_static(b"\xCA\xFE")]),
     };
-    client_packet_tx.send(client_packet).await.unwrap();
+    client_packet_tx.send_packet(client_packet).await.unwrap();
     assert_eq!(&*h.text().await, "61-7[true]");
     assert_eq!(h.binary().await, Bytes::from_static(b"\xCA\xFE"));
     h.close_server().await.unwrap();
@@ -345,7 +342,9 @@ async fn server_disconnect_ends_receiver_and_handles() {
     // The handles closed before the receiver saw the DISCONNECT.
     client_packet_tx.closed().await;
     assert!(matches!(
-        client_packet_tx.send(event(r#"["late"]"#, None)).await,
+        client_packet_tx
+            .send_packet(event(r#"["late"]"#, None))
+            .await,
         Err(SocketError::Closed)
     ));
 
@@ -366,7 +365,9 @@ async fn connect_error_closes_namespace() {
     ));
     assert!(server_packet_rx.recv().await.is_none());
     assert!(matches!(
-        client_packet_tx.send(event(r#"["late"]"#, None)).await,
+        client_packet_tx
+            .send_packet(event(r#"["late"]"#, None))
+            .await,
         Err(SocketError::Closed)
     ));
 
@@ -388,7 +389,7 @@ async fn client_close_sends_earlier_packets_first() {
     server_packet_rx.recv().await.unwrap();
 
     client_packet_tx
-        .send(event(r#"["a"]"#, None))
+        .send_packet(event(r#"["a"]"#, None))
         .await
         .unwrap();
     client_packet_tx.disconnect();
@@ -411,8 +412,11 @@ async fn reopened_namespace_ignores_old_handles() {
     h.server(CONNECT_RESPONSE).await;
     new_rx.recv().await.unwrap();
 
-    old_tx.send(event(r#"["old"]"#, None)).await.unwrap_err();
-    new_tx.send(event(r#"["new"]"#, None)).await.unwrap();
+    old_tx
+        .send_packet(event(r#"["old"]"#, None))
+        .await
+        .unwrap_err();
+    new_tx.send_packet(event(r#"["new"]"#, None)).await.unwrap();
     assert_eq!(&*h.text().await, r#"2["new"]"#);
     assert_quiet(&mut h.client_message_rx).await;
     h.close_server().await.unwrap();
@@ -467,7 +471,7 @@ async fn dropped_receiver_discards_events() {
     h.server(r#"2["ignored"]"#).await;
 
     client_packet_tx
-        .send(event(r#"["still"]"#, None))
+        .send_packet(event(r#"["still"]"#, None))
         .await
         .unwrap();
     assert_eq!(&*h.text().await, r#"2["still"]"#);
@@ -508,7 +512,7 @@ async fn engine_close_ends_receivers_and_pending_acks() {
 
     let (ack_tx, ack_rx) = oneshot::channel();
     client_packet_tx
-        .send(event(r#"["greet"]"#, Some(ack_tx)))
+        .send_packet(event(r#"["greet"]"#, Some(ack_tx)))
         .await
         .unwrap();
     h.text().await;
@@ -528,7 +532,7 @@ async fn emits_flow_while_receiver_is_full() {
     }
 
     client_packet_tx
-        .send(event(r#"["out"]"#, None))
+        .send_packet(event(r#"["out"]"#, None))
         .await
         .unwrap();
     let text = tokio::time::timeout(Duration::from_secs(5), h.text())
@@ -547,7 +551,7 @@ async fn repeated_server_connect_flushes_once() {
     let mut h = spawn();
     let (client_packet_tx, _server_packet_rx) = h.open("/").await;
     client_packet_tx
-        .send(event(r#"["a"]"#, None))
+        .send_packet(event(r#"["a"]"#, None))
         .await
         .unwrap();
     for _ in 0..3 {

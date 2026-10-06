@@ -1,6 +1,6 @@
 //! Delivers what the server sends to each namespace.
 
-use super::Routes;
+use super::routes::Routes;
 use crate::error::{ManagerError, PacketError};
 use crate::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Packet, ServerPacket};
 use bytes::Bytes;
@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 /// Delivers server packets to the namespace receivers until the engine closes `server_message_rx`.
 ///
 /// Waiting on a full receiver holds up only this direction.
-pub(super) async fn server_messages_to_packets(
+pub async fn server_messages_to_packets(
     mut server_message_rx: mpsc::Receiver<Message>,
     routes: &Routes,
     connected_generation_tx: mpsc::UnboundedSender<u64>,

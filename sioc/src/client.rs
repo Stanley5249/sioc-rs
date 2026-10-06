@@ -347,6 +347,30 @@ pub struct SocketSender {
     closed: CancellationToken,
 }
 
+#[cfg(test)]
+impl SocketSender {
+    /// Wraps raw channel ends, so manager tests can drive a namespace without a client.
+    #[must_use]
+    pub fn from_parts(
+        client_packet_tx: mpsc::Sender<ClientPacket>,
+        closed: CancellationToken,
+    ) -> Self {
+        Self {
+            client_packet_tx,
+            closed,
+        }
+    }
+
+    /// Sends one raw client packet, as the public methods do.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SocketError::Closed`] once the namespace is closed.
+    pub async fn send_packet(&self, packet: ClientPacket) -> Result<(), SocketError> {
+        self.send(packet).await
+    }
+}
+
 impl SocketSender {
     async fn send(&self, packet: ClientPacket) -> Result<(), SocketError> {
         if self.closed.is_cancelled() {
@@ -678,8 +702,3 @@ mod tests {
         let _ = &*receiver;
     }
 }
-
-// Namespace routing tests also exercise the private sender state.
-#[cfg(test)]
-#[path = "manager/tests.rs"]
-mod manager_tests;

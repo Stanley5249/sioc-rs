@@ -1,16 +1,28 @@
 //! Sends what the namespace handles ask for.
 
-use super::{ConnectRequest, Routes};
-use crate::error::ManagerError;
-use crate::packet::{ClientPacket, Packet};
+use super::routes::Routes;
+use crate::error::{ManagerError, SocketError};
+use crate::packet::{ClientPacket, Packet, ServerPacket};
 use bytes::Bytes;
 use bytestring::ByteString;
 use eioc::prelude::Message;
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use std::collections::HashMap;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
+
+/// A namespace opened by [`Client::connect`](crate::client::Client::connect).
+#[derive(Debug)]
+pub struct ConnectRequest {
+    pub ns: ByteString,
+    pub payload: ByteString,
+    pub client_packet_rx: mpsc::Receiver<ClientPacket>,
+    /// Cancelled once the namespace closes, by either side.
+    pub closed: CancellationToken,
+    pub server_packet_tx: mpsc::Sender<ServerPacket>,
+    pub reply_tx: oneshot::Sender<Result<(), SocketError>>,
+}
 
 /// The client-packet loop's view of one namespace generation.
 ///
@@ -56,7 +68,7 @@ async fn recv_client_packet(
 ///
 /// Closes the session once the client handle and every namespace are gone, so
 /// having no namespace at startup or between namespaces keeps it open.
-pub(super) async fn client_packets_to_messages(
+pub async fn client_packets_to_messages(
     mut connect_request_rx: mpsc::Receiver<ConnectRequest>,
     mut connected_generation_rx: mpsc::UnboundedReceiver<u64>,
     routes: &Routes,
