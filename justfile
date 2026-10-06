@@ -74,10 +74,10 @@ doc *args:
 deny *args:
     cargo deny --locked check {{ args }}
 
-# Check the minimum supported compiler; dev targets use stable Rust.
+# Check every target with the minimum supported compiler.
 [arg("toolchain", long, help="Rust toolchain to check with")]
 msrv toolchain="1.88" *args:
-    cargo +{{ toolchain }} check --locked --workspace {{ args }}
+    cargo +{{ toolchain }} check --locked --workspace --all-targets {{ args }}
 
 # Generate an LCOV report; requires cargo-llvm-cov and llvm-tools-preview.
 coverage *args:
