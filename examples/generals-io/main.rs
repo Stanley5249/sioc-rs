@@ -70,7 +70,9 @@ async fn main() -> Result<()> {
     match std::env::var("GENERALS_IO_MODE").ok().as_deref() {
         None | Some("private") => {}
         Some("1v1") => session = session.with_mode(GameMode::OneVsOne),
-        Some(other) => miette::bail!("GENERALS_IO_MODE must be private or 1v1, not {other}"),
+        Some(other) => {
+            miette::bail!("GENERALS_IO_MODE must be private or 1v1, not {other}");
+        }
     }
 
     tokio::try_join!(session.run(), disconnect(socket_tx))?;
