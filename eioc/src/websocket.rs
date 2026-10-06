@@ -1,55 +1,18 @@
 //! WebSocket transport for Engine.IO v4.
 
-use std::future::Future;
-
 use bytestring::ByteString;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, Stream, StreamExt, TryStreamExt};
-use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::{Error as TungsteniteError, Message as WebSocketMessage};
-use tokio_tungstenite::{MaybeTlsStream, connect_async};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use url::Url;
 
 use crate::ENGINE_IO_VERSION;
+use crate::connector::{WebSocketConnector, WebSocketStream};
 use crate::error::{TransportError, WebSocketError};
 use crate::packet::{Frame, Handshake, PROBE, Packet};
-
-/// A WebSocket connector that can open a stream from a [`Url`].
-pub trait WebSocketConnector: Send + 'static {
-    /// Opens a WebSocket connection for the provided [`Url`].
-    fn connect(
-        self,
-        url: Url,
-    ) -> impl Future<Output = Result<WebSocketStream, TungsteniteError>> + Send;
-}
-
-impl<F, Fut> WebSocketConnector for F
-where
-    F: FnOnce(Url) -> Fut + Send + 'static,
-    Fut: Future<Output = Result<WebSocketStream, TungsteniteError>> + Send + 'static,
-{
-    fn connect(
-        self,
-        url: Url,
-    ) -> impl Future<Output = Result<WebSocketStream, TungsteniteError>> + Send {
-        self(url)
-    }
-}
-
-/// Opens a plain `tokio-tungstenite` WebSocket connection with no custom TLS
-/// or header configuration.
-impl WebSocketConnector for () {
-    async fn connect(self, url: Url) -> Result<WebSocketStream, TungsteniteError> {
-        let (stream, _) = connect_async(url).await?;
-        Ok(stream)
-    }
-}
-
-/// An open WebSocket connection that carries Engine.IO [`Frame`]s.
-pub type WebSocketStream = tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// Converts a WebSocket text frame from the server into a [`ByteString`]
 /// without copying.

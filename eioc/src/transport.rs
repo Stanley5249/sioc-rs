@@ -7,9 +7,9 @@
 use tokio::sync::{mpsc, oneshot};
 use url::Url;
 
+use crate::connector::WebSocketConnector;
 use crate::error::TransportError;
 use crate::packet::{Frame, Handshake};
-use crate::websocket::WebSocketConnector;
 
 /// Selects which transport to use when opening an Engine.IO connection.
 #[derive(Debug, Default)]

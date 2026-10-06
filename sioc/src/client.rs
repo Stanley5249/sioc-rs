@@ -1,8 +1,8 @@
 //! Socket.IO client and namespace handles.
 
 use bytestring::ByteString;
+use eioc::connector::WebSocketConnector;
 use eioc::transport::TransportStrategy;
-use eioc::websocket::WebSocketConnector;
 use futures_util::TryFutureExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;

@@ -12,9 +12,9 @@ use tracing::Instrument;
 use url::Url;
 
 use crate::ENGINE_IO_VERSION;
+use crate::connector::{WebSocketConnector, WebSocketStream};
 use crate::error::{PollingError, TransportError, WebSocketError};
 use crate::packet::{Frame, Handshake, Packet};
-use crate::websocket::{WebSocketConnector, WebSocketStream};
 
 const RECORD_SEPARATOR: char = '\x1e';
 

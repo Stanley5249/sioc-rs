@@ -5,10 +5,10 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 use url::Url;
 
+use crate::connector::WebSocketConnector;
 use crate::error::{EngineError, Error};
 use crate::packet::{Frame, Handshake, Message, Packet};
 use crate::transport::TransportStrategy;
-use crate::websocket::WebSocketConnector;
 
 /// Drives the engine protocol and transport concurrently until the session
 /// ends.
