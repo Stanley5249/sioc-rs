@@ -55,7 +55,8 @@ where
         handshake_rx,
     );
 
-    let transport_future = strategy.run(
+    let transport_future = crate::transport::open(
+        strategy,
         url,
         http_client,
         websocket_connector,

@@ -22,49 +22,47 @@ pub enum TransportStrategy {
     WebSocket,
 }
 
-impl TransportStrategy {
-    /// Runs the transport lifecycle to completion.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the transport encounters a protocol or I/O failure.
-    pub async fn run<C>(
-        self,
-        base_url: Url,
-        http_client: reqwest::Client,
-        connector: C,
-        handshake_tx: oneshot::Sender<Handshake>,
-        server_frame_tx: mpsc::Sender<Frame>,
-        client_frame_rx: mpsc::Receiver<Frame>,
-    ) -> Result<(), TransportError>
-    where
-        C: WebSocketConnector + Send + 'static,
-    {
-        match self {
-            TransportStrategy::Polling => {
-                crate::polling::transport(
-                    http_client,
-                    base_url,
-                    connector,
-                    handshake_tx,
-                    server_frame_tx,
-                    client_frame_rx,
-                )
-                .await
-            }
-            TransportStrategy::WebSocket => {
-                let stream = crate::websocket::connect(base_url, None, connector).await?;
+/// Opens a transport with `strategy` and runs it until the session ends.
+///
+/// # Errors
+///
+/// Returns an error if the transport encounters a protocol or I/O failure.
+pub async fn open<C>(
+    strategy: TransportStrategy,
+    base_url: Url,
+    http_client: reqwest::Client,
+    connector: C,
+    handshake_tx: oneshot::Sender<Handshake>,
+    server_frame_tx: mpsc::Sender<Frame>,
+    client_frame_rx: mpsc::Receiver<Frame>,
+) -> Result<(), TransportError>
+where
+    C: WebSocketConnector + Send + 'static,
+{
+    match strategy {
+        TransportStrategy::Polling => {
+            crate::polling::transport(
+                http_client,
+                base_url,
+                connector,
+                handshake_tx,
+                server_frame_tx,
+                client_frame_rx,
+            )
+            .await
+        }
+        TransportStrategy::WebSocket => {
+            let stream = crate::websocket::connect(base_url, None, connector).await?;
 
-                crate::websocket::transport(
-                    stream,
-                    Some(handshake_tx),
-                    server_frame_tx,
-                    client_frame_rx,
-                )
-                .await?;
+            crate::websocket::transport(
+                stream,
+                Some(handshake_tx),
+                server_frame_tx,
+                client_frame_rx,
+            )
+            .await?;
 
-                Ok(())
-            }
+            Ok(())
         }
     }
 }
@@ -95,16 +93,16 @@ mod tests {
         let (server_frame_tx, _frame_rx) = mpsc::channel(1);
         let (_transport_tx, client_frame_rx) = mpsc::channel(1);
 
-        let result = TransportStrategy::WebSocket
-            .run(
-                base_url,
-                http_client,
-                connector,
-                handshake_tx,
-                server_frame_tx,
-                client_frame_rx,
-            )
-            .await;
+        let result = crate::transport::open(
+            TransportStrategy::WebSocket,
+            base_url,
+            http_client,
+            connector,
+            handshake_tx,
+            server_frame_tx,
+            client_frame_rx,
+        )
+        .await;
 
         assert!(matches!(result, Err(TransportError::WebSocket(_))));
     }
