@@ -2,15 +2,10 @@
   "prettier": {
     "allowed": false
   },
+  // oxlint lints JavaScript and TypeScript here, so ESLint stays off.
+  "language_servers": ["!eslint", "..."],
   "file_scan_exclusions": [
-    "**/.git",
-    "**/.svn",
-    "**/.hg",
-    "**/CVS",
-    "**/.DS_Store",
-    "**/Thumbs.db",
-    "**/.classpath",
-    "**/.settings",
+    "...",
     // Rust
     "**/target",
     // Python
@@ -20,6 +15,9 @@
     "**/node_modules"
   ],
   "languages": {
+    "JavaScript": {
+      "language_servers": ["!eslint", "..."]
+    },
     "JSON": {
       "formatter": {
         "language_server": {
@@ -54,7 +52,8 @@
         "language_server": {
           "name": "oxfmt"
         }
-      }
+      },
+      "language_servers": ["!eslint", "..."]
     },
     "YAML": {
       "formatter": {
