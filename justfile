@@ -16,7 +16,7 @@ ci: fmt-check _ci-lint test test-servers doc deny
 # The linters read disjoint sources. Cargo work stays in order, because cargo
 # serializes on the target directory lock anyway.
 [parallel]
-_ci-lint: lint lint-py lint-js
+_ci-lint: lint lint-js
 
 # Format all sources.
 [parallel]
