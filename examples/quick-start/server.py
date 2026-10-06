@@ -77,8 +77,8 @@ async def image(sid: str, name: str, data: bytes) -> None:
 def main() -> None:
     """Run the example chat server."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    logger.info("listening on http://localhost:3000")
-    uvicorn.run(app, host="localhost", port=3000, log_level="warning")
+    logger.info("listening on http://127.0.0.1:3000")
+    uvicorn.run(app, host="127.0.0.1", port=3000, log_level="warning")
 
 
 if __name__ == "__main__":

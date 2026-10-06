@@ -27,7 +27,7 @@ just quick-start-py
 just quick-start-ts
 ```
 
-Both recipes keep the server running on `localhost:3000`. In a second terminal, run the Rust client:
+Both recipes keep the server running on `127.0.0.1:3000`. In a second terminal, run the Rust client:
 
 ```sh
 just quick-start

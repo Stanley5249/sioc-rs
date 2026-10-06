@@ -69,13 +69,13 @@ sio.on("connection", (socket) => {
 
 function listen(): Promise<void> {
   return new Promise((resolve) => {
-    app.listen(3000, "localhost", resolve);
+    app.listen(3000, "127.0.0.1", resolve);
   });
 }
 
 async function main(): Promise<void> {
   await listen();
-  console.info("listening on http://localhost:3000");
+  console.info("listening on http://127.0.0.1:3000");
 }
 
 if (import.meta.main) {

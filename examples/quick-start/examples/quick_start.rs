@@ -78,7 +78,7 @@ pub enum ChatEvent {
 }
 
 async fn run() -> Result<()> {
-    let url = Url::parse("http://localhost:3000").into_diagnostic()?;
+    let url = Url::parse("http://127.0.0.1:3000").into_diagnostic()?;
 
     let client = ClientBuilder::new(url).open()?;
     let (tx, mut rx) = client.connect("/").await?;

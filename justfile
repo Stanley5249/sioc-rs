@@ -66,11 +66,11 @@ test-servers *args:
 quick-start *args:
     cargo run --locked --example quick_start {{ args }}
 
-# Start the TypeScript quick-start server on localhost:3000.
+# Start the TypeScript quick-start server on 127.0.0.1:3000.
 quick-start-ts *args:
     bun examples/quick-start/server.ts {{ args }}
 
-# Start the Python quick-start server on localhost:3000.
+# Start the Python quick-start server on 127.0.0.1:3000.
 quick-start-py *args:
     uv run --locked python examples/quick-start/server.py {{ args }}
 
