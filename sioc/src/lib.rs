@@ -10,8 +10,6 @@ pub mod marker;
 pub mod packet;
 pub mod payload;
 
-pub use client::SocketSender;
-
 /// Convenience re-exports for common usage.
 pub mod prelude {
     pub use eioc::prelude::{TransportStrategy, WebSocketConnector, WebSocketStream};
