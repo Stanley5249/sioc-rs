@@ -79,6 +79,6 @@ deny *args:
 msrv toolchain="1.88" *args:
     cargo +{{ toolchain }} check --locked --workspace --all-targets {{ args }}
 
-# Generate an LCOV report; requires cargo-llvm-cov and llvm-tools-preview.
+# Generate an LCOV report with nextest; requires cargo-llvm-cov and llvm-tools-preview.
 coverage *args:
-    cargo llvm-cov --locked --workspace --all-targets --lcov --output-path lcov.info {{ args }}
+    cargo llvm-cov nextest --locked --workspace --all-targets --lcov --output-path lcov.info {{ args }}

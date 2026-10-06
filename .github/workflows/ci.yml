@@ -113,7 +113,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
-          tool: just, cargo-llvm-cov
+          tool: just, cargo-llvm-cov, cargo-nextest
       - run: just coverage
       - uses: codecov/codecov-action@v7
         with:
