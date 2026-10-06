@@ -3,8 +3,8 @@ set shell := ["pwsh", "-NoLogo", "-NoProfile", "-Command"]
 
 set default-list
 
-# Run the generals.io bot with `just generals-io`.
-mod generals-io "examples/generals-io"
+# Example recipes, such as `just examples::quick-start`.
+mod examples
 
 # rustfmt.toml uses nightly-only options, so formatting pins one nightly.
 # CI installs this toolchain, and Zed formats through _rustfmt-stdin.
@@ -37,6 +37,7 @@ _fmt-oxfmt *args:
 
 _fmt-just *args:
     just --fmt {{ args }}
+    just --fmt --justfile examples/justfile {{ args }}
 
 # Format Rust from stdin to stdout, for rust-analyzer in .zed/settings.json.
 _rustfmt-stdin:
@@ -63,19 +64,6 @@ test *args:
 # Run protocol and pressure tests against JavaScript and Python Socket.IO servers.
 test-servers *args:
     cargo nextest run --locked --workspace --all-targets --run-ignored only -E 'binary(servers)' {{ args }}
-
-# Run the Rust chat client against a quick-start server.
-[env("RUST_LOG", "quick_start=info,sioc=trace")]
-quick-start *args:
-    cargo run --locked --example quick_start {{ args }}
-
-# Start the TypeScript quick-start server on 127.0.0.1:3000.
-quick-start-ts *args:
-    bun examples/quick-start/server.ts {{ args }}
-
-# Start the Python quick-start server on 127.0.0.1:3000.
-quick-start-py *args:
-    uv run --locked python examples/quick-start/server.py {{ args }}
 
 # Check documentation with warnings denied.
 [env("RUSTDOCFLAGS", "-D warnings")]

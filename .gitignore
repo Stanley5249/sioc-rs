@@ -11,3 +11,6 @@ __pycache__/
 
 # JavaScript
 node_modules/
+
+# Local settings
+.env

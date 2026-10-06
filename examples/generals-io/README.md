@@ -14,10 +14,10 @@ Demonstrates real-world use of stateful clients. The bot manages a complete game
 
 - `RUST_LOG` - Log verbosity. See [filter directives](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#directives).
 
-Copy `.env.example` to `.env`, fill in your user ID, and run the bot. `.env` stays out of Git.
+From the workspace root, copy `examples/.env.example` to `examples/.env`, fill in your user ID, and run the bot. `examples/.env` stays out of Git.
 
 ```sh
-just generals-io
+just examples::generals-io
 ```
 
 Without `just`, set the variables in your shell. On Bash:

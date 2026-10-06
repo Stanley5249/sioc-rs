@@ -22,15 +22,15 @@ Both servers take their dependencies from the workspace root `pyproject.toml` an
 From the workspace root, start either server in one terminal:
 
 ```bash
-just quick-start-py
+just examples::quick-start-py
 # or, after bun install --frozen-lockfile
-just quick-start-ts
+just examples::quick-start-ts
 ```
 
 Both recipes keep the server running on `127.0.0.1:3000`. In a second terminal, run the Rust client:
 
 ```sh
-just quick-start
+just examples::quick-start
 ```
 
 Stop the server with Ctrl+C after the client finishes. CI runs protocol and pressure tests through `just test-servers`.
