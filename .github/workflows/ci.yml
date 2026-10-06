@@ -25,8 +25,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2
         with:
-          tool: just, cargo-deny
-      - run: just deny
+          tool: cargo-deny
+      - run: cargo deny --locked check
 
   msrv:
     timeout-minutes: 20
@@ -37,10 +37,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just
-      - run: just check-msrv
+      - run: cargo +1.88 check --locked --workspace --all-targets
 
   # Later steps run with `!cancelled()` so one failing check does not hide
   # the next one's results.
@@ -59,11 +56,13 @@ jobs:
         with:
           tool: just
       - run: rustup toolchain install nightly-2026-07-20 --profile minimal --component rustfmt
-      - run: just _fmt-cargo --check
+      - run: cargo +nightly-2026-07-20 fmt --all --check
       - if: ${{ !cancelled() }}
-        run: just _fmt-just --check
+        run: |
+          just --fmt --check
+          just --fmt --justfile examples/justfile --check
       - if: ${{ !cancelled() }}
-        run: just lint
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   lint-js:
     timeout-minutes: 10
@@ -71,11 +70,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just
       - run: bun install --frozen-lockfile
-      - run: just --time --timestamp check-js
+      # Wait for both checks and propagate either failure.
+      - name: Check JavaScript and managed formatting
+        run: |
+          bunx oxfmt --check &
+          fmt_pid=$!
+          bunx oxlint &
+          lint_pid=$!
+          status=0
+          wait "$fmt_pid" || status=1
+          wait "$lint_pid" || status=1
+          exit "$status"
 
   lint-py:
     timeout-minutes: 10
@@ -83,12 +89,22 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just
       # Prepare the shared environment before the read-only checks run together.
       - run: uv sync --locked
-      - run: just --time --timestamp check-py
+      # Wait for every check, including when another check fails.
+      - name: Check Python formatting, lint, and types
+        run: |
+          uv run --locked ruff format --check &
+          fmt_pid=$!
+          uv run --locked ruff check --output-format github &
+          lint_pid=$!
+          uv run --locked pyrefly check --output-format full-text-with-github --min-severity warn &
+          types_pid=$!
+          status=0
+          wait "$fmt_pid" || status=1
+          wait "$lint_pid" || status=1
+          wait "$types_pid" || status=1
+          exit "$status"
 
   # Reference-server tests share the compiled Rust test binaries.
   test:
@@ -108,11 +124,11 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - uses: taiki-e/install-action@v2
         with:
-          tool: just, cargo-nextest
+          tool: cargo-nextest
       - run: bun install --frozen-lockfile
-      - run: just _test-all
+      - run: cargo nextest run --locked --workspace --all-targets --run-ignored all
       - if: ${{ !cancelled() }}
-        run: just test-doc
+        run: cargo test --locked --workspace --doc
 
   coverage:
     timeout-minutes: 30
@@ -127,8 +143,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
-          tool: just, cargo-llvm-cov, cargo-nextest
-      - run: just coverage
+          tool: cargo-llvm-cov, cargo-nextest
+      - run: cargo llvm-cov nextest --locked --workspace --all-targets --lcov --output-path lcov.info
       - uses: codecov/codecov-action@v7
         with:
           files: lcov.info
@@ -143,10 +159,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just
-      - run: just doc
+      - run: cargo doc --locked --no-deps --workspace --examples
+        env:
+          RUSTDOCFLAGS: -D warnings
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
