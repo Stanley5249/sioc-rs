@@ -43,12 +43,12 @@ pub enum EngineError {
     /// The handshake oneshot channel was dropped before the server responded.
     #[error("failed to receive Engine.IO handshake")]
     #[diagnostic(
-        code(eioc::engine::recv_handshake),
+        code(eioc::engine::handshake),
         help(
             "the transport task exited before completing the handshake; check the transport for prior errors"
         )
     )]
-    RecvHandshake(#[from] oneshot::error::RecvError),
+    Handshake(#[from] oneshot::error::RecvError),
 
     /// The server stopped sending heartbeat pings within the expected window.
     #[error("heartbeat timeout")]
@@ -61,12 +61,12 @@ pub enum EngineError {
     /// An unexpected packet was received during the session.
     #[error("unexpected packet {0:?}")]
     #[diagnostic(
-        code(eioc::engine::server),
+        code(eioc::engine::unexpected_packet),
         help(
             "the server sent a packet that violates the Engine.IO state machine; likely a server bug or version mismatch"
         )
     )]
-    Server(Packet),
+    UnexpectedPacket(Packet),
 }
 
 /// Errors that occur during Engine.IO connection setup and transport
@@ -227,7 +227,7 @@ mod tests {
 
     #[test]
     fn engine_error_server_display() {
-        let e = EngineError::Server(crate::packet::Packet::Upgrade);
+        let e = EngineError::UnexpectedPacket(crate::packet::Packet::Upgrade);
         assert_eq!(e.to_string(), "unexpected packet Upgrade");
     }
 
@@ -245,7 +245,7 @@ mod tests {
 
     #[test]
     fn error_from_engine_error() {
-        let e: Error = EngineError::Server(crate::packet::Packet::Close).into();
+        let e: Error = EngineError::UnexpectedPacket(crate::packet::Packet::Close).into();
         assert!(matches!(e, Error::Engine(_)));
     }
 

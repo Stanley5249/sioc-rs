@@ -156,7 +156,7 @@ async fn server_frames_to_messages(
                     }
                     Packet::Noop => {}
 
-                    packet => return Err(EngineError::Server(packet)),
+                    packet => return Err(EngineError::UnexpectedPacket(packet)),
                 }
             }
             Frame::Binary(payload) => {
@@ -322,7 +322,7 @@ mod tests {
             handshake_rx,
         )
         .await;
-        assert!(matches!(result, Err(EngineError::RecvHandshake(_))));
+        assert!(matches!(result, Err(EngineError::Handshake(_))));
     }
 
     #[tokio::test]
@@ -440,7 +440,10 @@ mod tests {
             .await
             .unwrap();
         let (result, _, _) = h.finish().await;
-        assert!(matches!(result, Err(EngineError::Server(Packet::Upgrade))));
+        assert!(matches!(
+            result,
+            Err(EngineError::UnexpectedPacket(Packet::Upgrade))
+        ));
     }
 
     #[tokio::test]
