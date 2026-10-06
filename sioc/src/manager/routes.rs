@@ -1,7 +1,7 @@
 //! Where the server's packets for each open namespace go.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard};
 
 use bytestring::ByteString;
 use tokio::sync::{mpsc, oneshot};
@@ -32,8 +32,9 @@ struct Route {
 
 impl Routes {
     fn lock(&self) -> MutexGuard<'_, HashMap<ByteString, Route>> {
-        // No critical section can panic halfway, so a poisoned map is still consistent.
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.0
+            .lock()
+            .expect("no Routes method panics while it holds the lock")
     }
 
     /// Opens a namespace, returning `false` if it is already open.
