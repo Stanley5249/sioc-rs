@@ -4,6 +4,7 @@ use bytestring::ByteString;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, Stream, StreamExt, TryStreamExt};
 use tokio::sync::{mpsc, oneshot};
+use tokio_tungstenite::tungstenite::error::ProtocolError;
 use tokio_tungstenite::tungstenite::{Error as TungsteniteError, Message as WebSocketMessage};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -90,7 +91,8 @@ fn websocket_url(mut url: Url, sid: Option<&str>) -> Url {
     };
 
     if let Some(scheme) = scheme {
-        let _ = url.set_scheme(scheme);
+        url.set_scheme(scheme)
+            .expect("http, https, ws, and wss are special schemes, so they swap freely");
     }
 
     {
@@ -215,6 +217,7 @@ pub async fn transport(
 
     Ok(())
 }
+
 /// Forwards server frames to the engine until the stream ends.
 ///
 /// Returning drops `server_frame_tx`, which tells the engine the transport has
@@ -276,8 +279,6 @@ async fn forward_client_frames(
 
 /// Returns whether another write is possible after tungstenite completes one.
 fn finish_write(result: Result<(), TungsteniteError>) -> Result<bool, WebSocketError> {
-    use tokio_tungstenite::tungstenite::error::ProtocolError;
-
     match result {
         Ok(()) => Ok(true),
         // These errors report the peer's close state, just like stream EOF.
