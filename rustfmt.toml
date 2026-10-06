@@ -1,0 +1,6 @@
+# These options are nightly-only, so `just fmt` runs the nightly rustfmt
+# pinned by `rustfmt_toolchain` in the justfile.
+style_edition = "2024"
+group_imports = "StdExternalCrate"
+imports_granularity = "Module"
+wrap_comments = true

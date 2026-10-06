@@ -3,6 +3,10 @@ set shell := ["pwsh", "-NoLogo", "-NoProfile", "-Command"]
 
 set default-list
 
+# rustfmt.toml uses nightly-only options, so formatting pins one nightly.
+# CI installs this toolchain, and Zed formats through _rustfmt-stdin.
+rustfmt_toolchain := "nightly-2026-07-20"
+
 # Run the local merge gate.
 ci: fmt-check _ci-lint test test-servers doc deny
 
@@ -20,7 +24,7 @@ fmt: _fmt-cargo _fmt-ruff _fmt-oxfmt _fmt-just
 fmt-check: (_fmt-cargo "--check") (_fmt-ruff "--check") (_fmt-oxfmt "--check") (_fmt-just "--check")
 
 _fmt-cargo *args:
-    cargo fmt --all {{ args }}
+    cargo +{{ rustfmt_toolchain }} fmt --all {{ args }}
 
 _fmt-ruff *args:
     uv run --locked ruff format -q {{ args }}
@@ -30,6 +34,10 @@ _fmt-oxfmt *args:
 
 _fmt-just *args:
     just --fmt {{ args }}
+
+# Format Rust from stdin to stdout, for rust-analyzer in .zed/settings.json.
+_rustfmt-stdin:
+    @rustfmt +{{ rustfmt_toolchain }} --edition 2024
 
 # Lint libraries, examples, and tests with warnings denied.
 lint *args:

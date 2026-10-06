@@ -68,6 +68,10 @@
       "initialization_options": {
         "check": {
           "command": "clippy"
+        },
+        // The recipe pins the nightly that rustfmt.toml needs.
+        "rustfmt": {
+          "overrideCommand": ["just", "_rustfmt-stdin"]
         }
       }
     }
