@@ -1,10 +1,12 @@
-//! Client tests against an in-process socketioxide server over WebSocket and polling.
+//! Client tests against an in-process socketioxide server over WebSocket and
+//! polling.
+
+use std::time::Duration;
 
 use axum::Router;
 use sioc::prelude::*;
 use socketioxide::SocketIo;
 use socketioxide::extract::{AckSender, Data, SocketRef};
-use std::time::Duration;
 use tokio::net::TcpListener;
 use url::Url;
 

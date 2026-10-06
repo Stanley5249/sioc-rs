@@ -1,12 +1,14 @@
-//! Reference-server tests run through `just test-servers`; normal tests stay self-contained.
+//! Reference-server tests run through `just test-servers`; normal tests stay
+//! self-contained.
+
+use std::path::Path;
+use std::process::Stdio;
+use std::time::Duration;
 
 use bytes::Bytes;
 use sioc::prelude::*;
-use std::{path::Path, process::Stdio, time::Duration};
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{Child, Command},
-};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, Command};
 use url::Url;
 
 const FLOOD: u32 = 2_000;

@@ -1,4 +1,5 @@
-//! Routes a `DynEvent` into an event enum by hand, without the `EventRouter` derive.
+//! Routes a `DynEvent` into an event enum by hand, without the `EventRouter`
+//! derive.
 
 use bytestring::ByteString;
 use serde::Deserialize;

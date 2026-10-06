@@ -1,12 +1,13 @@
 //! Backpressure tests: a server floods events while the client keeps up slowly.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
+
 use axum::Router;
 use sioc::prelude::*;
 use socketioxide::SocketIo;
 use socketioxide::extract::{Data, SocketRef};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
 use tokio::net::TcpListener;
 use url::Url;
 
@@ -24,7 +25,8 @@ enum FloodEvent {
     Reply(Event<Reply>),
 }
 
-/// Serves a namespace that floods `reply` events and counts the `echo`s it gets back.
+/// Serves a namespace that floods `reply` events and counts the `echo`s it gets
+/// back.
 async fn flood_server(echoes: Arc<AtomicU32>) -> Url {
     let (layer, io) = SocketIo::new_layer();
     io.ns("/", async move |socket: SocketRef| {
@@ -47,7 +49,8 @@ async fn flood_server(echoes: Arc<AtomicU32>) -> Url {
     Url::parse(&format!("http://127.0.0.1:{port}")).unwrap()
 }
 
-/// Echoes every event from the receive loop while reading slower than the server floods.
+/// Echoes every event from the receive loop while reading slower than the
+/// server floods.
 async fn echo_flood(capacity: usize) {
     let echoes = Arc::new(AtomicU32::new(0));
     let url = flood_server(echoes.clone()).await;
