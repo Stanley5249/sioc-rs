@@ -28,6 +28,8 @@ Use `--example <name>` at workspace root; omit `-p`. `sioc=trace` shows all wire
 
 Re-export public surface through `prelude`. Never put `Result` or `Error` aliases in `prelude` because they shadow `std` and cause ambiguity; import by explicit path (`use eioc::error::{Error, Result}`).
 
+Import types and traits by name. Call a function from another module of the same crate by its full path, such as `crate::manager::session::run(..)`, so a reader sees at first glance that the function is ours. Write that path instead of importing the module with `use crate::websocket;` or `use super::{self, Item};`.
+
 Give a module with child files a `<name>/mod.rs` instead of a `<name>.rs` beside a `<name>/` folder. Keep `mod.rs` to the module docs and `mod` declarations, and put definitions in named child files.
 
 Variable names should be descriptive and avoid unnecessary abbreviations. Prefer `packet` and `event` over `pkt` and `evt`. For short-lived variables, single-letter names like `p` and `e` are acceptable.
