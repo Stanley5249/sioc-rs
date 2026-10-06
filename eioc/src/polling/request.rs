@@ -50,3 +50,17 @@ pub async fn post_frames(client: &Client, url: &Url, frames: &[Frame]) -> Result
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn polling_url_appends_params() {
+        let base = Url::parse("http://localhost:3000/socket.io/").unwrap();
+        let url = polling_url(base);
+        let query = url.query().unwrap();
+        assert!(query.contains("EIO=4"));
+        assert!(query.contains("transport=polling"));
+    }
+}

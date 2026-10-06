@@ -7,7 +7,6 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 use tokio_tungstenite::{MaybeTlsStream, accept_async, client_async};
 use tokio_util::sync::CancellationToken;
-use url::Url;
 
 use crate::connector::WebSocketStream;
 use crate::error::{TransportError, WebSocketError};
@@ -59,53 +58,6 @@ async fn ws_pair() -> (
     let client = ws;
     let server = server_task.await.unwrap();
     (client, server)
-}
-
-#[test]
-fn websocket_url_http_becomes_ws() {
-    let url = Url::parse("http://localhost:3000/socket.io/").unwrap();
-    let ws = crate::websocket::stream::websocket_url(url, None);
-    assert_eq!(ws.scheme(), "ws");
-    let q = ws.query().unwrap();
-    assert!(q.contains("EIO=4"));
-    assert!(q.contains("transport=websocket"));
-}
-
-#[test]
-fn websocket_url_https_becomes_wss() {
-    let url = Url::parse("https://example.com/socket.io/").unwrap();
-    let ws = crate::websocket::stream::websocket_url(url, None);
-    assert_eq!(ws.scheme(), "wss");
-}
-
-#[test]
-fn websocket_url_appends_sid() {
-    let url = Url::parse("http://localhost/socket.io/").unwrap();
-    let ws = crate::websocket::stream::websocket_url(url, Some("abc123"));
-    assert!(ws.query().unwrap().contains("sid=abc123"));
-}
-
-#[test]
-fn websocket_url_no_sid_when_none() {
-    let url = Url::parse("http://localhost/socket.io/").unwrap();
-    let ws = crate::websocket::stream::websocket_url(url, None);
-    assert!(!ws.query().unwrap().contains("sid="));
-}
-
-#[test]
-fn websocket_url_unknown_scheme_unchanged() {
-    let url = Url::parse("ws://localhost/socket.io/").unwrap();
-    let ws = crate::websocket::stream::websocket_url(url, None);
-    assert_eq!(ws.scheme(), "ws");
-}
-
-#[test]
-fn bytestring_from_utf8_bytes_preserves_content() {
-    use tokio_tungstenite::tungstenite::Utf8Bytes;
-    let text = "hello world";
-    let utf8 = Utf8Bytes::from(text);
-    let bs = crate::websocket::message::bytestring_from_utf8_bytes(utf8);
-    assert_eq!(&*bs, text);
 }
 
 #[tokio::test]

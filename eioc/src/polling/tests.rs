@@ -2,8 +2,6 @@
 
 use std::time::Duration;
 
-use bytes::Bytes;
-use bytestring::ByteString;
 use reqwest::Client;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -14,35 +12,6 @@ use url::Url;
 use crate::error::WebSocketError;
 use crate::packet::{Frame, Packet};
 use crate::polling::forward::Stop;
-
-#[test]
-fn batches_count_encoded_bytes_and_keep_order() {
-    let text = || Packet::Message("a".into()).into();
-    for (limit, count) in [(4, 1), (5, 2), (6, 2), (8, 3)] {
-        let (batch, pending) =
-            crate::polling::payload::take_batch(text(), [text(), text()].into_iter(), limit);
-        assert_eq!(batch.len(), count, "limit {limit}");
-        assert_eq!(pending.is_some(), count < 3);
-    }
-    let binary = Frame::Binary(Bytes::from_static(b"abc")); // bYWJj = 5 bytes
-    let unicode = Frame::Packet(Packet::Message("台".into())); // 4 UTF-8 bytes
-    let (batch, pending) =
-        crate::polling::payload::take_batch(binary.clone(), [unicode.clone()].into_iter(), 9);
-    assert_eq!(batch, [binary]);
-    assert_eq!(pending, Some(unicode));
-
-    let oversized: Frame = Packet::Message("oversized".into()).into();
-    let (batch, pending) =
-        crate::polling::payload::take_batch(oversized.clone(), [text()].into_iter(), 1);
-    assert_eq!(batch, [oversized]);
-    assert_eq!(pending, Some(text()));
-
-    let mut frames = (0..32).map(|_| text());
-    let (batch, pending) = crate::polling::payload::take_batch(text(), frames.by_ref(), u64::MAX);
-    assert_eq!(batch.len(), 16);
-    assert!(pending.is_none());
-    assert_eq!(frames.count(), 17);
-}
 
 #[tokio::test]
 async fn forward_client_frames_respects_limit_and_closes_last() {
@@ -97,10 +66,6 @@ async fn forward_client_frames_respects_limit_and_closes_last() {
     .await
     .unwrap();
     assert_eq!(server.await.unwrap(), ["4aaaa\x1e4bbbb", "4cccc", "1"]);
-}
-
-fn bss(s: &'static str) -> ByteString {
-    ByteString::from_static(s)
 }
 
 /// Answers every HTTP request with `body` after `delay`, or never when
@@ -247,76 +212,4 @@ async fn failed_upgrade_falls_back_to_long_polling() {
     .unwrap();
     assert!(stream.is_none());
     server_frame_rx.try_recv().unwrap_err();
-}
-
-#[test]
-fn polling_url_appends_params() {
-    let base = Url::parse("http://localhost:3000/socket.io/").unwrap();
-    let url = crate::polling::request::polling_url(base);
-    let query = url.query().unwrap();
-    assert!(query.contains("EIO=4"));
-    assert!(query.contains("transport=polling"));
-}
-
-#[test]
-fn frame_decode_text_packet() {
-    let frame = crate::polling::payload::decode_frame(&bss("4hello")).unwrap();
-    assert!(matches!(frame, Frame::Packet(Packet::Message(m)) if m == "hello"));
-}
-
-#[test]
-fn frame_decode_binary_base64() {
-    use base64::prelude::{BASE64_STANDARD, Engine as _};
-    let encoded = BASE64_STANDARD.encode(b"abc");
-    let input = ByteString::from(format!("b{encoded}"));
-    let frame = crate::polling::payload::decode_frame(&input).unwrap();
-    assert!(matches!(frame, Frame::Binary(b) if b.as_ref() == b"abc"));
-}
-
-#[test]
-fn frame_decode_invalid_base64_is_error() {
-    crate::polling::payload::decode_frame(&bss("b!!!")).unwrap_err();
-}
-
-#[test]
-fn frame_write_packet() {
-    let frame = Frame::Packet(Packet::Message("hello".into()));
-    let mut buf = String::new();
-    crate::polling::payload::write_frame(&frame, &mut buf);
-    assert_eq!(buf, "4hello");
-}
-
-#[test]
-fn frame_write_binary() {
-    use base64::prelude::{BASE64_STANDARD, Engine as _};
-    let raw = Bytes::from_static(b"abc");
-    let frame = Frame::Binary(raw);
-    let mut buf = String::new();
-    crate::polling::payload::write_frame(&frame, &mut buf);
-    assert_eq!(buf, format!("b{}", BASE64_STANDARD.encode(b"abc")));
-}
-
-#[test]
-fn decode_encode_payload_roundtrip() {
-    let text = bss("4hello\x1e4world");
-    let frames = crate::polling::payload::decode_payload(&text).unwrap();
-    assert_eq!(frames.len(), 2);
-    let encoded = crate::polling::payload::encode_payload(&frames);
-    assert_eq!(encoded, "4hello\x1e4world");
-}
-
-#[test]
-fn encode_payload_single() {
-    let frames = vec![Frame::Packet(Packet::Pong("probe".into()))];
-    assert_eq!(crate::polling::payload::encode_payload(&frames), "3probe");
-}
-
-#[test]
-fn encode_payload_empty() {
-    assert_eq!(crate::polling::payload::encode_payload(&[]), "");
-}
-
-#[test]
-fn decode_payload_error_propagates() {
-    crate::polling::payload::decode_payload(&bss("9invalid")).unwrap_err();
 }

@@ -98,3 +98,46 @@ pub async fn probe_upgrade(stream: &mut WebSocketStream) -> Result<(), WebSocket
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn websocket_url_http_becomes_ws() {
+        let url = Url::parse("http://localhost:3000/socket.io/").unwrap();
+        let ws = websocket_url(url, None);
+        assert_eq!(ws.scheme(), "ws");
+        let q = ws.query().unwrap();
+        assert!(q.contains("EIO=4"));
+        assert!(q.contains("transport=websocket"));
+    }
+
+    #[test]
+    fn websocket_url_https_becomes_wss() {
+        let url = Url::parse("https://example.com/socket.io/").unwrap();
+        let ws = websocket_url(url, None);
+        assert_eq!(ws.scheme(), "wss");
+    }
+
+    #[test]
+    fn websocket_url_appends_sid() {
+        let url = Url::parse("http://localhost/socket.io/").unwrap();
+        let ws = websocket_url(url, Some("abc123"));
+        assert!(ws.query().unwrap().contains("sid=abc123"));
+    }
+
+    #[test]
+    fn websocket_url_no_sid_when_none() {
+        let url = Url::parse("http://localhost/socket.io/").unwrap();
+        let ws = websocket_url(url, None);
+        assert!(!ws.query().unwrap().contains("sid="));
+    }
+
+    #[test]
+    fn websocket_url_unknown_scheme_unchanged() {
+        let url = Url::parse("ws://localhost/socket.io/").unwrap();
+        let ws = websocket_url(url, None);
+        assert_eq!(ws.scheme(), "ws");
+    }
+}

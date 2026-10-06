@@ -74,3 +74,17 @@ pub fn encode_frame(frame: Frame) -> WebSocketMessage {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bytestring_from_utf8_bytes_preserves_content() {
+        use tokio_tungstenite::tungstenite::Utf8Bytes;
+        let text = "hello world";
+        let utf8 = Utf8Bytes::from(text);
+        let bs = bytestring_from_utf8_bytes(utf8);
+        assert_eq!(&*bs, text);
+    }
+}
