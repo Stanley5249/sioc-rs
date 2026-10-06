@@ -153,7 +153,9 @@ async fn run() -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Logs go to stderr so they never interleave with the chat transcript on stdout.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .pretty()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
