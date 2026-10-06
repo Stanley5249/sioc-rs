@@ -6,5 +6,5 @@ Run them from the workspace root with the recipes in [`justfile`](justfile), suc
 
 ## Examples
 
-- **quick-start/**: Chat client against a JavaScript Socket.IO server, showcasing events, acks, binary attachments, and the EventRouter macro.
+- **quick-start/**: Chat client with JavaScript and Python Socket.IO server alternatives, showcasing events, acks, binary attachments, and the EventRouter macro.
 - **generals-io/**: Game bot for [generals.io](https://generals.io) demonstrating real-world usage.

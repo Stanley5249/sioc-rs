@@ -196,7 +196,7 @@ Server and client use fundamentally different architectures, so `socketioxide`'s
 
 ## Examples
 
-[`quick-start`](examples/quick-start) is a minimal chat client paired with a JavaScript Socket.IO server.
+[`quick-start`](examples/quick-start) is a minimal chat client with JavaScript and Python Socket.IO server alternatives.
 
 [`generals-io`](examples/generals-io) is the client for [generals.io](https://generals.io), the online strategy game that motivated this crate.
 

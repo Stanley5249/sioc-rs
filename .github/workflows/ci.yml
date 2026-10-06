@@ -76,6 +76,19 @@ jobs:
       - if: ${{ !cancelled() }}
         run: just lint-js
 
+  lint-py:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just _fmt-ruff --check
+      - if: ${{ !cancelled() }}
+        run: just lint-py
+
   # Reference-server tests share the compiled Rust test binaries.
   test:
     timeout-minutes: 30
@@ -136,7 +149,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [deny, msrv, lint, lint-js, test, doc]
+    needs: [deny, msrv, lint, lint-js, lint-py, test, doc]
     runs-on: ubuntu-latest
     permissions:
       contents: write

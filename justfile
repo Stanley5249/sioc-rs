@@ -16,7 +16,7 @@ ci: fmt-check _ci-lint test test-e2e doc deny
 # The linters read disjoint sources. Cargo work stays in order, because cargo
 # serializes on the target directory lock anyway.
 [parallel]
-_ci-lint: lint lint-js
+_ci-lint: lint lint-js lint-py
 
 # Format all sources.
 [parallel]
@@ -43,7 +43,7 @@ _fmt-just *args:
 lint *args:
     cargo clippy --quiet --locked --workspace --all-targets {{ args }} -- -D warnings
 
-# Lint and type-check the Python servers; pyrefly warnings fail too.
+# Lint and type-check the Python example; pyrefly warnings fail too.
 lint-py:
     uv run --locked ruff check -q
     uv run --locked pyrefly check --summary=none --min-severity warn

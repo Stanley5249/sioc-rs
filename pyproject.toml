@@ -1,7 +1,7 @@
 [project]
 name = "sioc-rs"
 version = "0.0.0"
-description = "Python Socket.IO servers for testing the Rust client"
+description = "Python Socket.IO quick-start example for the Rust client"
 requires-python = ">=3.14"
 dependencies = []
 
@@ -25,7 +25,6 @@ convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 "examples/**" = ["INP001"]  # standalone scripts, not packages
-"sioc/tests/fixtures/**" = ["INP001"]  # standalone reference servers
 
 [tool.pyrefly]
 preset = "strict"

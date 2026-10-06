@@ -1,6 +1,6 @@
 # Quick Start
 
-A chat client in Rust that joins a room, talks to a bot, and shares an image with `server.ts`, a Socket.IO server on the reference JavaScript implementation. The bot stands in for other room members, so one client still sees broadcasts.
+A chat client in Rust that joins a room, talks to a bot, and shares an image. Choose `server.ts` on the reference JavaScript implementation or `server.py` on `python-socketio`; both servers implement the same chat events. The bot stands in for other room members, so one client still sees broadcasts.
 
 The example covers all five concepts from the main README:
 
@@ -12,24 +12,33 @@ The example covers all five concepts from the main README:
 
 ## Prerequisites
 
-- [Bun](https://bun.sh/docs/installation) for `server.ts`, which takes its dependencies from the workspace root `package.json`
+- For `server.ts`: [Bun](https://bun.sh/docs/installation), with dependencies from the workspace root `package.json`.
+- For `server.py`: [uv](https://docs.astral.sh/uv/getting-started/installation/), which manages Python and dependencies from the workspace root `pyproject.toml` and `uv.lock`.
 
 ## Running
 
-From the workspace root, start the server in one terminal:
+From the workspace root, choose one server and start the server in one terminal.
+
+For TypeScript:
 
 ```bash
 bun install --frozen-lockfile
 just examples::quick-start-ts
 ```
 
-The recipe keeps the server running on `127.0.0.1:3000`. In a second terminal, run the Rust client:
+For Python:
+
+```sh
+just examples::quick-start-py
+```
+
+Both recipes keep the server running on `127.0.0.1:3000`, so run one server at a time. In a second terminal, run the Rust client:
 
 ```sh
 just examples::quick-start
 ```
 
-Stop the server with Ctrl+C after the client finishes. CI runs protocol and pressure tests through `just test-e2e`.
+Stop the server with Ctrl+C after the client finishes. CI runs protocol and pressure tests against the TypeScript reference fixture through `just test-e2e`. Python formatting, linting, and type checking are included in `just ci`.
 
 Each side logs only the events it receives, so every event appears once, with an arrow pointing at the receiver:
 
@@ -65,4 +74,4 @@ server <- ack       confirm: yes
 2. The client shares `crab.png` as an `Image` event with one binary attachment. The server broadcasts it to the room, so the client receives it back.
 3. The client sends a `Say` message. The server broadcasts it to other members, and the bot replies with a `Message`.
 4. The server sends `Confirm` asking whether to leave the room. The client answers with an `Answer(true)` ack.
-5. The server closes the whole connection, and the loop exits cleanly.
+5. TypeScript closes the whole connection; Python disconnects the namespace. The Rust client exits the receive loop and closes the remaining session in both cases.
