@@ -58,18 +58,26 @@ async fn seen_flood(capacity: usize) {
     let (tx, mut rx) = client.connect("/").await.unwrap();
 
     let mut received = 0;
-    while received < FLOOD {
-        if let Some(FloodEvent::Item(Event {
-            payload: Item(i), ..
-        })) = rx.listen::<FloodEvent>().await.unwrap()
-        {
-            received += 1;
-            if received % 50 == 0 {
-                tokio::time::sleep(Duration::from_millis(1)).await;
+    while let Some(event) = rx.listen::<FloodEvent>().await.unwrap() {
+        match event {
+            FloodEvent::Item(Event {
+                payload: Item(i), ..
+            }) => {
+                received += 1;
+                if received % 50 == 0 {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                tx.emit(Seen(i)).await.unwrap();
             }
-            tx.emit(Seen(i)).await.unwrap();
+        }
+        if received == FLOOD {
+            break;
         }
     }
+    assert_eq!(
+        received, FLOOD,
+        "the namespace closed before the flood ended"
+    );
 
     while seen.load(Ordering::Relaxed) < FLOOD {
         tokio::time::sleep(Duration::from_millis(10)).await;
