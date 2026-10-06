@@ -210,6 +210,12 @@ Requirements:
 - [cargo-deny](https://embarkstudios.github.io/cargo-deny/cli/index.html)
 - [Bun](https://bun.sh/docs/installation) for end-to-end tests.
 
+Use `just check` for the full development gate, or `just check-rust`, `just check-py`, and `just check-js` for the changed stack. The JavaScript gate also checks Oxfmt-managed JSON, YAML, and Markdown. Use `just ci` for the full merge gate.
+
+`just test` runs Rust unit, integration, and documentation tests; pass tool-specific arguments to `just test-rust` or `just test-doc`. Run `just test-e2e` for live-server tests. CI combines regular and E2E tests in one nextest run, then runs doctests.
+
+`just check-msrv` checks the minimum supported compiler. `just coverage` writes `lcov.info`; `just coverage-open` generates an HTML report and opens the report in a browser.
+
 ## Origin
 
 `sioc` was written in the first year of learning Rust. It took 4 months to reach 0.1 and was published in May 2026. The goal was to build a generals.io bot, but existing clients made it frustrating enough to justify writing one from scratch. That turned out to be the fun part.

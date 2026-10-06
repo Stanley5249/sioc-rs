@@ -38,7 +38,7 @@ Both recipes keep the server running on `127.0.0.1:3000`, so run one server at a
 just examples::quick-start
 ```
 
-Stop the server with Ctrl+C after the client finishes. CI runs protocol and pressure tests against the TypeScript reference fixture through `just test-e2e`. Python formatting, linting, and type checking are included in `just ci`.
+Stop the server with Ctrl+C after the client finishes. `just test-e2e` runs protocol and pressure tests against the TypeScript reference fixture. CI includes those E2E tests in its combined Rust test run. Python formatting, linting, and type checking are included in `just ci`.
 
 Each side logs only the events it receives, so every event appears once, with an arrow pointing at the receiver:
 

@@ -37,7 +37,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
-      - run: just msrv
+      - run: just check-msrv
 
   # Later steps run with `!cancelled()` so one failing check does not hide
   # the next one's results.
@@ -88,6 +88,8 @@ jobs:
       - run: just _fmt-ruff --check
       - if: ${{ !cancelled() }}
         run: just lint-py
+      - if: ${{ !cancelled() }}
+        run: just typecheck-py
 
   # Reference-server tests share the compiled Rust test binaries.
   test:
@@ -109,9 +111,9 @@ jobs:
         with:
           tool: just, cargo-nextest
       - run: bun install --frozen-lockfile
-      - run: just test
+      - run: just _test-all
       - if: ${{ !cancelled() }}
-        run: just test-e2e
+        run: just test-doc
 
   coverage:
     timeout-minutes: 30

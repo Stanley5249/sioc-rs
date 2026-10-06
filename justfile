@@ -10,19 +10,37 @@ mod examples
 # Keep the CI and Zed toolchain pins in sync with this value.
 rustfmt_toolchain := "nightly-2026-07-20"
 
-# Run the local merge gate.
-ci: fmt-check _ci-lint test test-e2e doc deny
-
-# The linters read disjoint sources. Cargo work stays in order, because cargo
-# serializes on the target directory lock anyway.
+# Check every language and justfile formatting during development.
+[group("validation")]
 [parallel]
-_ci-lint: lint lint-js lint-py
+check: check-rust check-py check-js (_fmt-just "--check")
+
+# Check Rust formatting and lint every workspace target.
+[group("validation")]
+[parallel]
+check-rust: (_fmt-cargo "--check") lint
+
+# Check Python formatting, linting, and types.
+[group("validation")]
+[parallel]
+check-py: (_fmt-ruff "--check") lint-py typecheck-py
+
+# Check Oxfmt-managed files and lint the TypeScript servers.
+[group("validation")]
+[parallel]
+check-js: (_fmt-oxfmt "--check") lint-js
+
+# Run the full local merge gate.
+[group("validation")]
+ci: check _test-all test-doc doc deny
 
 # Format all sources.
+[group("formatting")]
 [parallel]
 fmt: _fmt-cargo _fmt-ruff _fmt-oxfmt _fmt-just
 
 # Check formatting of all sources without rewriting them.
+[group("formatting")]
 [parallel]
 fmt-check: (_fmt-cargo "--check") (_fmt-ruff "--check") (_fmt-oxfmt "--check") (_fmt-just "--check")
 
@@ -40,41 +58,73 @@ _fmt-just *args:
     just --fmt --justfile examples/justfile {{ args }}
 
 # Lint libraries, examples, and tests with warnings denied.
+[group("validation")]
 lint *args:
     cargo clippy --quiet --locked --workspace --all-targets {{ args }} -- -D warnings
 
-# Lint and type-check the Python example; pyrefly warnings fail too.
-lint-py:
-    uv run --locked ruff check -q
-    uv run --locked pyrefly check --summary=none --min-severity warn
+# Lint the Python example with warnings treated as errors.
+[group("validation")]
+lint-py *args:
+    uv run --locked ruff check -q {{ args }}
+
+# Type-check the Python example; pyrefly warnings fail too.
+[group("validation")]
+typecheck-py *args:
+    uv run --locked pyrefly check --summary=none --min-severity warn {{ args }}
 
 # Lint TypeScript test servers with type-aware rules.
+[group("validation")]
 lint-js *args:
     bunx oxlint {{ args }}
 
-# Run all targets with nextest, which fails hung tests, then documentation examples.
-test *args:
-    cargo nextest run --locked --workspace --all-targets {{ args }}
-    cargo test --locked --workspace --doc {{ args }}
+# Run Rust unit and integration tests, then documentation examples.
+[group("tests")]
+test: test-rust test-doc
+
+# Run Rust unit and integration tests, skipping ignored E2E tests.
+[group("tests")]
+test-rust *args: (_test-nextest args)
+
+# Test Rust documentation examples.
+[group("tests")]
+test-doc *args:
+    cargo test --quiet --locked --workspace --doc {{ args }}
 
 # Run the end-to-end tests against the TypeScript reference server.
-test-e2e *args:
-    cargo nextest run --locked --workspace --all-targets --run-ignored only -E 'binary(e2e)' {{ args }}
+[group("tests")]
+test-e2e *args: (_test-nextest "--run-ignored only -E 'binary(e2e)'" args)
+
+# CI runs regular and E2E tests in one pass. Review new ignored tests before
+# adding them, because this helper enables every ignored test.
+_test-all: (_test-nextest "--run-ignored all")
+
+_test-nextest *args:
+    cargo nextest run --locked --workspace --all-targets {{ args }}
 
 # Check documentation with warnings denied.
 [env("RUSTDOCFLAGS", "-D warnings")]
+[group("maintenance")]
 doc *args:
-    cargo doc --locked --no-deps --workspace --examples {{ args }}
+    cargo doc --quiet --locked --no-deps --workspace --examples {{ args }}
 
 # Check dependency advisories, licenses, bans, and sources.
+[group("maintenance")]
 deny *args:
-    cargo deny --locked check {{ args }}
+    cargo deny --locked check --hide-inclusion-graph {{ args }}
 
 # Check every target with the minimum supported compiler.
 [arg("toolchain", long, help="Rust toolchain to check with")]
-msrv toolchain="1.88" *args:
+[group("validation")]
+check-msrv toolchain="1.88" *args:
     cargo +{{ toolchain }} check --locked --workspace --all-targets {{ args }}
 
-# Generate an LCOV report with nextest; requires cargo-llvm-cov and llvm-tools-preview.
-coverage *args:
-    cargo llvm-cov nextest --locked --workspace --all-targets --lcov --output-path lcov.info {{ args }}
+# Generate lcov.info for CI; requires cargo-llvm-cov and llvm-tools-preview.
+[group("tests")]
+coverage *args: (_coverage "--lcov --output-path lcov.info" args)
+
+# Generate an HTML coverage report and open it in the browser.
+[group("tests")]
+coverage-open *args: (_coverage "--open" args)
+
+_coverage *args:
+    cargo llvm-cov nextest --locked --workspace --all-targets {{ args }}
