@@ -28,8 +28,9 @@ pub async fn run(
     // The server-message loop tells the client-packet loop which namespace
     // generations the server confirmed, so their buffered events can go out.
     // The channel is unbounded so that delivering server packets never waits on
-    // the client's sending direction. It stays short because each generation
-    // travels at most once.
+    // the client's sending direction. Its length stays below the number of
+    // namespace generations the client opened, because each one travels at
+    // most once, so the server cannot grow it.
     let (connected_generation_tx, connected_generation_rx) = mpsc::unbounded_channel();
 
     tokio::try_join!(
