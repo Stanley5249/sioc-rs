@@ -111,20 +111,6 @@ async fn get_frames(client: &Client, url: &Url) -> Result<Vec<Frame>, PollingErr
     decode_payload(&ByteString::from(response))
 }
 
-async fn get_handshake_frame(client: &Client, url: &Url) -> Result<Frame, PollingError> {
-    let response = client
-        .get(url.as_str())
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?;
-
-    tracing::trace!(bytes = response.len(), "received polling payload");
-
-    Frame::decode(&ByteString::from(response))
-}
-
 async fn post_frames(client: &Client, url: &Url, frames: &[Frame]) -> Result<(), PollingError> {
     let body = encode_payload(frames);
     tracing::trace!(bytes = body.len(), "sent polling payload");
@@ -202,6 +188,28 @@ async fn forward_client_frames(
     }
 }
 
+/// Sends one response's frames to the engine, returning `true` at the server's
+/// `Close`.
+///
+/// The `Close` packet itself stays here, because the transport ending is
+/// what tells the engine the session is over.
+async fn send_server_frames(
+    frames: impl IntoIterator<Item = Frame>,
+    server_frame_tx: &mpsc::Sender<Frame>,
+) -> Result<bool, TransportError> {
+    for frame in frames {
+        if frame == Frame::Packet(Packet::Close) {
+            tracing::debug!("server closed");
+
+            return Ok(true);
+        }
+
+        server_frame_tx.send(frame).await?;
+    }
+
+    Ok(false)
+}
+
 /// Forwards server frames to the engine until `pause` fires or the server sends
 /// `Close`.
 ///
@@ -217,14 +225,10 @@ async fn forward_server_frames(
     // Pause only between requests, because the server answers the GET in
     // flight once the upgrade probe succeeds, and the answer may carry frames.
     while !pause.is_cancelled() {
-        for frame in get_frames(client, url).await? {
-            if frame == Frame::Packet(Packet::Close) {
-                tracing::debug!("server closed");
+        let frames = get_frames(client, url).await?;
 
-                return Ok(Stop::Ended);
-            }
-
-            server_frame_tx.send(frame).await?;
+        if send_server_frames(frames, server_frame_tx).await? {
+            return Ok(Stop::Ended);
         }
     }
 
@@ -323,6 +327,11 @@ async fn forward_frames_until_upgrade(
 /// # Errors
 ///
 /// Returns an error if a network, protocol, or channel failure occurs.
+///
+/// # Panics
+///
+/// Never in practice: a decoded polling payload always holds at least one
+/// frame.
 #[tracing::instrument(skip_all)]
 pub async fn transport<C>(
     client: Client,
@@ -339,7 +348,16 @@ where
 
     let span = tracing::debug_span!("connect", %url);
 
-    let handshake = match get_handshake_frame(&client, &url).instrument(span).await? {
+    // The server may batch packets after the Open packet, as engine.io-client
+    // accepts, so the rest of the response goes to the engine.
+    let mut frames = get_frames(&client, &url)
+        .instrument(span)
+        .await?
+        .into_iter();
+    let first = frames
+        .next()
+        .expect("a decoded payload holds at least one frame");
+    let handshake = match first {
         Frame::Packet(Packet::Open(handshake)) => handshake,
         frame => return Err(TransportError::Open(frame)),
     };
@@ -353,7 +371,9 @@ where
         .send(handshake)
         .map_err(TransportError::Handshake)?;
 
-    let stream = if can_upgrade {
+    let stream = if send_server_frames(frames, &server_frame_tx).await? {
+        None
+    } else if can_upgrade {
         let upgrade = crate::websocket::connect(base_url, Some(&sid), connector);
 
         forward_frames_until_upgrade(
@@ -541,6 +561,36 @@ mod tests {
             server_frame_rx.recv().await.unwrap(),
             Frame::Packet(Packet::Message(m)) if m == "data"
         ));
+    }
+
+    #[tokio::test]
+    async fn transport_forwards_packets_batched_with_handshake() {
+        let url = http_server(
+            Some(concat!(
+                r#"0{"sid":"s","upgrades":[],"pingInterval":25000,"pingTimeout":20000,"maxPayload":1000000}"#,
+                "4data"
+            )),
+            Duration::ZERO,
+        )
+        .await;
+        let (handshake_tx, handshake_rx) = oneshot::channel();
+        let (server_frame_tx, mut server_frame_rx) = mpsc::channel(4);
+        let (_client_frame_tx, client_frame_rx) = mpsc::channel(4);
+        let task = tokio::spawn(transport(
+            Client::new(),
+            url,
+            (),
+            handshake_tx,
+            server_frame_tx,
+            client_frame_rx,
+        ));
+
+        assert_eq!(handshake_rx.await.unwrap().sid, "s");
+        assert!(matches!(
+            server_frame_rx.recv().await.unwrap(),
+            Frame::Packet(Packet::Message(m)) if m == "data"
+        ));
+        task.abort();
     }
 
     #[tokio::test]
