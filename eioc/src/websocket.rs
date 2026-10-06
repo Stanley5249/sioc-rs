@@ -228,7 +228,7 @@ pub async fn transport(
 
         handshake_tx
             .send(handshake)
-            .map_err(TransportError::SendHandshake)?;
+            .map_err(TransportError::Handshake)?;
     } else {
         tracing::debug!("sent upgrade packet");
 
@@ -564,7 +564,7 @@ mod tests {
         let (server_frame_tx, _) = mpsc::channel(4);
         let (_, client_frame_rx) = mpsc::channel::<Frame>(4);
         let result = transport(client, Some(handshake_tx), server_frame_tx, client_frame_rx).await;
-        assert!(matches!(result, Err(TransportError::SendHandshake(_))));
+        assert!(matches!(result, Err(TransportError::Handshake(_))));
         let _ = server_task.await;
     }
 

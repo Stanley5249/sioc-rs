@@ -59,7 +59,7 @@ async fn route_text(
             if let Some(generation) = routes.mark_connected(&ns) {
                 connected_generation_tx
                     .send(generation)
-                    .map_err(|_| ManagerError::SendNamespaceStatus)?;
+                    .map_err(|_| ManagerError::NamespaceStatus)?;
             }
             send_server_packet(
                 routes.server_packet_tx(&ns),

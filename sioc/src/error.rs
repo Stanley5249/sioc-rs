@@ -269,10 +269,10 @@ pub enum ManagerError {
     /// Sending a client message to the engine failed because the channel is closed.
     #[error("client message channel closed")]
     #[diagnostic(
-        code(sioc::manager::send_client_message),
+        code(sioc::manager::client_message),
         help("the receiver was dropped; the socket is probably shut down")
     )]
-    SendClientMessage(#[from] mpsc::error::SendError<Message>),
+    ClientMessage(#[from] mpsc::error::SendError<Message>),
 
     /// Received a text frame while a binary reassembly was in progress.
     #[error("unexpected text frame: {0:?}")]
@@ -297,8 +297,8 @@ pub enum ManagerError {
     /// Telling the client-packet loop that the server confirmed a namespace failed because the channel is closed.
     #[error("namespace status channel closed")]
     #[diagnostic(
-        code(sioc::manager::send_namespace_status),
+        code(sioc::manager::namespace_status),
         help("a manager loop exited early; check for prior manager errors")
     )]
-    SendNamespaceStatus,
+    NamespaceStatus,
 }

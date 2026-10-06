@@ -516,7 +516,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             engine.await.unwrap(),
-            Err(EngineError::SendServerMessage(_))
+            Err(EngineError::ServerMessage(_))
         ));
     }
 }

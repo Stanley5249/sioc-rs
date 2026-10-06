@@ -342,7 +342,7 @@ where
 
     handshake_tx
         .send(handshake)
-        .map_err(TransportError::SendHandshake)?;
+        .map_err(TransportError::Handshake)?;
 
     let stream = if can_upgrade {
         let upgrade = websocket::connect(base_url, Some(&sid), connector);

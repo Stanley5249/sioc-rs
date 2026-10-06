@@ -24,18 +24,18 @@ pub enum EngineError {
     /// Sending a client frame to the transport task failed because the channel is closed.
     #[error("client frame channel closed")]
     #[diagnostic(
-        code(eioc::engine::send_client_frame),
+        code(eioc::engine::client_frame),
         help("the transport task exited; check for prior transport errors")
     )]
-    SendClientFrame(#[from] mpsc::error::SendError<Frame>),
+    ClientFrame(#[from] mpsc::error::SendError<Frame>),
 
     /// Delivering a server message to the upper layer failed because its receiver is gone.
     #[error("server message channel closed")]
     #[diagnostic(
-        code(eioc::engine::send_server_message),
+        code(eioc::engine::server_message),
         help("the receiver of server messages was dropped before the session ended")
     )]
-    SendServerMessage(#[from] mpsc::error::SendError<Message>),
+    ServerMessage(#[from] mpsc::error::SendError<Message>),
 
     /// The handshake oneshot channel was dropped before the server responded.
     #[error("failed to receive Engine.IO handshake")]
@@ -82,20 +82,20 @@ pub enum TransportError {
     /// Sending a server frame to the engine task failed because the channel is closed.
     #[error("server frame channel closed")]
     #[diagnostic(
-        code(eioc::transport::send_server_frame),
+        code(eioc::transport::server_frame),
         help("the engine task exited; check for prior engine errors")
     )]
-    SendServerFrame(#[from] mpsc::error::SendError<Frame>),
+    ServerFrame(#[from] mpsc::error::SendError<Frame>),
 
     /// Handshake data could not be forwarded to the engine task.
     #[error("failed to send handshake to engine task")]
     #[diagnostic(
-        code(eioc::transport::send_handshake),
+        code(eioc::transport::handshake),
         help(
             "the engine task exited before the handshake arrived; check the engine for prior errors"
         )
     )]
-    SendHandshake(Handshake),
+    Handshake(Handshake),
 
     /// The first frame received was not an Open packet.
     #[error("expected Open packet as first frame")]
