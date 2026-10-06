@@ -41,7 +41,7 @@ where
 {
     match strategy {
         TransportStrategy::Polling => {
-            crate::polling::transport(
+            crate::polling::session::run(
                 http_client,
                 base_url,
                 connector,
