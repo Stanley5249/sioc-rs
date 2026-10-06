@@ -32,6 +32,7 @@
 ## Keep in sync
 
 - When updating the public API, check the `README.md` examples and the doc tests.
+- Keep `justfile` and `.github/workflows/ci.yml` checks functionally equivalent: synchronize tool versions, workspace and target selection, lockfile enforcement, warning policies, test filters, and coverage options when changing either file. Local recipes use quiet output; CI may invoke tools directly with progress output or CI-specific diagnostic formats.
 - When updating a `justfile` recipe, check every reference to that recipe.
 - Keep the rustfmt nightly toolchain version synchronized across `justfile`, `.github/workflows/ci.yml`, and `.zed/settings.json`.
 
