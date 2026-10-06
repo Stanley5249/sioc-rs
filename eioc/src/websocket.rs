@@ -62,7 +62,7 @@ fn bytestring_from_utf8_bytes(utf8: tokio_tungstenite::tungstenite::Utf8Bytes) -
 ///
 /// Returns `None` at the server's `Close` packet or the peer's close frame,
 /// so the transport stops before it sends into a closing socket.
-async fn next_server_frame<S>(stream: &mut S) -> Result<Option<Frame>, WebSocketError>
+async fn next_frame<S>(stream: &mut S) -> Result<Option<Frame>, WebSocketError>
 where
     S: Stream<Item = Result<WebSocketMessage, TungsteniteError>> + Unpin,
 {
@@ -166,33 +166,31 @@ where
     let mut stream = connector.connect(url).instrument(span).await?;
 
     if sid.is_some() {
-        probe(&mut stream).await?;
+        probe_upgrade(&mut stream).await?;
     }
 
     Ok(stream)
 }
 
 /// Waits for the next frame, returning an error if the stream is closed.
-async fn recv(stream: &mut WebSocketStream) -> Result<Frame, WebSocketError> {
-    next_server_frame(stream)
-        .await?
-        .ok_or(WebSocketError::Closed)
+async fn recv_frame(stream: &mut WebSocketStream) -> Result<Frame, WebSocketError> {
+    next_frame(stream).await?.ok_or(WebSocketError::Closed)
 }
 
 /// Sends one frame.
-async fn send(stream: &mut WebSocketStream, frame: Frame) -> Result<(), WebSocketError> {
+async fn send_frame(stream: &mut WebSocketStream, frame: Frame) -> Result<(), WebSocketError> {
     Ok(stream.send(encode_frame(frame)).await?)
 }
 
 /// Sends a probe `Ping` and expects a matching `Pong`, confirming the WebSocket
 /// path is live.
 #[tracing::instrument(level = "debug", skip_all)]
-async fn probe(stream: &mut WebSocketStream) -> Result<(), WebSocketError> {
+async fn probe_upgrade(stream: &mut WebSocketStream) -> Result<(), WebSocketError> {
     tracing::debug!("sent probe ping");
 
-    send(stream, Packet::Ping(PROBE).into()).await?;
+    send_frame(stream, Packet::Ping(PROBE).into()).await?;
 
-    match recv(stream).await? {
+    match recv_frame(stream).await? {
         Frame::Packet(Packet::Pong(payload)) if payload == PROBE => {
             tracing::debug!("received probe pong");
         }
@@ -226,7 +224,7 @@ pub async fn transport(
     client_frame_rx: mpsc::Receiver<Frame>,
 ) -> Result<(), TransportError> {
     if let Some(handshake_tx) = handshake_tx {
-        let handshake = match recv(&mut stream).await? {
+        let handshake = match recv_frame(&mut stream).await? {
             Frame::Packet(Packet::Open(handshake)) => handshake,
             frame => return Err(TransportError::Open(frame)),
         };
@@ -239,7 +237,7 @@ pub async fn transport(
     } else {
         tracing::debug!("sent upgrade packet");
 
-        send(&mut stream, Packet::Upgrade.into()).await?;
+        send_frame(&mut stream, Packet::Upgrade.into()).await?;
     }
 
     let (sink, stream) = stream.split();
@@ -248,8 +246,8 @@ pub async fn transport(
     // Each direction runs on its own, so a slow engine never stalls
     // client frames and a slow socket never stalls server ones.
     tokio::try_join!(
-        websocket_to_server_frames(stream, server_frame_tx, stream_closed.clone()),
-        client_frames_to_websocket(sink, client_frame_rx, stream_closed),
+        forward_server_frames(stream, server_frame_tx, stream_closed.clone()),
+        forward_client_frames(sink, client_frame_rx, stream_closed),
     )?;
 
     Ok(())
@@ -258,14 +256,14 @@ pub async fn transport(
 ///
 /// Returning drops `server_frame_tx`, which tells the engine the transport has
 /// finished.
-async fn websocket_to_server_frames(
+async fn forward_server_frames(
     mut stream: SplitStream<WebSocketStream>,
     server_frame_tx: mpsc::Sender<Frame>,
     stream_closed: CancellationToken,
 ) -> Result<(), TransportError> {
     let _guard = stream_closed.drop_guard();
 
-    while let Some(frame) = next_server_frame(&mut stream).await? {
+    while let Some(frame) = next_frame(&mut stream).await? {
         server_frame_tx.send(frame).await?;
     }
 
@@ -279,7 +277,7 @@ async fn websocket_to_server_frames(
 ///
 /// If the stream ends first, discards frames until the engine closes
 /// `client_frame_rx`, because the closed socket cannot send them.
-async fn client_frames_to_websocket(
+async fn forward_client_frames(
     mut sink: SplitSink<WebSocketStream, WebSocketMessage>,
     mut client_frame_rx: mpsc::Receiver<Frame>,
     stream_closed: CancellationToken,
@@ -290,12 +288,12 @@ async fn client_frames_to_websocket(
                 let Some(frame) = frame else {
                     tracing::debug!("client frame channel closed");
 
-                    finish_websocket_write(sink.send(encode_frame(Packet::Close.into())).await)?;
+                    finish_write(sink.send(encode_frame(Packet::Close.into())).await)?;
 
                     break;
                 };
 
-                if !finish_websocket_write(sink.send(encode_frame(frame)).await)? {
+                if !finish_write(sink.send(encode_frame(frame)).await)? {
                     break;
                 }
             }
@@ -308,13 +306,13 @@ async fn client_frames_to_websocket(
 
     // Each terminal write outcome follows the same half-close path.
     while client_frame_rx.recv().await.is_some() {}
-    finish_websocket_write(sink.close().await)?;
+    finish_write(sink.close().await)?;
 
     Ok(())
 }
 
 /// Returns whether another write is possible after tungstenite completes one.
-fn finish_websocket_write(result: Result<(), TungsteniteError>) -> Result<bool, WebSocketError> {
+fn finish_write(result: Result<(), TungsteniteError>) -> Result<bool, WebSocketError> {
     use tokio_tungstenite::tungstenite::error::ProtocolError;
 
     match result {
@@ -341,11 +339,11 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn writer_drains_after_reader_observes_peer_close() {
+    async fn forward_client_frames_drains_after_peer_close() {
         let (client, mut server) = ws_pair().await;
         let (sink, mut stream) = client.split();
         server.close(None).await.unwrap();
-        assert!(next_server_frame(&mut stream).await.unwrap().is_none());
+        assert!(next_frame(&mut stream).await.unwrap().is_none());
 
         // The reader has changed tungstenite's state before its stop signal
         // reaches the writer. A queued frame must still finish gracefully.
@@ -355,7 +353,7 @@ mod tests {
             .await
             .unwrap();
         drop(client_frame_tx);
-        client_frames_to_websocket(sink, client_frame_rx, CancellationToken::new())
+        forward_client_frames(sink, client_frame_rx, CancellationToken::new())
             .await
             .unwrap();
     }
@@ -427,46 +425,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_decodes_text_frame_as_packet() {
+    async fn recv_frame_decodes_text_frame_as_packet() {
         let (mut client, mut server) = ws_pair().await;
         server.send(WsMsg::text("4hello")).await.unwrap();
-        let frame = recv(&mut client).await.unwrap();
+        let frame = recv_frame(&mut client).await.unwrap();
         assert!(matches!(frame, Frame::Packet(Packet::Message(m)) if m == "hello"));
     }
 
     #[tokio::test]
-    async fn stream_ends_at_peer_close_frame() {
+    async fn next_frame_ends_at_peer_close_frame() {
         let (mut client, mut server) = ws_pair().await;
         server.send(WsMsg::Close(None)).await.unwrap();
-        assert!(next_server_frame(&mut client).await.unwrap().is_none());
+        assert!(next_frame(&mut client).await.unwrap().is_none());
     }
 
     #[tokio::test]
-    async fn stream_ends_at_close_packet() {
+    async fn next_frame_ends_at_close_packet() {
         let (mut client, mut server) = ws_pair().await;
         server.send(WsMsg::text("1")).await.unwrap();
-        assert!(next_server_frame(&mut client).await.unwrap().is_none());
+        assert!(next_frame(&mut client).await.unwrap().is_none());
     }
 
     #[tokio::test]
-    async fn stream_decodes_binary_frame() {
+    async fn recv_frame_decodes_binary_frame() {
         let (mut client, mut server) = ws_pair().await;
         server.send(WsMsg::binary(b"data".as_ref())).await.unwrap();
-        let frame = recv(&mut client).await.unwrap();
+        let frame = recv_frame(&mut client).await.unwrap();
         assert!(matches!(frame, Frame::Binary(b) if b.as_ref() == b"data"));
     }
 
     #[tokio::test]
-    async fn stream_invalid_packet_id_is_error() {
+    async fn recv_frame_invalid_packet_id_is_error() {
         let (mut client, mut server) = ws_pair().await;
         server.send(WsMsg::text("9bad")).await.unwrap();
-        recv(&mut client).await.unwrap_err();
+        recv_frame(&mut client).await.unwrap_err();
     }
 
     #[tokio::test]
-    async fn sink_sends_packet_frame_as_text() {
+    async fn send_frame_encodes_packet_as_text() {
         let (mut client, mut server) = ws_pair().await;
-        send(&mut client, Frame::Packet(Packet::Pong("probe".into())))
+        send_frame(&mut client, Frame::Packet(Packet::Pong("probe".into())))
             .await
             .unwrap();
         let msg = server.next().await.unwrap().unwrap();
@@ -474,9 +472,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sink_sends_binary_frame() {
+    async fn send_frame_encodes_binary() {
         let (mut client, mut server) = ws_pair().await;
-        send(&mut client, Frame::Binary(Bytes::from_static(b"raw")))
+        send_frame(&mut client, Frame::Binary(Bytes::from_static(b"raw")))
             .await
             .unwrap();
         let msg = server.next().await.unwrap().unwrap();
@@ -485,26 +483,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn probe_succeeds_on_matching_pong() {
+    async fn probe_upgrade_succeeds_on_matching_pong() {
         let (mut client, mut server) = ws_pair().await;
         let server_task = tokio::spawn(async move {
             let msg = server.next().await.unwrap().unwrap();
             assert_eq!(msg.to_text().unwrap(), "2probe");
             server.send(WsMsg::text("3probe")).await.unwrap();
         });
-        probe(&mut client).await.unwrap();
+        probe_upgrade(&mut client).await.unwrap();
         server_task.await.unwrap();
     }
 
     #[tokio::test]
-    async fn probe_fails_on_wrong_frame() {
+    async fn probe_upgrade_fails_on_wrong_frame() {
         let (mut client, mut server) = ws_pair().await;
         let server_task = tokio::spawn(async move {
             let _ = server.next().await.unwrap().unwrap();
             server.send(WsMsg::text("4unexpected")).await.unwrap();
         });
         assert!(matches!(
-            probe(&mut client).await,
+            probe_upgrade(&mut client).await,
             Err(WebSocketError::Probe(_))
         ));
         server_task.await.unwrap();
