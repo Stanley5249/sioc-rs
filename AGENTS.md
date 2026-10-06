@@ -41,7 +41,7 @@ Name a channel's ends after the items it carries, such as `frame_tx` and `client
 - Run each direction of a bidirectional pipe as its own loop and `join!` them. A loop that awaits a send to one output stops serving every other input.
 - Use `select!` in a loop only when every handler awaits nothing but the loop's one output, or when the arm is a stop signal. Every branch future must also be cancel-safe: tokio channel `recv`, `recv_many`, `FuturesUnordered::next`, and `CancellationToken::cancelled` are. Prove cancel safety before selecting on anything else.
 - Shut down by half-close: a task stops by dropping its senders and finishes only when its receivers return `None`. Between our tasks a send never fails during a graceful shutdown, so every send error is a real error. A receiver the caller owns may drop at any time, so delivery to it discards on a closed channel.
-- Keep every channel fed by the server bounded, so a flood slows the connection instead of growing memory.
+- Keep every channel fed by the server bounded, so a flood slows the connection instead of growing memory. A channel whose length the client's own state caps, such as one entry per namespace the client opened, may be unbounded; its comment states the cap.
 - Lock a `std::sync::Mutex` only inside a synchronous method that never returns the guard, so no lock is held across an `.await`.
 - Keep reconnection application-controlled. The application chooses its retry delay and policy, reopens a namespace with `Client::connect` on a live session, and opens a new `Client` after the session ends. Use `tokio::time::sleep` for retry delays instead of adding a backoff dependency.
 
