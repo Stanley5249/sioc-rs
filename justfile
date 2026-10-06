@@ -10,6 +10,13 @@ mod examples
 # Keep the CI and Zed toolchain pins in sync with this value.
 rustfmt_toolchain := "nightly-2026-07-20"
 
+# CI enables progress output while local runs keep tool summaries quiet.
+verbose := env("SIOC_VERBOSE", "0")
+quiet := if verbose == "1" { "" } else { "--quiet" }
+cargo_quiet := if verbose == "1" { "" } else { "--cargo-quiet" }
+pyrefly_output := if verbose == "1" { "--output-format full-text-with-github" } else { "--summary=none" }
+deny_output := if verbose == "1" { "" } else { "--hide-inclusion-graph" }
+
 # Check every language and justfile formatting during development.
 [group("validation")]
 [parallel]
@@ -48,7 +55,7 @@ _fmt-cargo *args:
     cargo +{{ rustfmt_toolchain }} fmt --all {{ args }}
 
 _fmt-ruff *args:
-    uv run --locked ruff format -q {{ args }}
+    uv run --locked ruff format {{ quiet }} {{ args }}
 
 _fmt-oxfmt *args:
     bunx oxfmt {{ args }}
@@ -60,17 +67,17 @@ _fmt-just *args:
 # Lint libraries, examples, and tests with warnings denied.
 [group("validation")]
 lint *args:
-    cargo clippy --quiet --locked --workspace --all-targets {{ args }} -- -D warnings
+    cargo clippy {{ quiet }} --locked --workspace --all-targets {{ args }} -- -D warnings
 
 # Lint the Python example with warnings treated as errors.
 [group("validation")]
 lint-py *args:
-    uv run --locked ruff check -q {{ args }}
+    uv run --locked ruff check {{ quiet }} {{ args }}
 
 # Type-check the Python example; pyrefly warnings fail too.
 [group("validation")]
 typecheck-py *args:
-    uv run --locked pyrefly check --summary=none --min-severity warn {{ args }}
+    uv run --locked pyrefly check {{ pyrefly_output }} --min-severity warn {{ args }}
 
 # Lint TypeScript test servers with type-aware rules.
 [group("validation")]
@@ -88,7 +95,7 @@ test-rust *args: (_test-nextest args)
 # Test Rust documentation examples.
 [group("tests")]
 test-doc *args:
-    cargo test --quiet --locked --workspace --doc {{ args }}
+    cargo test {{ quiet }} --locked --workspace --doc {{ args }}
 
 # Run the end-to-end tests against the TypeScript reference server.
 [group("tests")]
@@ -99,18 +106,18 @@ test-e2e *args: (_test-nextest "--run-ignored only -E 'binary(e2e)'" args)
 _test-all: (_test-nextest "--run-ignored all")
 
 _test-nextest *args:
-    cargo nextest run --locked --workspace --all-targets {{ args }}
+    cargo nextest run {{ cargo_quiet }} --locked --workspace --all-targets {{ args }}
 
 # Check documentation with warnings denied.
 [env("RUSTDOCFLAGS", "-D warnings")]
 [group("maintenance")]
 doc *args:
-    cargo doc --quiet --locked --no-deps --workspace --examples {{ args }}
+    cargo doc {{ quiet }} --locked --no-deps --workspace --examples {{ args }}
 
 # Check dependency advisories, licenses, bans, and sources.
 [group("maintenance")]
 deny *args:
-    cargo deny --locked check --hide-inclusion-graph {{ args }}
+    cargo deny --locked check {{ deny_output }} {{ args }}
 
 # Check every target with the minimum supported compiler.
 [arg("toolchain", long, help="Rust toolchain to check with")]

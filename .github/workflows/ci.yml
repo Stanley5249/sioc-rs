@@ -1,10 +1,14 @@
 name: CI
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+
+env:
+  SIOC_VERBOSE: "1"
+  NEXTEST_PROFILE: ci
 
 permissions:
   contents: read
@@ -72,9 +76,7 @@ jobs:
         with:
           tool: just
       - run: bun install --frozen-lockfile
-      - run: just _fmt-oxfmt --check
-      - if: ${{ !cancelled() }}
-        run: just lint-js
+      - run: just --time --timestamp check-js
 
   lint-py:
     timeout-minutes: 10
@@ -85,11 +87,9 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
-      - run: just _fmt-ruff --check
-      - if: ${{ !cancelled() }}
-        run: just lint-py
-      - if: ${{ !cancelled() }}
-        run: just typecheck-py
+      # Prepare the shared environment before the read-only checks run together.
+      - run: uv sync --locked
+      - run: just --time --timestamp check-py
 
   # Reference-server tests share the compiled Rust test binaries.
   test:
