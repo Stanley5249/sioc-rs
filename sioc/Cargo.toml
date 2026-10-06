@@ -11,6 +11,9 @@ license = "MIT OR Apache-2.0"
 keywords = ["async", "networking", "realtime", "socketio", "websocket"]
 categories = ["asynchronous", "network-programming", "web-programming"]
 
+[lints]
+workspace = true
+
 [dependencies]
 # Workspace dependencies
 eioc.workspace = true

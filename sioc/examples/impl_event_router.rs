@@ -1,7 +1,9 @@
+//! Routes a `DynEvent` into an event enum by hand, without the `EventRouter` derive.
+
 use bytestring::ByteString;
 use serde::Deserialize;
 use sioc::error::EventError;
-use sioc::prelude::*;
+use sioc::prelude::{DeserializePayload, DynEvent, Event, EventHandler, EventType};
 
 // Event types for demonstration
 #[derive(Debug, EventType, DeserializePayload)]
@@ -103,7 +105,7 @@ fn main() -> Result<(), EventError> {
 
     let my_event = MyEvent::try_from(event)?;
 
-    println!("{:?}", my_event);
+    println!("{my_event:?}");
 
     Ok(())
 }

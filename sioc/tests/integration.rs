@@ -1,3 +1,5 @@
+//! Client tests against an in-process socketioxide server over WebSocket and polling.
+
 use axum::Router;
 use sioc::prelude::*;
 use socketioxide::SocketIo;

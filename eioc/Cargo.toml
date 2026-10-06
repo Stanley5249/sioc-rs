@@ -10,6 +10,9 @@ license = "MIT OR Apache-2.0"
 keywords = ["async", "engine-io", "networking", "websocket"]
 categories = ["asynchronous", "network-programming", "web-programming"]
 
+[lints]
+workspace = true
+
 [dependencies]
 base64.workspace = true
 bytes.workspace = true

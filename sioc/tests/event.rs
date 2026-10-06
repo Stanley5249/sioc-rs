@@ -1,3 +1,5 @@
+//! Wire-format tests for derived event types.
+
 use sioc::prelude::*;
 
 #[derive(Debug, PartialEq, EventType, SerializePayload, DeserializePayload)]
@@ -12,7 +14,7 @@ struct Join {
     user: String,
 }
 
-/// Implicit name resolves to "auto_name".
+/// Implicit name resolves to `auto_name`.
 #[derive(Debug, PartialEq, EventType, SerializePayload, DeserializePayload)]
 struct AutoName;
 
@@ -43,12 +45,12 @@ struct Stream {
 
 fn assert_binary_marker<E: EventType<Binary = HasBinary>>() {}
 
-fn roundtrip<E>(val: E)
+fn roundtrip<E>(val: &E)
 where
     E: std::fmt::Debug + PartialEq + EventType + SerializePayload + DeserializePayload,
 {
-    let bytes = event_to_json(&val).unwrap();
-    assert_eq!(event_from_json::<E>(&bytes).unwrap(), val);
+    let bytes = event_to_json(val).unwrap();
+    assert_eq!(event_from_json::<E>(&bytes).unwrap(), *val);
 }
 
 #[test]
@@ -92,17 +94,17 @@ fn wire_named() {
 
 #[test]
 fn roundtrip_unit() {
-    roundtrip(Hello);
+    roundtrip(&Hello);
 }
 
 #[test]
 fn roundtrip_tuple() {
-    roundtrip(Moved(-1, 99));
+    roundtrip(&Moved(-1, 99));
 }
 
 #[test]
 fn roundtrip_named() {
-    roundtrip(Join {
+    roundtrip(&Join {
         room: "general".into(),
         user: "bob".into(),
     });
@@ -110,24 +112,24 @@ fn roundtrip_named() {
 
 #[test]
 fn roundtrip_implicit_name() {
-    roundtrip(AutoName);
+    roundtrip(&AutoName);
 }
 
 #[test]
 fn roundtrip_generic() {
-    roundtrip(Payload {
+    roundtrip(&Payload {
         value: "sioc".to_string(),
     });
 }
 
 #[test]
 fn wrong_name_fails() {
-    assert!(event_from_json::<Hello>("[\"bye\"]").is_err());
+    event_from_json::<Hello>("[\"bye\"]").unwrap_err();
 }
 
 #[test]
 fn strict_rejects_trailing() {
-    assert!(event_from_json::<Chat>("[\"chat\",\"hi\",null]").is_err());
+    event_from_json::<Chat>("[\"chat\",\"hi\",null]").unwrap_err();
 }
 
 #[test]
@@ -153,7 +155,7 @@ fn flatten_collects() {
 
 #[test]
 fn flatten_roundtrip() {
-    roundtrip(Stream {
+    roundtrip(&Stream {
         id: "s1".into(),
         tags: vec![serde_json::json!(42)],
     });

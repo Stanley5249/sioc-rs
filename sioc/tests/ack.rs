@@ -1,3 +1,5 @@
+//! Wire-format tests for derived acknowledgement types.
+
 use sioc::prelude::*;
 
 #[derive(Debug, PartialEq, AckType, SerializePayload, DeserializePayload)]
@@ -32,12 +34,12 @@ struct Flex {
 
 fn assert_binary_marker<A: AckType<Binary = HasBinary>>() {}
 
-fn roundtrip<A>(val: A)
+fn roundtrip<A>(val: &A)
 where
     A: std::fmt::Debug + PartialEq + AckType + SerializePayload + DeserializePayload,
 {
-    let bytes = ack_to_json(&val).unwrap();
-    assert_eq!(ack_from_json::<A>(&bytes).unwrap(), val);
+    let bytes = ack_to_json(val).unwrap();
+    assert_eq!(ack_from_json::<A>(&bytes).unwrap(), *val);
 }
 
 #[test]
@@ -62,22 +64,22 @@ fn wire_named() {
 
 #[test]
 fn roundtrip_unit() {
-    roundtrip(Empty);
+    roundtrip(&Empty);
 }
 
 #[test]
 fn roundtrip_tuple() {
-    roundtrip(Status(false, 404));
+    roundtrip(&Status(false, 404));
 }
 
 #[test]
 fn roundtrip_named() {
-    roundtrip(Save { ok: false, id: 0 });
+    roundtrip(&Save { ok: false, id: 0 });
 }
 
 #[test]
 fn strict_rejects_trailing() {
-    assert!(ack_from_json::<Strict>("[true,\"extra\"]").is_err());
+    ack_from_json::<Strict>("[true,\"extra\"]").unwrap_err();
 }
 
 #[test]
@@ -94,7 +96,7 @@ fn flatten_collects() {
 
 #[test]
 fn flatten_roundtrip() {
-    roundtrip(Flex {
+    roundtrip(&Flex {
         ok: true,
         extras: vec![serde_json::json!(42)],
     });
