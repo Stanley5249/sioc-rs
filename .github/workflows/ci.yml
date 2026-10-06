@@ -17,16 +17,34 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
-  deny:
-    timeout-minutes: 10
+  validation:
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: oven-sh/setup-bun@v2
+      - uses: astral-sh/setup-uv@v7
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-deny
-      - run: cargo deny --locked check
+          tool: just, cargo-deny
+      - run: rustup toolchain install nightly-2026-07-20 --profile minimal --component rustfmt
+      - run: bun install --frozen-lockfile
+      - run: uv sync --locked
+      # just runs independent checks together and reports their timing.
+      - run: just --time --timestamp check
+      # Cargo work shares target/ and runs in order; preserve later results.
+      - if: ${{ !cancelled() }}
+        run: cargo doc --locked --no-deps --workspace --examples
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - if: ${{ !cancelled() }}
+        run: cargo deny --locked check
 
   msrv:
     timeout-minutes: 20
@@ -38,73 +56,6 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo +1.88 check --locked --workspace --all-targets
-
-  # Later steps run with `!cancelled()` so one failing check does not hide
-  # the next one's results.
-  lint:
-    timeout-minutes: 20
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just
-      - run: rustup toolchain install nightly-2026-07-20 --profile minimal --component rustfmt
-      - run: cargo +nightly-2026-07-20 fmt --all --check
-      - if: ${{ !cancelled() }}
-        run: |
-          just --fmt --check
-          just --fmt --justfile examples/justfile --check
-      - if: ${{ !cancelled() }}
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
-
-  lint-js:
-    timeout-minutes: 10
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install --frozen-lockfile
-      # Wait for both checks and propagate either failure.
-      - name: Check JavaScript and managed formatting
-        run: |
-          bunx oxfmt --check &
-          fmt_pid=$!
-          bunx oxlint &
-          lint_pid=$!
-          status=0
-          wait "$fmt_pid" || status=1
-          wait "$lint_pid" || status=1
-          exit "$status"
-
-  lint-py:
-    timeout-minutes: 10
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
-      # Prepare the shared environment before the read-only checks run together.
-      - run: uv sync --locked
-      # Wait for every check, including when another check fails.
-      - name: Check Python formatting, lint, and types
-        run: |
-          uv run --locked ruff format --check &
-          fmt_pid=$!
-          uv run --locked ruff check --output-format github &
-          lint_pid=$!
-          uv run --locked pyrefly check --output-format full-text-with-github --min-severity warn &
-          types_pid=$!
-          status=0
-          wait "$fmt_pid" || status=1
-          wait "$lint_pid" || status=1
-          wait "$types_pid" || status=1
-          exit "$status"
 
   # Reference-server tests share the compiled Rust test binaries.
   test:
@@ -150,22 +101,9 @@ jobs:
           files: lcov.info
           fail_ci_if_error: true
 
-  doc:
-    timeout-minutes: 20
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo doc --locked --no-deps --workspace --examples
-        env:
-          RUSTDOCFLAGS: -D warnings
-
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [deny, msrv, lint, lint-js, lint-py, test, doc]
+    needs: [validation, msrv, test]
     runs-on: ubuntu-latest
     permissions:
       contents: write
