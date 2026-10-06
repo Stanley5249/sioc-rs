@@ -218,8 +218,8 @@ async fn protocol_noop_is_ignored() {
         .unwrap();
     let (result, frames, messages) = engine.finish().await;
     result.unwrap();
-    assert!(frames.is_empty());
-    assert!(messages.is_empty());
+    assert_eq!(frames, [] as [Frame; 0]);
+    assert_eq!(messages, [] as [Message; 0]);
 }
 
 #[tokio::test]
