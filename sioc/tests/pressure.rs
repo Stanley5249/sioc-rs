@@ -14,26 +14,26 @@ const FLOOD: u32 = 2000;
 const CAPACITIES: [usize; 3] = [1, 4, 32];
 
 #[derive(Debug, PartialEq, EventType, SerializePayload, DeserializePayload)]
-struct Ping(u32);
+struct Echo(u32);
 
 #[derive(Debug, PartialEq, EventType, SerializePayload, DeserializePayload)]
-struct Pong(u32);
+struct Reply(u32);
 
 #[derive(Debug, EventRouter)]
 enum FloodEvent {
-    Pong(Event<Pong>),
+    Reply(Event<Reply>),
 }
 
-/// Serves a namespace that floods `pong` events and counts the `ping`s it gets back.
-async fn flood_server(pings: Arc<AtomicU32>) -> Url {
+/// Serves a namespace that floods `reply` events and counts the `echo`s it gets back.
+async fn flood_server(echoes: Arc<AtomicU32>) -> Url {
     let (layer, io) = SocketIo::new_layer();
     io.ns("/", async move |socket: SocketRef| {
-        socket.on("ping", async move |_: SocketRef, Data::<(u32,)>(_)| {
-            pings.fetch_add(1, Ordering::Relaxed);
+        socket.on("echo", async move |_: SocketRef, Data::<(u32,)>(_)| {
+            echoes.fetch_add(1, Ordering::Relaxed);
         });
         tokio::spawn(async move {
             for i in 0..FLOOD {
-                if socket.emit("pong", &(i,)).is_err() {
+                if socket.emit("reply", &(i,)).is_err() {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -49,26 +49,26 @@ async fn flood_server(pings: Arc<AtomicU32>) -> Url {
 
 /// Echoes every event from the receive loop while reading slower than the server floods.
 async fn echo_flood(capacity: usize) {
-    let pings = Arc::new(AtomicU32::new(0));
-    let url = flood_server(pings.clone()).await;
+    let echoes = Arc::new(AtomicU32::new(0));
+    let url = flood_server(echoes.clone()).await;
     let client = ClientBuilder::new(url).channels(capacity).open().unwrap();
     let (tx, mut rx) = client.connect("/").await.unwrap();
 
     let mut received = 0;
     while received < FLOOD {
-        if let Some(FloodEvent::Pong(Event {
-            payload: Pong(i), ..
+        if let Some(FloodEvent::Reply(Event {
+            payload: Reply(i), ..
         })) = rx.listen::<FloodEvent>().await.unwrap()
         {
             received += 1;
             if received % 50 == 0 {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
-            tx.emit(Ping(i)).await.unwrap();
+            tx.emit(Echo(i)).await.unwrap();
         }
     }
 
-    while pings.load(Ordering::Relaxed) < FLOOD {
+    while echoes.load(Ordering::Relaxed) < FLOOD {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }

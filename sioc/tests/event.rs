@@ -1,7 +1,7 @@
 use sioc::prelude::*;
 
 #[derive(Debug, PartialEq, EventType, SerializePayload, DeserializePayload)]
-struct Ping;
+struct Hello;
 
 #[derive(Debug, PartialEq, EventType, SerializePayload, DeserializePayload)]
 struct Moved(i32, i32);
@@ -58,7 +58,7 @@ fn binary_event_marker() {
 
 #[test]
 fn name_explicit() {
-    assert_eq!(Ping::NAME, "ping");
+    assert_eq!(Hello::NAME, "hello");
     assert_eq!(Moved::NAME, "moved");
     assert_eq!(Join::NAME, "join");
 }
@@ -70,7 +70,7 @@ fn name_implicit() {
 
 #[test]
 fn wire_unit() {
-    assert_eq!(event_to_json(&Ping).unwrap(), "[\"ping\"]");
+    assert_eq!(event_to_json(&Hello).unwrap(), "[\"hello\"]");
 }
 
 #[test]
@@ -92,7 +92,7 @@ fn wire_named() {
 
 #[test]
 fn roundtrip_unit() {
-    roundtrip(Ping);
+    roundtrip(Hello);
 }
 
 #[test]
@@ -122,7 +122,7 @@ fn roundtrip_generic() {
 
 #[test]
 fn wrong_name_fails() {
-    assert!(event_from_json::<Ping>("[\"pong\"]").is_err());
+    assert!(event_from_json::<Hello>("[\"bye\"]").is_err());
 }
 
 #[test]
@@ -132,7 +132,10 @@ fn strict_rejects_trailing() {
 
 #[test]
 fn flexible_discards_trailing() {
-    assert_eq!(event_from_json::<Ping>("[\"ping\",null,42]").unwrap(), Ping);
+    assert_eq!(
+        event_from_json::<Hello>("[\"hello\",null,42]").unwrap(),
+        Hello
+    );
 }
 
 #[test]

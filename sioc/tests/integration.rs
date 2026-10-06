@@ -7,30 +7,30 @@ use tokio::net::TcpListener;
 use url::Url;
 
 // sioc wire format: tuple struct fields become positional JSON args.
-// Ping(42) -> ["ping", 42], Pong(42) -> ["pong", 42].
+// Echo(42) -> ["echo", 42], Reply(42) -> ["reply", 42].
 // On the socketioxide side we mirror this with (u32,) tuples.
 
 #[derive(Debug, PartialEq, EventType, SerializePayload, DeserializePayload)]
-struct Ping(u32);
+struct Echo(u32);
 
 #[derive(Debug, PartialEq, EventType, SerializePayload, DeserializePayload)]
-struct Pong(u32);
-
-#[derive(Debug, PartialEq, EventType, SerializePayload, DeserializePayload)]
-#[sioc(event(ack = "Confirm"))]
-struct PingWithAck(u32);
+struct Reply(u32);
 
 #[derive(Debug, PartialEq, EventType, SerializePayload, DeserializePayload)]
 #[sioc(event(ack = "Confirm"))]
-struct ServerPing(u32);
+struct EchoWithAck(u32);
+
+#[derive(Debug, PartialEq, EventType, SerializePayload, DeserializePayload)]
+#[sioc(event(ack = "Confirm"))]
+struct ServerAsk(u32);
 
 #[derive(Debug, PartialEq, AckType, SerializePayload, DeserializePayload)]
 struct Confirm(bool);
 
 #[derive(Debug, EventRouter)]
 enum MyEvent {
-    Pong(Event<Pong>),
-    ServerPing(Event<ServerPing>),
+    Reply(Event<Reply>),
+    ServerAsk(Event<ServerAsk>),
 }
 
 async fn spawn_server(setup: impl FnOnce(&SocketIo)) -> u16 {
@@ -59,8 +59,8 @@ async fn ws_connect() {
 async fn ws_emit_echo() {
     let port = spawn_server(|io| {
         io.ns("/", async |socket: SocketRef| {
-            socket.on("ping", async |socket: SocketRef, Data::<(u32,)>((seq,))| {
-                socket.emit("pong", &(seq,)).ok();
+            socket.on("echo", async |socket: SocketRef, Data::<(u32,)>((seq,))| {
+                socket.emit("reply", &(seq,)).ok();
             });
         });
     })
@@ -69,12 +69,12 @@ async fn ws_emit_echo() {
     let client = ClientBuilder::new(url).open().unwrap();
     let (tx, mut rx) = client.connect("/").await.unwrap();
     rx.recv().await.unwrap();
-    tx.emit(Ping(7)).await.unwrap();
+    tx.emit(Echo(7)).await.unwrap();
     let event = rx.listen::<MyEvent>().await.unwrap().unwrap();
     assert!(matches!(
         event,
-        MyEvent::Pong(Event {
-            payload: Pong(7),
+        MyEvent::Reply(Event {
+            payload: Reply(7),
             ..
         })
     ));
@@ -85,7 +85,7 @@ async fn ws_client_ack() {
     let port = spawn_server(|io| {
         io.ns("/", async |socket: SocketRef| {
             socket.on(
-                "ping_with_ack",
+                "echo_with_ack",
                 async |_: SocketRef, Data::<(u32,)>(_), ack: AckSender| {
                     ack.send(&(true,)).ok();
                 },
@@ -97,7 +97,7 @@ async fn ws_client_ack() {
     let client = ClientBuilder::new(url).open().unwrap();
     let (tx, mut rx) = client.connect("/").await.unwrap();
     rx.recv().await.unwrap();
-    let handle = tx.emit(PingWithAck(1)).await.unwrap();
+    let handle = tx.emit(EchoWithAck(1)).await.unwrap();
     let Ack {
         payload: Confirm(ok),
         ..
@@ -110,7 +110,7 @@ async fn ws_server_ack() {
     let port = spawn_server(|io| {
         io.ns("/", async |socket: SocketRef| {
             let _ = socket
-                .emit_with_ack::<(u32,), (bool,)>("server_ping", &(99u32,))
+                .emit_with_ack::<(u32,), (bool,)>("server_ask", &(99u32,))
                 .unwrap()
                 .await;
         });
@@ -121,7 +121,7 @@ async fn ws_server_ack() {
     let (tx, mut rx) = client.connect("/").await.unwrap();
     rx.recv().await.unwrap();
     let event = rx.listen::<MyEvent>().await.unwrap().unwrap();
-    let MyEvent::ServerPing(Event { id, .. }) = event else {
+    let MyEvent::ServerAsk(Event { id, .. }) = event else {
         panic!("wrong event");
     };
     tx.acknowledge(id, Confirm(true)).await.unwrap();
@@ -146,8 +146,8 @@ async fn polling_connect() {
 async fn polling_emit_echo() {
     let port = spawn_server(|io| {
         io.ns("/", async |socket: SocketRef| {
-            socket.on("ping", async |socket: SocketRef, Data::<(u32,)>((seq,))| {
-                socket.emit("pong", &(seq,)).ok();
+            socket.on("echo", async |socket: SocketRef, Data::<(u32,)>((seq,))| {
+                socket.emit("reply", &(seq,)).ok();
             });
         });
     })
@@ -159,12 +159,12 @@ async fn polling_emit_echo() {
         .unwrap();
     let (tx, mut rx) = client.connect("/").await.unwrap();
     rx.recv().await.unwrap();
-    tx.emit(Ping(99)).await.unwrap();
+    tx.emit(Echo(99)).await.unwrap();
     let event = rx.listen::<MyEvent>().await.unwrap().unwrap();
     assert!(matches!(
         event,
-        MyEvent::Pong(Event {
-            payload: Pong(99),
+        MyEvent::Reply(Event {
+            payload: Reply(99),
             ..
         })
     ));
