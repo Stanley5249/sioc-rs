@@ -7,7 +7,6 @@ on:
   workflow_dispatch:
 
 env:
-  SIOC_VERBOSE: "1"
   NEXTEST_PROFILE: ci
 
 permissions:
