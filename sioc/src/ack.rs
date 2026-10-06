@@ -151,7 +151,12 @@ pub struct AckHandle<A> {
 
 impl<A: AckType> AckHandle<A> {
     /// Wraps a oneshot receiver into a typed ack handle.
-    pub(crate) fn new(rx: oneshot::Receiver<DynAck>) -> Self {
+    ///
+    /// An [`Emit`](crate::client::Emit) implementation pairs this receiver
+    /// with the sender it puts in [`ClientPacket::Event`]'s `ack_tx`.
+    ///
+    /// [`ClientPacket::Event`]: crate::packet::ClientPacket::Event
+    pub fn new(rx: oneshot::Receiver<DynAck>) -> Self {
         Self {
             rx,
             marker: PhantomData,
