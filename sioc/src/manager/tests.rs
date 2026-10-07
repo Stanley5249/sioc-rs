@@ -10,16 +10,47 @@ use tokio::task::JoinHandle;
 use crate::client::SocketSender;
 use crate::error::{ManagerError, SocketError};
 use crate::manager::connect_request::ConnectRequest;
+use crate::manager::supervisor::Supervisor;
 use crate::packet::{ClientPacket, DynAck, ServerAckId, ServerPacket};
 
 const CONNECT_RESPONSE: &str = "0{\"sid\":\"test\"}";
 
-/// A running manager with the client handle and both engine ends of its
-/// channels.
-struct TestManager {
-    connect_request_tx: mpsc::Sender<ConnectRequest>,
+/// The engine end of one session, which a test plays.
+struct TestSession {
     server_message_tx: mpsc::Sender<Message>,
     client_message_rx: mpsc::Receiver<Message>,
+    /// Finishes the engine; dropping it finishes the engine without an error.
+    result_tx: oneshot::Sender<Result<(), eioc::error::Error>>,
+}
+
+impl TestSession {
+    /// Ends the session as the engine does: closes the server direction,
+    /// takes client messages until the manager hangs up, then finishes.
+    ///
+    /// Returns the client messages that were still queued.
+    async fn end(self) -> Vec<Message> {
+        let Self {
+            server_message_tx,
+            mut client_message_rx,
+            result_tx,
+        } = self;
+        drop(server_message_tx);
+        let mut messages = Vec::new();
+        while let Some(message) = client_message_rx.recv().await {
+            messages.push(message);
+        }
+        result_tx.send(Ok(())).unwrap();
+        messages
+    }
+}
+
+/// A running manager with the client handle and the engine end of its open
+/// session.
+struct TestManager {
+    connect_request_tx: mpsc::Sender<ConnectRequest>,
+    session: Option<TestSession>,
+    /// Receives each session the supervisor opens after the first.
+    session_rx: mpsc::Receiver<TestSession>,
     task: JoinHandle<Result<(), ManagerError>>,
 }
 
@@ -38,36 +69,85 @@ fn event(payload: &'static str, ack_tx: Option<oneshot::Sender<DynAck>>) -> Clie
 }
 
 impl TestManager {
-    fn spawn() -> Self {
+    /// Spawns a manager that stops instead of reconnecting, and takes its first
+    /// session.
+    async fn spawn() -> Self {
+        Self::spawn_with(None).await
+    }
+
+    /// Spawns a manager that reconnects at once, and takes its first session.
+    async fn spawn_reconnecting() -> Self {
+        Self::spawn_with(Some(Duration::ZERO)).await
+    }
+
+    async fn spawn_with(retry_delay: Option<Duration>) -> Self {
         let (connect_request_tx, connect_request_rx) = mpsc::channel(32);
-        let (server_message_tx, server_message_rx) = mpsc::channel(32);
-        let (client_message_tx, client_message_rx) = mpsc::channel(32);
-        let task = tokio::spawn(crate::manager::session::run(
-            connect_request_rx,
-            server_message_rx,
-            client_message_tx,
-        ));
+        let (session_tx, mut session_rx) = mpsc::channel(1);
+        let connect_engine = move |server_message_tx, client_message_rx| {
+            let session_tx = session_tx.clone();
+            async move {
+                let (result_tx, result_rx) = oneshot::channel();
+                let session = TestSession {
+                    server_message_tx,
+                    client_message_rx,
+                    result_tx,
+                };
+                // A finished test takes no more sessions.
+                if session_tx.send(session).await.is_err() {
+                    return Ok(());
+                }
+                result_rx.await.unwrap_or(Ok(()))
+            }
+        };
+        let supervisor = Supervisor {
+            server_message_capacity: 32,
+            client_message_capacity: 32,
+            retry_delay,
+            connect_engine,
+        };
+        let task = tokio::spawn(crate::manager::session::run(connect_request_rx, supervisor));
+        let session = session_rx.recv().await;
         Self {
             connect_request_tx,
-            server_message_tx,
-            client_message_rx,
+            session,
+            session_rx,
             task,
         }
+    }
+
+    /// Returns the engine end of the open session.
+    fn session(&mut self) -> &mut TestSession {
+        self.session.as_mut().expect("a session is open")
+    }
+
+    /// Ends the open session from the engine side and takes the next one.
+    ///
+    /// Returns the client messages that were still queued for the old session.
+    async fn reconnect(&mut self) -> Vec<Message> {
+        let messages = self.session.take().expect("a session is open").end().await;
+        self.session = Some(
+            self.session_rx
+                .recv()
+                .await
+                .expect("the manager reconnects"),
+        );
+        messages
     }
 
     /// Opens a namespace as `Client::connect` does and consumes its CONNECT
     /// packet.
     async fn open(&mut self, ns: &str) -> (SocketSender, mpsc::Receiver<ServerPacket>) {
-        self.open_with(ns, 32).await
+        self.open_with(ns, ByteString::new(), 32).await
     }
 
     async fn open_with(
         &mut self,
         ns: &str,
+        auth: ByteString,
         server_packet_capacity: usize,
     ) -> (SocketSender, mpsc::Receiver<ServerPacket>) {
         let (connect_request, handles) =
-            ConnectRequest::new(ns.into(), ByteString::new(), 32, server_packet_capacity);
+            ConnectRequest::new(ns.into(), auth, 32, server_packet_capacity);
         self.connect_request_tx.send(connect_request).await.unwrap();
         assert!(self.recv_client_text().await.starts_with('0'));
         handles.reply_rx.await.unwrap().unwrap();
@@ -75,79 +155,62 @@ impl TestManager {
         (client_packet_tx, handles.server_packet_rx)
     }
 
-    async fn send_server_message(&self, text: &'static str) {
-        self.server_message_tx
+    async fn send_server_message(&mut self, text: &'static str) {
+        self.session()
+            .server_message_tx
             .send(Message::Text(ByteString::from_static(text)))
             .await
             .unwrap();
     }
 
-    async fn send_server_binary(&self, bytes: &'static [u8]) {
-        self.server_message_tx
+    async fn send_server_binary(&mut self, bytes: &'static [u8]) {
+        self.session()
+            .server_message_tx
             .send(Message::Binary(Bytes::from_static(bytes)))
             .await
             .unwrap();
     }
 
     async fn recv_client_text(&mut self) -> ByteString {
-        match self.client_message_rx.recv().await {
+        match self.session().client_message_rx.recv().await {
             Some(Message::Text(text)) => text,
             other => panic!("expected text, got {other:?}"),
         }
     }
 
     async fn recv_client_binary(&mut self) -> Bytes {
-        match self.client_message_rx.recv().await {
+        match self.session().client_message_rx.recv().await {
             Some(Message::Binary(bytes)) => bytes,
             other => panic!("expected binary, got {other:?}"),
         }
     }
 
-    /// Ends the session from the engine side and returns the manager's result.
+    /// Drops the client handle, ends the open session from the engine side,
+    /// and returns the manager's result.
     ///
-    /// Keeps reading client messages meanwhile, as the engine drains them, so
-    /// a full queue cannot stall the manager and hang the test.
+    /// A manager that stops instead of reconnecting ends with the session; one
+    /// that reconnects ends once its namespaces are gone.
     async fn finish(self) -> Result<(), ManagerError> {
         let Self {
             connect_request_tx,
-            server_message_tx,
-            mut client_message_rx,
+            session,
+            session_rx: _session_rx,
             task,
         } = self;
-        drop(server_message_tx);
-        let drain = async move { while client_message_rx.recv().await.is_some() {} };
-        let (result, ()) = tokio::join!(task, drain);
         drop(connect_request_tx);
-        result.unwrap()
-    }
-
-    /// Plays the engine after a manager error and returns the manager's result.
-    ///
-    /// Waits for the manager to close the session, checks that it still accepts
-    /// server messages meanwhile, then hangs up as the engine does.
-    async fn finish_after_error(self) -> Result<(), ManagerError> {
-        let Self {
-            connect_request_tx: _connect_request_tx,
-            server_message_tx,
-            mut client_message_rx,
-            task,
-        } = self;
-        while client_message_rx.recv().await.is_some() {}
-        server_message_tx
-            .send(Message::Text(ByteString::from_static(r#"2["late"]"#)))
-            .await
-            .unwrap();
-        drop(server_message_tx);
+        if let Some(session) = session {
+            session.end().await;
+        }
         task.await.unwrap()
     }
 }
 
 #[tokio::test]
 async fn stays_open_with_no_namespace() {
-    let mut manager = TestManager::spawn();
-    assert_quiet(&mut manager.client_message_rx).await;
+    let mut manager = TestManager::spawn().await;
+    assert_quiet(&mut manager.session().client_message_rx).await;
     assert!(matches!(
-        manager.client_message_rx.try_recv(),
+        manager.session().client_message_rx.try_recv(),
         Err(TryRecvError::Empty)
     ));
     manager.finish().await.unwrap();
@@ -155,62 +218,82 @@ async fn stays_open_with_no_namespace() {
 
 #[tokio::test]
 async fn closes_when_client_handle_drops_with_no_namespace() {
-    let mut manager = TestManager::spawn();
-    drop(manager.connect_request_tx);
-    assert!(manager.client_message_rx.recv().await.is_none());
-    drop(manager.server_message_tx);
-    manager.task.await.unwrap().unwrap();
+    let TestManager {
+        connect_request_tx,
+        session,
+        task,
+        ..
+    } = TestManager::spawn().await;
+    let mut session = session.unwrap();
+    drop(connect_request_tx);
+    assert!(session.client_message_rx.recv().await.is_none());
+    session.end().await;
+    task.await.unwrap().unwrap();
 }
 
 #[tokio::test]
 async fn stays_open_after_last_namespace_while_client_handle_lives() {
-    let mut manager = TestManager::spawn();
+    let mut manager = TestManager::spawn().await;
     let (client_packet_tx, _server_packet_rx) = manager.open("/").await;
     client_packet_tx.disconnect();
     assert_eq!(&*manager.recv_client_text().await, "1");
-    assert_quiet(&mut manager.client_message_rx).await;
+    assert_quiet(&mut manager.session().client_message_rx).await;
     assert!(matches!(
-        manager.client_message_rx.try_recv(),
+        manager.session().client_message_rx.try_recv(),
         Err(TryRecvError::Empty)
     ));
 
-    drop(manager.connect_request_tx);
-    assert!(manager.client_message_rx.recv().await.is_none());
-    drop(manager.server_message_tx);
-    manager.task.await.unwrap().unwrap();
+    let TestManager {
+        connect_request_tx,
+        session,
+        task,
+        ..
+    } = manager;
+    let mut session = session.unwrap();
+    drop(connect_request_tx);
+    assert!(session.client_message_rx.recv().await.is_none());
+    session.end().await;
+    task.await.unwrap().unwrap();
 }
 
 #[tokio::test]
 async fn closes_after_client_handle_and_last_namespace_drop() {
-    let mut manager = TestManager::spawn();
+    let mut manager = TestManager::spawn().await;
     let (client_packet_tx, _server_packet_rx) = manager.open("/").await;
-    drop(manager.connect_request_tx);
-    assert_quiet(&mut manager.client_message_rx).await;
+    let TestManager {
+        connect_request_tx,
+        session,
+        task,
+        ..
+    } = manager;
+    let mut session = session.unwrap();
+    drop(connect_request_tx);
+    assert_quiet(&mut session.client_message_rx).await;
 
     drop(client_packet_tx);
     assert!(matches!(
-        manager.client_message_rx.recv().await,
+        session.client_message_rx.recv().await,
         Some(Message::Text(text)) if text == "1"
     ));
-    assert!(manager.client_message_rx.recv().await.is_none());
-    drop(manager.server_message_tx);
-    manager.task.await.unwrap().unwrap();
+    assert!(session.client_message_rx.recv().await.is_none());
+    session.end().await;
+    task.await.unwrap().unwrap();
 }
 
 #[tokio::test]
 async fn dropping_handles_disconnects_only_that_namespace() {
-    let mut manager = TestManager::spawn();
+    let mut manager = TestManager::spawn().await;
     let (client_packet_tx, _server_packet_rx) = manager.open("/").await;
     let (_other_tx, _other_rx) = manager.open("/other").await;
     drop(client_packet_tx);
     assert_eq!(&*manager.recv_client_text().await, "1");
-    assert_quiet(&mut manager.client_message_rx).await;
+    assert_quiet(&mut manager.session().client_message_rx).await;
     manager.finish().await.unwrap();
 }
 
 #[tokio::test]
 async fn events_wait_for_server_connect_in_order() {
-    let mut manager = TestManager::spawn();
+    let mut manager = TestManager::spawn().await;
     let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
     client_packet_tx
         .send(event(r#"["a"]"#, None))
@@ -220,7 +303,7 @@ async fn events_wait_for_server_connect_in_order() {
         .send(event(r#"["b"]"#, None))
         .await
         .unwrap();
-    assert_quiet(&mut manager.client_message_rx).await;
+    assert_quiet(&mut manager.session().client_message_rx).await;
 
     manager.send_server_message(CONNECT_RESPONSE).await;
     assert!(matches!(
@@ -240,7 +323,7 @@ async fn events_wait_for_server_connect_in_order() {
 
 #[tokio::test]
 async fn ack_roundtrip() {
-    let mut manager = TestManager::spawn();
+    let mut manager = TestManager::spawn().await;
     let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
     manager.send_server_message(CONNECT_RESPONSE).await;
     server_packet_rx.recv().await.unwrap();
@@ -259,7 +342,7 @@ async fn ack_roundtrip() {
 
 #[tokio::test]
 async fn binary_ack_reassembly() {
-    let mut manager = TestManager::spawn();
+    let mut manager = TestManager::spawn().await;
     let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
     manager.send_server_message(CONNECT_RESPONSE).await;
     server_packet_rx.recv().await.unwrap();
@@ -284,7 +367,7 @@ async fn binary_ack_reassembly() {
 
 #[tokio::test]
 async fn binary_event_waits_for_every_attachment() {
-    let mut manager = TestManager::spawn();
+    let mut manager = TestManager::spawn().await;
     let (_client_packet_tx, mut server_packet_rx) = manager.open("/").await;
     manager.send_server_message(CONNECT_RESPONSE).await;
     server_packet_rx.recv().await.unwrap();
@@ -304,7 +387,7 @@ async fn binary_event_waits_for_every_attachment() {
 
 #[tokio::test]
 async fn binary_event_sends_attachments() {
-    let mut manager = TestManager::spawn();
+    let mut manager = TestManager::spawn().await;
     let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
     manager.send_server_message(CONNECT_RESPONSE).await;
     server_packet_rx.recv().await.unwrap();
@@ -325,7 +408,7 @@ async fn binary_event_sends_attachments() {
 
 #[tokio::test]
 async fn ack_is_not_buffered() {
-    let mut manager = TestManager::spawn();
+    let mut manager = TestManager::spawn().await;
     let (client_packet_tx, _server_packet_rx) = manager.open("/").await;
     let client_packet = ClientPacket::Ack {
         payload: ByteString::from_static("[true]"),
@@ -339,7 +422,7 @@ async fn ack_is_not_buffered() {
 
 #[tokio::test]
 async fn binary_ack_sends_attachments() {
-    let mut manager = TestManager::spawn();
+    let mut manager = TestManager::spawn().await;
     let (client_packet_tx, _server_packet_rx) = manager.open("/").await;
     let client_packet = ClientPacket::Ack {
         payload: ByteString::from_static("[true]"),
@@ -357,7 +440,7 @@ async fn binary_ack_sends_attachments() {
 
 #[tokio::test]
 async fn server_disconnect_ends_receiver_and_handles() {
-    let mut manager = TestManager::spawn();
+    let mut manager = TestManager::spawn().await;
     let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
     manager.send_server_message(CONNECT_RESPONSE).await;
     server_packet_rx.recv().await.unwrap();
@@ -378,13 +461,13 @@ async fn server_disconnect_ends_receiver_and_handles() {
 
     // The server closed the namespace, so dropping the handles sends nothing.
     drop(client_packet_tx);
-    assert_quiet(&mut manager.client_message_rx).await;
+    assert_quiet(&mut manager.session().client_message_rx).await;
     manager.finish().await.unwrap();
 }
 
 #[tokio::test]
 async fn connect_error_closes_namespace() {
-    let mut manager = TestManager::spawn();
+    let mut manager = TestManager::spawn().await;
     let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
     manager
         .send_server_message(r#"4{"message":"denied"}"#)
@@ -411,7 +494,7 @@ async fn connect_error_closes_namespace() {
 
 #[tokio::test]
 async fn client_close_sends_earlier_packets_first() {
-    let mut manager = TestManager::spawn();
+    let mut manager = TestManager::spawn().await;
     let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
     manager.send_server_message(CONNECT_RESPONSE).await;
     server_packet_rx.recv().await.unwrap();
@@ -429,7 +512,7 @@ async fn client_close_sends_earlier_packets_first() {
 
 #[tokio::test]
 async fn reopened_namespace_ignores_old_handles() {
-    let mut manager = TestManager::spawn();
+    let mut manager = TestManager::spawn().await;
     let (old_tx, mut old_rx) = manager.open("/").await;
     manager.send_server_message(CONNECT_RESPONSE).await;
     old_rx.recv().await.unwrap();
@@ -443,13 +526,13 @@ async fn reopened_namespace_ignores_old_handles() {
     old_tx.send(event(r#"["old"]"#, None)).await.unwrap_err();
     new_tx.send(event(r#"["new"]"#, None)).await.unwrap();
     assert_eq!(&*manager.recv_client_text().await, r#"2["new"]"#);
-    assert_quiet(&mut manager.client_message_rx).await;
+    assert_quiet(&mut manager.session().client_message_rx).await;
     manager.finish().await.unwrap();
 }
 
 #[tokio::test]
 async fn duplicate_namespace_is_conflict() {
-    let mut manager = TestManager::spawn();
+    let mut manager = TestManager::spawn().await;
     let (_client_packet_tx, _server_packet_rx) = manager.open("/").await;
     let (connect_request, handles) = ConnectRequest::new("/".into(), ByteString::new(), 1, 1);
     manager
@@ -467,7 +550,7 @@ async fn duplicate_namespace_is_conflict() {
 
 #[tokio::test]
 async fn late_server_packets_are_discarded() {
-    let mut manager = TestManager::spawn();
+    let mut manager = TestManager::spawn().await;
     manager.send_server_message(r#"2/gone,["late"]"#).await;
     manager.send_server_message(r#"30["late"]"#).await;
     manager.send_server_message("1/gone,").await;
@@ -483,7 +566,7 @@ async fn late_server_packets_are_discarded() {
 
 #[tokio::test]
 async fn dropped_receiver_discards_events() {
-    let mut manager = TestManager::spawn();
+    let mut manager = TestManager::spawn().await;
     let (client_packet_tx, server_packet_rx) = manager.open("/").await;
     drop(server_packet_rx);
     manager.send_server_message(CONNECT_RESPONSE).await;
@@ -501,47 +584,84 @@ async fn dropped_receiver_discards_events() {
 async fn closed_engine_channel_is_error() {
     let TestManager {
         connect_request_tx,
-        server_message_tx: _server_message_tx,
-        client_message_rx,
+        session,
+        session_rx: _session_rx,
         task,
-    } = TestManager::spawn();
+    } = TestManager::spawn().await;
+    let TestSession {
+        server_message_tx,
+        client_message_rx,
+        result_tx,
+    } = session.unwrap();
     drop(client_message_rx);
-    let (connect_request, _handles) = ConnectRequest::new("/".into(), ByteString::new(), 1, 1);
+    let (connect_request, handles) = ConnectRequest::new("/".into(), ByteString::new(), 1, 1);
     connect_request_tx.send(connect_request).await.unwrap();
+    // The failed CONNECT drops the reply.
+    handles.reply_rx.await.unwrap_err();
+
+    drop(server_message_tx);
+    drop(result_tx);
     assert!(matches!(
         task.await.unwrap(),
         Err(ManagerError::ClientMessage(_))
     ));
 }
 
-#[tokio::test]
-async fn unexpected_binary_is_error() {
-    let manager = TestManager::spawn();
-    manager.send_server_binary(b"\xFF").await;
-    assert!(matches!(
-        manager.finish_after_error().await,
-        Err(ManagerError::UnexpectedBinary(_))
-    ));
-}
-
-#[tokio::test]
-async fn text_during_binary_reassembly_is_error() {
-    let mut manager = TestManager::spawn();
-    let (_client_packet_tx, mut server_packet_rx) = manager.open("/").await;
+/// Breaks the protocol in an open session, then checks that the manager closes
+/// the session, keeps accepting server messages until the engine hangs up, and
+/// reconnects.
+async fn assert_protocol_error_reconnects(breach: &[Message]) {
+    let mut manager = TestManager::spawn_reconnecting().await;
+    let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
     manager.send_server_message(CONNECT_RESPONSE).await;
     server_packet_rx.recv().await.unwrap();
 
-    manager.send_server_message(r#"51-["img"]"#).await;
-    manager.send_server_message(r#"2["oops"]"#).await;
+    let TestSession {
+        server_message_tx,
+        mut client_message_rx,
+        result_tx,
+    } = manager.session.take().unwrap();
+    for message in breach {
+        server_message_tx.send(message.clone()).await.unwrap();
+    }
+    assert!(client_message_rx.recv().await.is_none());
+    server_message_tx
+        .send(Message::Text(ByteString::from_static(r#"2["late"]"#)))
+        .await
+        .unwrap();
+    drop(server_message_tx);
+    result_tx.send(Ok(())).unwrap();
+
+    manager.session = manager.session_rx.recv().await;
+    assert_eq!(&*manager.recv_client_text().await, "0");
+    manager.send_server_message(CONNECT_RESPONSE).await;
     assert!(matches!(
-        manager.finish_after_error().await,
-        Err(ManagerError::UnexpectedText(_))
+        server_packet_rx.recv().await,
+        Some(ServerPacket::Connect(_))
     ));
+
+    drop(client_packet_tx);
+    assert_eq!(&*manager.recv_client_text().await, "1");
+    manager.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn unexpected_binary_reconnects() {
+    assert_protocol_error_reconnects(&[Message::Binary(Bytes::from_static(b"\xFF"))]).await;
+}
+
+#[tokio::test]
+async fn text_during_binary_reassembly_reconnects() {
+    assert_protocol_error_reconnects(&[
+        Message::Text(ByteString::from_static(r#"51-["img"]"#)),
+        Message::Text(ByteString::from_static(r#"2["oops"]"#)),
+    ])
+    .await;
 }
 
 #[tokio::test]
 async fn engine_close_ends_receivers_and_pending_acks() {
-    let mut manager = TestManager::spawn();
+    let mut manager = TestManager::spawn().await;
     let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
     manager.send_server_message(CONNECT_RESPONSE).await;
     server_packet_rx.recv().await.unwrap();
@@ -560,8 +680,9 @@ async fn engine_close_ends_receivers_and_pending_acks() {
 
 #[tokio::test]
 async fn emits_flow_while_receiver_is_full() {
-    let mut manager = TestManager::spawn();
-    let (client_packet_tx, mut server_packet_rx) = manager.open_with("/", 1).await;
+    let mut manager = TestManager::spawn().await;
+    let (client_packet_tx, mut server_packet_rx) =
+        manager.open_with("/", ByteString::new(), 1).await;
     manager.send_server_message(CONNECT_RESPONSE).await;
     for _ in 0..4 {
         manager.send_server_message(r#"2["flood"]"#).await;
@@ -584,7 +705,7 @@ async fn emits_flow_while_receiver_is_full() {
 
 #[tokio::test]
 async fn repeated_server_connect_flushes_once() {
-    let mut manager = TestManager::spawn();
+    let mut manager = TestManager::spawn().await;
     let (client_packet_tx, _server_packet_rx) = manager.open("/").await;
     client_packet_tx
         .send(event(r#"["a"]"#, None))
@@ -594,6 +715,163 @@ async fn repeated_server_connect_flushes_once() {
         manager.send_server_message(CONNECT_RESPONSE).await;
     }
     assert_eq!(&*manager.recv_client_text().await, r#"2["a"]"#);
-    assert_quiet(&mut manager.client_message_rx).await;
+    assert_quiet(&mut manager.session().client_message_rx).await;
+    manager.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn reconnect_resends_connect_with_auth() {
+    let mut manager = TestManager::spawn_reconnecting().await;
+    let auth = ByteString::from_static(r#"{"token":"t"}"#);
+    let (client_packet_tx, mut server_packet_rx) = manager.open_with("/chat", auth, 32).await;
+    manager.send_server_message(r#"0/chat,{"sid":"a"}"#).await;
+    assert!(matches!(
+        server_packet_rx.recv().await,
+        Some(ServerPacket::Connect(connect)) if connect.sid == "a"
+    ));
+
+    assert_eq!(manager.reconnect().await, [] as [Message; 0]);
+    assert_eq!(
+        &*manager.recv_client_text().await,
+        r#"0/chat,{"token":"t"}"#
+    );
+    manager.send_server_message(r#"0/chat,{"sid":"b"}"#).await;
+    assert!(matches!(
+        server_packet_rx.recv().await,
+        Some(ServerPacket::Connect(connect)) if connect.sid == "b"
+    ));
+
+    drop(client_packet_tx);
+    assert_eq!(&*manager.recv_client_text().await, "1/chat,");
+    manager.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn reconnect_drops_queued_messages_and_buffers_events() {
+    let mut manager = TestManager::spawn_reconnecting().await;
+    let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    server_packet_rx.recv().await.unwrap();
+
+    client_packet_tx
+        .send(event(r#"["old"]"#, None))
+        .await
+        .unwrap();
+    while manager.session().client_message_rx.is_empty() {
+        tokio::task::yield_now().await;
+    }
+    let messages = manager.reconnect().await;
+    assert!(matches!(&messages[..], [Message::Text(text)] if text == r#"2["old"]"#));
+
+    assert_eq!(&*manager.recv_client_text().await, "0");
+    client_packet_tx
+        .send(event(r#"["new"]"#, None))
+        .await
+        .unwrap();
+    assert_quiet(&mut manager.session().client_message_rx).await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    assert_eq!(&*manager.recv_client_text().await, r#"2["new"]"#);
+
+    drop(client_packet_tx);
+    assert_eq!(&*manager.recv_client_text().await, "1");
+    manager.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn session_end_fails_sent_acks_and_keeps_buffered_ones() {
+    let mut manager = TestManager::spawn_reconnecting().await;
+    let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    server_packet_rx.recv().await.unwrap();
+
+    let (sent_tx, sent_rx) = oneshot::channel();
+    client_packet_tx
+        .send(event(r#"["sent"]"#, Some(sent_tx)))
+        .await
+        .unwrap();
+    assert_eq!(&*manager.recv_client_text().await, r#"20["sent"]"#);
+    manager.reconnect().await;
+    sent_rx.await.unwrap_err();
+
+    assert_eq!(&*manager.recv_client_text().await, "0");
+    let (buffered_tx, mut buffered_rx) = oneshot::channel();
+    client_packet_tx
+        .send(event(r#"["buffered"]"#, Some(buffered_tx)))
+        .await
+        .unwrap();
+    assert_quiet(&mut manager.session().client_message_rx).await;
+    assert_eq!(manager.reconnect().await, [] as [Message; 0]);
+    assert!(matches!(
+        buffered_rx.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+
+    assert_eq!(&*manager.recv_client_text().await, "0");
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    assert_eq!(&*manager.recv_client_text().await, r#"21["buffered"]"#);
+    manager.send_server_message(r#"31["ok"]"#).await;
+    assert_eq!(&*buffered_rx.await.unwrap().payload, r#"["ok"]"#);
+
+    drop(client_packet_tx);
+    assert_eq!(&*manager.recv_client_text().await, "1");
+    manager.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn ack_for_an_event_of_an_ended_session_is_discarded() {
+    let mut manager = TestManager::spawn_reconnecting().await;
+    let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    server_packet_rx.recv().await.unwrap();
+
+    manager.send_server_message(r#"25["ask"]"#).await;
+    let Some(ServerPacket::Event(old)) = server_packet_rx.recv().await else {
+        panic!("expected an event");
+    };
+
+    manager.reconnect().await;
+    assert_eq!(&*manager.recv_client_text().await, "0");
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    server_packet_rx.recv().await.unwrap();
+    manager.send_server_message(r#"25["ask"]"#).await;
+    let Some(ServerPacket::Event(new)) = server_packet_rx.recv().await else {
+        panic!("expected an event");
+    };
+
+    for event in [old, new] {
+        let client_packet = ClientPacket::Ack {
+            payload: ByteString::from_static("[true]"),
+            id: event.id.unwrap(),
+            attachments: None,
+        };
+        client_packet_tx.send(client_packet).await.unwrap();
+    }
+    assert_eq!(&*manager.recv_client_text().await, "35[true]");
+    assert_quiet(&mut manager.session().client_message_rx).await;
+
+    drop(client_packet_tx);
+    assert_eq!(&*manager.recv_client_text().await, "1");
+    manager.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn no_reconnection_without_namespaces_until_one_opens() {
+    let mut manager = TestManager::spawn_reconnecting().await;
+    manager.session.take().unwrap().end().await;
+    let next = tokio::time::timeout(Duration::from_millis(50), manager.session_rx.recv()).await;
+    assert!(next.is_err(), "unexpected session");
+
+    let (connect_request, handles) = ConnectRequest::new("/".into(), ByteString::new(), 32, 32);
+    manager
+        .connect_request_tx
+        .send(connect_request)
+        .await
+        .unwrap();
+    manager.session = manager.session_rx.recv().await;
+    assert_eq!(&*manager.recv_client_text().await, "0");
+    handles.reply_rx.await.unwrap().unwrap();
+
+    drop(handles.client_packet_tx);
+    assert_eq!(&*manager.recv_client_text().await, "1");
     manager.finish().await.unwrap();
 }

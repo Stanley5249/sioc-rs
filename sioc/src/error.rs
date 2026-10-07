@@ -93,7 +93,7 @@ pub enum SocketError {
     #[error("socket closed")]
     #[diagnostic(
         code(sioc::socket::closed),
-        help("the namespace was disconnected or the client session ended")
+        help("the namespace was disconnected or the client ended")
     )]
     Closed,
 
@@ -312,6 +312,12 @@ pub enum ManagerError {
         help("library bug, please report")
     )]
     NamespaceStatus,
+
+    /// Handing a session between the client-packet loop and the supervisor
+    /// failed because the channel is closed.
+    #[error("session channel closed")]
+    #[diagnostic(code(sioc::manager::session), help("library bug, please report"))]
+    Session,
 }
 
 impl ManagerError {
@@ -325,7 +331,7 @@ impl ManagerError {
         match self {
             Self::Engine(error) => error.is_internal(),
             Self::Packet(_) | Self::UnexpectedText(_) | Self::UnexpectedBinary(_) => false,
-            Self::ClientMessage(_) | Self::NamespaceStatus => true,
+            Self::ClientMessage(_) | Self::NamespaceStatus | Self::Session => true,
         }
     }
 }
@@ -357,6 +363,7 @@ mod tests {
             ),
             ManagerError::ClientMessage(mpsc::error::SendError(Message::Text(ByteString::new()))),
             ManagerError::NamespaceStatus,
+            ManagerError::Session,
         ];
         for error in errors {
             assert!(error.is_internal(), "{error:?}");

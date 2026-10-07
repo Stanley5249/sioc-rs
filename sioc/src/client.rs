@@ -1,9 +1,10 @@
 //! Socket.IO client and namespace handles.
 
+use std::time::Duration;
+
 use bytestring::ByteString;
 use eioc::connector::WebSocketConnector;
 use eioc::transport::TransportStrategy;
-use futures_util::TryFutureExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -12,6 +13,7 @@ use url::Url;
 use crate::ack::AckType;
 use crate::error::{ClientBuilderError, ClientError, ManagerError, PayloadError, SocketError};
 use crate::manager::connect_request::ConnectRequest;
+use crate::manager::supervisor::Supervisor;
 use crate::marker::{AckId, AckMarker, BinaryMarker};
 use crate::packet::{ClientPacket, DynEvent, ServerAckId, ServerPacket};
 
@@ -49,6 +51,9 @@ where
     /// Returns an error if payload serialization fails.
     fn into_client_packet(self, id: ServerAckId) -> Result<ClientPacket, PayloadError>;
 }
+
+/// How long the client waits before it reconnects.
+const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Channel buffer capacities for each internal MPSC queue.
 ///
@@ -138,7 +143,7 @@ impl ClientBuilder<()> {
 
 impl<C> ClientBuilder<C>
 where
-    C: WebSocketConnector,
+    C: WebSocketConnector + Clone,
 {
     /// Override the Engine.IO path segment (default: `"socket.io"`).
     pub fn path(mut self, path: impl Into<String>) -> Self {
@@ -155,7 +160,7 @@ where
     /// Override the WebSocket connector used for transport upgrade.
     ///
     /// Pass any type implementing [`WebSocketConnector`], including async
-    /// closures.
+    /// closures. Each Engine.IO session uses its own clone.
     ///
     /// ```rust,no_run
     /// # async fn run() -> sioc::error::Result<()> {
@@ -174,7 +179,7 @@ where
     /// ```
     pub fn websocket_connector<C2>(self, connector: C2) -> ClientBuilder<C2>
     where
-        C2: WebSocketConnector,
+        C2: WebSocketConnector + Clone,
     {
         ClientBuilder {
             url: self.url,
@@ -204,8 +209,8 @@ where
 
     /// Connects to the Engine.IO server and returns a [`Client`].
     ///
-    /// Spawns the manager task, which drives the engine and transport
-    /// concurrently.
+    /// Spawns the manager task, which opens one Engine.IO session after
+    /// another while namespaces are open, so a dropped connection reconnects.
     ///
     /// # Errors
     ///
@@ -218,34 +223,34 @@ where
     pub fn open(self) -> Result<Client, ClientBuilderError> {
         let http_client = self.http_client.unwrap_or_default();
         let websocket_connector = self.websocket_connector;
+        let transport_strategy = self.transport_strategy;
+        let channels = self.channels;
         let url = self.url.join(&self.path)?;
 
-        let (connect_request_tx, connect_request_rx) = mpsc::channel(self.channels.manager);
+        let (connect_request_tx, connect_request_rx) = mpsc::channel(channels.manager);
 
-        let (server_message_tx, server_message_rx) = mpsc::channel(self.channels.manager);
+        // Each session opens a new engine with its own connector.
+        let connect_engine = move |server_message_tx, client_message_rx| {
+            eioc::engine::session::connect(
+                url.clone(),
+                http_client.clone(),
+                websocket_connector.clone(),
+                transport_strategy,
+                server_message_tx,
+                client_message_rx,
+                channels.engine,
+                channels.transport,
+            )
+        };
 
-        let (client_message_tx, client_message_rx) = mpsc::channel(self.channels.engine);
+        let supervisor = Supervisor {
+            server_message_capacity: channels.manager,
+            client_message_capacity: channels.engine,
+            retry_delay: Some(RETRY_DELAY),
+            connect_engine,
+        };
 
-        let manager_future =
-            crate::manager::session::run(connect_request_rx, server_message_rx, client_message_tx);
-
-        let engine_future = eioc::engine::session::connect(
-            url,
-            http_client,
-            websocket_connector,
-            self.transport_strategy,
-            server_message_tx,
-            client_message_rx,
-            self.channels.engine,
-            self.channels.transport,
-        );
-
-        let engine_future = engine_future.map_err(ManagerError::Engine);
-
-        let task = tokio::spawn(async {
-            tokio::try_join!(manager_future, engine_future)?;
-            Ok(())
-        });
+        let task = tokio::spawn(crate::manager::session::run(connect_request_rx, supervisor));
 
         Ok(Client {
             connect_request_tx,
@@ -276,7 +281,7 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Returns an error if the session has ended.
+    /// Returns an error if the client has ended.
     pub async fn connect<S>(&self, ns: S) -> Result<(SocketSender, SocketReceiver), SocketError>
     where
         S: Into<ByteString>,
@@ -288,7 +293,7 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Returns an error if the session has ended.
+    /// Returns an error if the client has ended.
     pub async fn connect_with<S, B>(
         &self,
         ns: S,
@@ -320,15 +325,17 @@ impl Client {
         ))
     }
 
-    /// Drops the client handle and waits for the session to end.
+    /// Drops the client handle and waits for the client to end.
     ///
-    /// The session ends once every [`SocketSender`] is dropped or disconnected,
-    /// or when the server closes it.
+    /// The client ends once no namespace is open. A namespace closes once every
+    /// [`SocketSender`] of it is dropped or disconnected, or when the server
+    /// closes it. A dropped Engine.IO session does not close it: the client
+    /// reconnects and sends CONNECT again.
     ///
     /// # Errors
     ///
-    /// Returns an error if the manager task fails or panics.
-    /// Call this method to collect session errors; dropping the handle detaches
+    /// Returns an error if the manager task fails with a library bug or panics.
+    /// Call this method to collect those errors; dropping the handle detaches
     /// the task, which continues while namespace senders remain alive.
     pub async fn join(self) -> Result<(), ClientError> {
         drop(self.connect_request_tx);
@@ -419,7 +426,7 @@ impl SocketSender {
         self.closed.cancel();
     }
 
-    /// Waits until the namespace closes, by either side, or the session ends.
+    /// Waits until the namespace closes, by either side, or the client ends.
     ///
     /// Resolves as soon as the namespace stops accepting packets, which can be
     /// before its DISCONNECT packet reaches the server.
@@ -441,7 +448,7 @@ impl SocketReceiver {
     /// Returns the next application event. [`ServerPacket::Connect`],
     /// [`ServerPacket::Disconnect`], and [`ServerPacket::ConnectError`] are
     /// skipped. Returns `None` once the namespace closes, by either side,
-    /// or the session ends.
+    /// or the client ends.
     ///
     /// Cancel safe: the only suspend point is `recv`; skipped protocol packets
     /// have no suspend point after consumption, so no events are lost on
@@ -480,7 +487,9 @@ impl std::ops::DerefMut for SocketReceiver {
 
 #[cfg(test)]
 mod tests {
-    use eioc::error::{Error as EngineIoError, TransportError, WebSocketError};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use eioc::transport::TransportStrategy;
     use serde_json::Map;
     use tokio::sync::mpsc;
@@ -674,51 +683,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn custom_connector_error_reaches_join() {
+    async fn custom_connector_retries_while_a_namespace_is_open() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&attempts);
         let client = ClientBuilder::new(Url::parse("http://localhost:3000/").unwrap())
             .path("custom/")
             .transport(TransportStrategy::WebSocket)
-            .websocket_connector(async |url: Url| {
+            .websocket_connector(move |url: Url| async move {
                 assert_eq!(url.scheme(), "ws");
                 assert_eq!(url.path(), "/custom/");
-                Err(
-                    std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connector refused")
-                        .into(),
-                )
-            })
-            .open()
-            .unwrap();
-
-        assert!(matches!(
-            client.join().await,
-            Err(ClientError::Manager(ManagerError::Engine(
-                EngineIoError::Transport(TransportError::WebSocket(WebSocketError::Tungstenite(
-                    error
-                )))
-            ))) if error.to_string().contains("connector refused")
-        ));
-    }
-
-    #[tokio::test]
-    async fn connect_returns_closed_after_connector_failure() {
-        let client = ClientBuilder::new(Url::parse("http://localhost:3000/").unwrap())
-            .transport(TransportStrategy::WebSocket)
-            .websocket_connector(async |_| {
+                counter.fetch_add(1, Ordering::Relaxed);
                 Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused).into())
             })
             .open()
             .unwrap();
-        client.connect_request_tx.closed().await;
 
-        assert!(matches!(
-            client.connect("/").await,
-            Err(SocketError::Closed)
-        ));
-        assert!(matches!(
-            client.connect_with("/chat", r#"{"token":"secret"}"#).await,
-            Err(SocketError::Closed)
-        ));
-        client.join().await.unwrap_err();
+        let handles = client.connect("/").await.unwrap();
+        while attempts.load(Ordering::Relaxed) < 2 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // Without a namespace, the client ends instead of reconnecting.
+        drop(handles);
+        client.join().await.unwrap();
     }
 
     #[tokio::test]
