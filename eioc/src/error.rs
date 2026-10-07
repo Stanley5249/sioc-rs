@@ -5,7 +5,7 @@ use miette::Diagnostic;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::packet::{Frame, Handshake, Message, Packet};
+use crate::packet::{Frame, Handshake, Message};
 
 /// Top-level error aggregator for `eioc`.
 #[derive(Debug, Error, Diagnostic)]
@@ -57,16 +57,6 @@ pub enum EngineError {
         help("the server stopped responding; check the network or server load")
     )]
     HeartbeatTimeout,
-
-    /// An unexpected packet was received during the session.
-    #[error("unexpected packet {0:?}")]
-    #[diagnostic(
-        code(eioc::engine::unexpected_packet),
-        help(
-            "the server sent a packet that violates the Engine.IO state machine; likely a server bug or version mismatch"
-        )
-    )]
-    UnexpectedPacket(Packet),
 }
 
 /// Errors that occur during Engine.IO connection setup and transport
@@ -233,9 +223,11 @@ mod tests {
     }
 
     #[test]
-    fn engine_error_server_display() {
-        let e = EngineError::UnexpectedPacket(crate::packet::Packet::Upgrade);
-        assert_eq!(e.to_string(), "unexpected packet Upgrade");
+    fn engine_error_heartbeat_timeout_display() {
+        assert_eq!(
+            EngineError::HeartbeatTimeout.to_string(),
+            "heartbeat timeout"
+        );
     }
 
     #[test]
@@ -252,7 +244,7 @@ mod tests {
 
     #[test]
     fn error_from_engine_error() {
-        let e: Error = EngineError::UnexpectedPacket(crate::packet::Packet::Close).into();
+        let e: Error = EngineError::HeartbeatTimeout.into();
         assert!(matches!(e, Error::Engine(_)));
     }
 

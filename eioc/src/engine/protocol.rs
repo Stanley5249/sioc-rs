@@ -68,7 +68,9 @@ pub async fn server_frames_to_messages(
                     }
                     Packet::Noop => {}
 
-                    packet => return Err(EngineError::UnexpectedPacket(packet)),
+                    // Like the JS client, which ignores them, so a quirky
+                    // server cannot end the session.
+                    packet => tracing::warn!(%packet, "ignored out-of-place packet"),
                 }
             }
             Frame::Binary(payload) => {

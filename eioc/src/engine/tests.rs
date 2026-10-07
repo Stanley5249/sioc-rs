@@ -223,18 +223,20 @@ async fn protocol_noop_is_ignored() {
 }
 
 #[tokio::test]
-async fn protocol_unexpected_packet_is_server_error() {
+async fn protocol_out_of_place_packets_are_ignored() {
     let engine = TestEngine::spawn(make_handshake(), 4);
-    engine
-        .server_frame_tx
-        .send(Packet::Upgrade.into())
-        .await
-        .unwrap();
-    let (result, _, _) = engine.finish().await;
-    assert!(matches!(
-        result,
-        Err(EngineError::UnexpectedPacket(Packet::Upgrade))
-    ));
+    for packet in [
+        Packet::Open(make_handshake()),
+        Packet::Pong("probe".into()),
+        Packet::Upgrade,
+        Packet::Message("after".into()),
+    ] {
+        engine.server_frame_tx.send(packet.into()).await.unwrap();
+    }
+    let (result, frames, messages) = engine.finish().await;
+    result.unwrap();
+    assert_eq!(frames, [] as [Frame; 0]);
+    assert!(matches!(&messages[..], [Message::Text(t)] if t == "after"));
 }
 
 #[tokio::test]
