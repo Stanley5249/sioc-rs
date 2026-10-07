@@ -57,7 +57,7 @@ check-all: check _check-py _check-js
 [parallel]
 _check-py: (_fmt-ruff "--check") _lint-py _typecheck-py
 
-# Check Oxfmt-managed files and lint the TypeScript servers.
+# Check Oxfmt-managed files, then lint and type-check the TypeScript servers.
 [parallel]
 _check-js: (_fmt-oxfmt "--check") _lint-js
 
@@ -66,7 +66,7 @@ _check-js: (_fmt-oxfmt "--check") _lint-js
 lint *args:
     cargo clippy --quiet --locked --workspace --all-targets {{ args }} -- -D warnings
 
-# Lint every language and type-check the Python example.
+# Lint every language and type-check the Python and TypeScript sources.
 [group("checks")]
 [parallel]
 lint-all: lint _lint-py _typecheck-py _lint-js
@@ -79,7 +79,7 @@ _lint-py *args:
 _typecheck-py *args:
     uv run --locked pyrefly check --summary=none --min-severity warn {{ args }}
 
-# Lint TypeScript test servers with type-aware rules.
+# Lint and type-check the TypeScript servers with type-aware rules.
 _lint-js *args:
     bun run oxlint {{ args }}
 
