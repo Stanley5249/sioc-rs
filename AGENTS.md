@@ -6,6 +6,7 @@
 - Run `just --list` or read `justfile` for commands.
 - Include `--workspace --all-targets` in `cargo` commands to unify features across the workspace.
 - Set `RUST_LOG=sioc=trace` to log every wire packet. Set `RUST_LOG=eioc=trace` to log library internals.
+- Write each third-party Cargo requirement up to its leftmost nonzero component, such as `"1"` or `"0.7"`, and each Bun requirement as `bun add` writes it, such as `"^1.4.2"`. The lockfiles pin exact versions.
 
 ## Async design
 
