@@ -280,7 +280,7 @@ pub enum ManagerError {
     #[error("client message channel closed")]
     #[diagnostic(
         code(sioc::manager::client_message),
-        help("the receiver was dropped; the socket is probably shut down")
+        help("library bug, please report")
     )]
     ClientMessage(#[from] mpsc::error::SendError<Message>),
 
@@ -309,7 +309,57 @@ pub enum ManagerError {
     #[error("namespace status channel closed")]
     #[diagnostic(
         code(sioc::manager::namespace_status),
-        help("a manager loop exited early; check for prior manager errors")
+        help("library bug, please report")
     )]
     NamespaceStatus,
+}
+
+impl ManagerError {
+    /// Returns whether the error is a library bug, such as a broken channel
+    /// between library tasks, rather than a network or server fault.
+    ///
+    /// The client reconnects after any other error.
+    #[must_use]
+    pub fn is_internal(&self) -> bool {
+        // No wildcard arm, so a new variant must be classified here.
+        match self {
+            Self::Engine(error) => error.is_internal(),
+            Self::Packet(_) | Self::UnexpectedText(_) | Self::UnexpectedBinary(_) => false,
+            Self::ClientMessage(_) | Self::NamespaceStatus => true,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use eioc::error::EngineError;
+
+    use super::*;
+
+    #[test]
+    fn manager_error_server_faults_are_not_internal() {
+        let errors = [
+            ManagerError::Engine(EngineError::HeartbeatTimeout.into()),
+            ManagerError::Packet(PacketError::Empty),
+            ManagerError::UnexpectedText(ByteString::new()),
+            ManagerError::UnexpectedBinary(Bytes::new()),
+        ];
+        for error in errors {
+            assert!(!error.is_internal(), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn manager_error_channel_failures_are_internal() {
+        let errors = [
+            ManagerError::Engine(
+                EngineError::ClientFrame(mpsc::error::SendError(Bytes::new().into())).into(),
+            ),
+            ManagerError::ClientMessage(mpsc::error::SendError(Message::Text(ByteString::new()))),
+            ManagerError::NamespaceStatus,
+        ];
+        for error in errors {
+            assert!(error.is_internal(), "{error:?}");
+        }
+    }
 }

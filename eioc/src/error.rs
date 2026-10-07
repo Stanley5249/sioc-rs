@@ -19,35 +19,48 @@ pub enum Error {
     Engine(#[from] EngineError),
 }
 
+impl Error {
+    /// Returns whether the error is a library bug, such as a broken channel
+    /// between library tasks, rather than a network or server fault.
+    ///
+    /// A caller can retry the session after any other error.
+    #[must_use]
+    pub fn is_internal(&self) -> bool {
+        // No wildcard arm, so a new variant must be classified here.
+        match self {
+            Self::Transport(
+                TransportError::WebSocket(_) | TransportError::Polling(_) | TransportError::Open(_),
+            )
+            | Self::Engine(EngineError::HeartbeatTimeout) => false,
+
+            Self::Transport(TransportError::ServerFrame(_) | TransportError::Handshake(_))
+            | Self::Engine(
+                EngineError::ClientFrame(_)
+                | EngineError::ServerMessage(_)
+                | EngineError::Handshake(_),
+            ) => true,
+        }
+    }
+}
+
 /// Errors that occur during an active Engine.IO session.
 #[derive(Debug, Error, Diagnostic)]
 pub enum EngineError {
     /// Sending a client frame to the transport task failed because the channel
     /// is closed.
     #[error("client frame channel closed")]
-    #[diagnostic(
-        code(eioc::engine::client_frame),
-        help("the transport task exited; check for prior transport errors")
-    )]
+    #[diagnostic(code(eioc::engine::client_frame), help("library bug, please report"))]
     ClientFrame(#[from] mpsc::error::SendError<Frame>),
 
     /// Delivering a server message to the upper layer failed because its
     /// receiver is gone.
     #[error("server message channel closed")]
-    #[diagnostic(
-        code(eioc::engine::server_message),
-        help("the receiver of server messages was dropped before the session ended")
-    )]
+    #[diagnostic(code(eioc::engine::server_message), help("library bug, please report"))]
     ServerMessage(#[from] mpsc::error::SendError<Message>),
 
     /// The handshake oneshot channel was dropped before the server responded.
     #[error("failed to receive Engine.IO handshake")]
-    #[diagnostic(
-        code(eioc::engine::handshake),
-        help(
-            "the transport task exited before completing the handshake; check the transport for prior errors"
-        )
-    )]
+    #[diagnostic(code(eioc::engine::handshake), help("library bug, please report"))]
     Handshake(#[from] oneshot::error::RecvError),
 
     /// The server stopped sending heartbeat pings within the expected window.
@@ -78,18 +91,13 @@ pub enum TransportError {
     #[error("server frame channel closed")]
     #[diagnostic(
         code(eioc::transport::server_frame),
-        help("the engine task exited; check for prior engine errors")
+        help("library bug, please report")
     )]
     ServerFrame(#[from] mpsc::error::SendError<Frame>),
 
     /// Handshake data could not be forwarded to the engine task.
     #[error("failed to send handshake to engine task")]
-    #[diagnostic(
-        code(eioc::transport::handshake),
-        help(
-            "the engine task exited before the handshake arrived; check the engine for prior errors"
-        )
-    )]
+    #[diagnostic(code(eioc::transport::handshake), help("library bug, please report"))]
     Handshake(Handshake),
 
     /// The first frame received was not an Open packet.
@@ -199,6 +207,47 @@ pub enum PacketError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn frame() -> Frame {
+        crate::packet::Packet::Noop.into()
+    }
+
+    #[test]
+    fn network_and_server_faults_are_not_internal() {
+        let errors: [Error; 4] = [
+            TransportError::WebSocket(WebSocketError::Closed).into(),
+            TransportError::Polling(PollingError::Response(String::new())).into(),
+            TransportError::Open(frame()).into(),
+            EngineError::HeartbeatTimeout.into(),
+        ];
+        for error in errors {
+            assert!(!error.is_internal(), "{error:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn channel_failures_are_internal() {
+        let (handshake_tx, handshake_rx) = oneshot::channel::<Handshake>();
+        drop(handshake_tx);
+        let handshake = Handshake {
+            sid: "sid".into(),
+            upgrades: vec![],
+            ping_interval: 25_000,
+            ping_timeout: 5_000,
+            max_payload: 1_000_000,
+        };
+
+        let errors: [Error; 5] = [
+            TransportError::ServerFrame(mpsc::error::SendError(frame())).into(),
+            TransportError::Handshake(handshake).into(),
+            EngineError::ClientFrame(mpsc::error::SendError(frame())).into(),
+            EngineError::ServerMessage(mpsc::error::SendError(Message::Text("".into()))).into(),
+            EngineError::Handshake(handshake_rx.await.unwrap_err()).into(),
+        ];
+        for error in errors {
+            assert!(error.is_internal(), "{error:?}");
+        }
+    }
 
     #[test]
     fn packet_error_empty_display() {
