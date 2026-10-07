@@ -120,6 +120,26 @@ impl TestManager {
         drop(connect_request_tx);
         result.unwrap()
     }
+
+    /// Plays the engine after a manager error and returns the manager's result.
+    ///
+    /// Waits for the manager to close the session, checks that it still accepts
+    /// server messages meanwhile, then hangs up as the engine does.
+    async fn finish_after_error(self) -> Result<(), ManagerError> {
+        let Self {
+            connect_request_tx: _connect_request_tx,
+            server_message_tx,
+            mut client_message_rx,
+            task,
+        } = self;
+        while client_message_rx.recv().await.is_some() {}
+        server_message_tx
+            .send(Message::Text(ByteString::from_static(r#"2["late"]"#)))
+            .await
+            .unwrap();
+        drop(server_message_tx);
+        task.await.unwrap()
+    }
 }
 
 #[tokio::test]
@@ -499,7 +519,7 @@ async fn unexpected_binary_is_error() {
     let manager = TestManager::spawn();
     manager.send_server_binary(b"\xFF").await;
     assert!(matches!(
-        manager.task.await.unwrap(),
+        manager.finish_after_error().await,
         Err(ManagerError::UnexpectedBinary(_))
     ));
 }
@@ -514,7 +534,7 @@ async fn text_during_binary_reassembly_is_error() {
     manager.send_server_message(r#"51-["img"]"#).await;
     manager.send_server_message(r#"2["oops"]"#).await;
     assert!(matches!(
-        manager.task.await.unwrap(),
+        manager.finish_after_error().await,
         Err(ManagerError::UnexpectedText(_))
     ));
 }

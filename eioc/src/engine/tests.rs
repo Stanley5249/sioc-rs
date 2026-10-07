@@ -5,9 +5,11 @@ use std::time::Duration;
 use bytes::Bytes;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use url::Url;
 
-use crate::error::EngineError;
+use crate::error::{EngineError, Error, TransportError};
 use crate::packet::{Frame, Handshake, Message, Packet};
+use crate::transport::TransportStrategy;
 
 fn make_handshake() -> Handshake {
     Handshake {
@@ -37,13 +39,17 @@ impl TestEngine {
         let (client_frame_tx, client_frame_rx) = mpsc::channel(4);
         let (handshake_tx, handshake_rx) = oneshot::channel();
         handshake_tx.send(handshake).unwrap();
-        let task = tokio::spawn(crate::engine::protocol::run_protocol(
-            server_frame_rx,
-            server_message_tx,
-            client_message_rx,
-            client_frame_tx,
-            handshake_rx,
-        ));
+        let task = tokio::spawn(async move {
+            let mut client_message_rx = client_message_rx;
+            crate::engine::protocol::run_protocol(
+                server_frame_rx,
+                server_message_tx,
+                &mut client_message_rx,
+                client_frame_tx,
+                handshake_rx,
+            )
+            .await
+        });
         Self {
             server_frame_tx,
             server_message_rx,
@@ -93,14 +99,14 @@ impl TestEngine {
 async fn protocol_handshake_dropped_is_error() {
     let (_server_frame_tx, server_frame_rx) = mpsc::channel(4);
     let (server_message_tx, _server_message_rx) = mpsc::channel(4);
-    let (_client_message_tx, client_message_rx) = mpsc::channel(4);
+    let (_client_message_tx, mut client_message_rx) = mpsc::channel(4);
     let (client_frame_tx, _) = mpsc::channel(4);
     let (handshake_tx, handshake_rx) = oneshot::channel::<Handshake>();
     drop(handshake_tx);
     let result = crate::engine::protocol::run_protocol(
         server_frame_rx,
         server_message_tx,
-        client_message_rx,
+        &mut client_message_rx,
         client_frame_tx,
         handshake_rx,
     )
@@ -322,5 +328,32 @@ async fn protocol_closed_message_receiver_is_error() {
     assert!(matches!(
         task.await.unwrap(),
         Err(EngineError::ServerMessage(_))
+    ));
+}
+
+#[tokio::test]
+async fn session_failure_accepts_client_messages_until_hang_up() {
+    let (server_message_tx, mut server_message_rx) = mpsc::channel(4);
+    let (client_message_tx, client_message_rx) = mpsc::channel(4);
+    let session = tokio::spawn(crate::engine::session::connect(
+        Url::parse("http://localhost:3000/").unwrap(),
+        reqwest::Client::new(),
+        async |_| Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused).into()),
+        TransportStrategy::WebSocket,
+        server_message_tx,
+        client_message_rx,
+        4,
+        4,
+    ));
+
+    assert!(server_message_rx.recv().await.is_none());
+    client_message_tx
+        .send(Message::Text("late".into()))
+        .await
+        .unwrap();
+    drop(client_message_tx);
+    assert!(matches!(
+        session.await.unwrap(),
+        Err(Error::Transport(TransportError::WebSocket(_)))
     ));
 }

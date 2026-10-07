@@ -13,7 +13,7 @@ use crate::packet::{Frame, Handshake, Message, Packet};
 pub async fn run_protocol(
     server_frame_rx: mpsc::Receiver<Frame>,
     server_message_tx: mpsc::Sender<Message>,
-    client_message_rx: mpsc::Receiver<Message>,
+    client_message_rx: &mut mpsc::Receiver<Message>,
     client_frame_tx: mpsc::Sender<Frame>,
     handshake_rx: oneshot::Receiver<Handshake>,
 ) -> Result<(), EngineError> {
@@ -93,7 +93,7 @@ pub async fn server_frames_to_messages(
 /// Then drops `client_frame_tx`, which tells the transport to send the server
 /// a `Close` packet, and drains both inputs until their senders hang up.
 pub async fn client_messages_to_frames(
-    mut client_message_rx: mpsc::Receiver<Message>,
+    client_message_rx: &mut mpsc::Receiver<Message>,
     mut pong_rx: mpsc::Receiver<Frame>,
     client_frame_tx: mpsc::Sender<Frame>,
 ) -> Result<(), EngineError> {
@@ -137,7 +137,7 @@ pub async fn client_messages_to_frames(
 
     // Drain both inputs together, because the server-frame loop may be waiting
     // to send a pong while the upper layer is still finishing.
-    tokio::join!(drain(&mut client_message_rx), drain(&mut pong_rx));
+    tokio::join!(drain(client_message_rx), drain(&mut pong_rx));
 
     Ok(())
 }

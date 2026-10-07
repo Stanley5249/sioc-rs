@@ -17,8 +17,8 @@ use crate::transport::TransportStrategy;
 /// closes the session, and the engine drops `server_message_tx` once the
 /// session has ended, whichever side closed it.
 ///
-/// Returns once the transport has finished and the sender of
-/// `client_message_rx` is dropped.
+/// Returns once the session has ended and the sender of `client_message_rx` is
+/// dropped, even after an error, so sends to `client_message_rx` never fail.
 ///
 /// # Errors
 ///
@@ -33,7 +33,7 @@ pub async fn connect<C>(
     websocket_connector: C,
     strategy: TransportStrategy,
     server_message_tx: mpsc::Sender<Message>,
-    client_message_rx: mpsc::Receiver<Message>,
+    mut client_message_rx: mpsc::Receiver<Message>,
     server_frame_capacity: usize,
     client_frame_capacity: usize,
 ) -> Result<(), Error>
@@ -49,7 +49,7 @@ where
     let protocol_future = crate::engine::protocol::run_protocol(
         server_frame_rx,
         server_message_tx,
-        client_message_rx,
+        &mut client_message_rx,
         client_frame_tx,
         handshake_rx,
     );
@@ -64,10 +64,19 @@ where
         client_frame_rx,
     );
 
-    tokio::try_join!(
+    // The first error drops the other side, so it is the root cause, never a
+    // closed channel that it caused.
+    let result = tokio::try_join!(
         protocol_future.map_err(Error::Engine),
         transport_future.map_err(Error::Transport),
-    )?;
+    );
+
+    // The protocol dropped `server_message_tx`, which tells the upper layer to
+    // close the session. Accept its messages until then, so it never sees a
+    // failed send.
+    crate::engine::protocol::drain(&mut client_message_rx).await;
+
+    result?;
 
     Ok(())
 }

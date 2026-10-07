@@ -12,7 +12,10 @@ use crate::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Packet, ServerP
 /// Delivers server packets to the namespace receivers until the engine closes
 /// `server_message_rx`.
 ///
-/// Waiting on a full receiver holds up only this direction.
+/// Waiting on a full receiver holds up only this direction. After an error,
+/// drops `connected_generation_tx`, which tells the client-packet loop to
+/// close the session, and discards server messages until the engine hangs up,
+/// so the engine never sees a failed send.
 ///
 /// # Errors
 ///
@@ -23,22 +26,39 @@ pub async fn server_messages_to_packets(
     routes: &Routes,
     connected_generation_tx: mpsc::UnboundedSender<u64>,
 ) -> Result<(), ManagerError> {
+    let result =
+        deliver_server_messages(&mut server_message_rx, routes, &connected_generation_tx).await;
+
+    drop(connected_generation_tx);
+
+    while server_message_rx.recv().await.is_some() {}
+
+    tracing::debug!("server message channel closed");
+
+    routes.clear();
+
+    result
+}
+
+/// Delivers server packets until the engine closes `server_message_rx` or the
+/// server breaks the protocol.
+async fn deliver_server_messages(
+    server_message_rx: &mut mpsc::Receiver<Message>,
+    routes: &Routes,
+    connected_generation_tx: &mpsc::UnboundedSender<u64>,
+) -> Result<(), ManagerError> {
     let mut reconstructor = None;
 
     while let Some(message) = server_message_rx.recv().await {
         match message {
             Message::Text(text) => {
-                route_text(text, routes, &connected_generation_tx, &mut reconstructor).await?;
+                route_text(text, routes, connected_generation_tx, &mut reconstructor).await?;
             }
             Message::Binary(attachment) => {
                 route_binary(attachment, routes, &mut reconstructor).await?;
             }
         }
     }
-
-    tracing::debug!("server message channel closed");
-
-    routes.clear();
 
     Ok(())
 }
