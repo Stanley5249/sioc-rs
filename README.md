@@ -221,7 +221,7 @@ Install tools for the workflows needed:
 - **Dependency checks:** [cargo-deny](https://embarkstudios.github.io/cargo-deny/cli/index.html) for `just deny`.
 - **JavaScript tooling and end-to-end tests:** [Bun](https://bun.sh/docs/installation).
 - **Python example and tooling:** [uv](https://docs.astral.sh/uv/getting-started/installation/).
-- **Coverage:** [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov#installation), plus cargo-nextest.
+- **Coverage:** [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov#installation), cargo-nextest, and `rustup component add llvm-tools-preview`.
 - **MSRV checks:** The Rust toolchain specified by `check-msrv` in `justfile`.
 
 Run `just install-all` to also install JavaScript and Python dependencies. Install the Rust CLI tools separately. `just ci` runs the Rust merge gate with cargo-nextest; `just ci-all` also requires Bun and uv. Dependency policy checks remain separate through `just deny` and are enforced in GitHub Actions.

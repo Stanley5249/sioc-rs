@@ -1,4 +1,4 @@
 [toolchain]
 channel = "stable"
 # Formatting uses the nightly pinned in the justfile.
-components = ["clippy", "llvm-tools-preview"]
+components = ["clippy"]
