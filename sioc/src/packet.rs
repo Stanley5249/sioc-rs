@@ -143,8 +143,7 @@ pub enum ServerPacket<E = DynEvent> {
     ///
     /// Identifies a server-initiated namespace disconnect. The receiver ends
     /// after this packet; a client disconnect or a session ending simply ends
-    /// the receiver. Reconnection is application-controlled: open a new
-    /// namespace handle with
+    /// the receiver. To reopen the namespace, open a new namespace handle with
     /// [`Client::connect`](crate::client::Client::connect).
     Disconnect,
     /// The server refused the namespace. The receiver ends right after this
