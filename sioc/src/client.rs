@@ -119,7 +119,8 @@ pub struct ReconnectionConfig {
     /// The longest delay, like `reconnectionDelayMax` (default: 5 seconds).
     pub delay_max: Duration,
     /// The largest random share of each delay to add or subtract, like
-    /// `randomizationFactor` (default: 0.5).
+    /// `randomizationFactor` (default: 0.5). A value outside 0 to 1 means no
+    /// jitter, as in JS.
     pub randomization_factor: f64,
 }
 

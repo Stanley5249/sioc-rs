@@ -18,6 +18,8 @@ pub struct Backoff {
 
 impl Backoff {
     /// Creates a backoff with no attempts made.
+    ///
+    /// A `randomization_factor` outside 0 to 1 means no jitter, as in JS.
     #[must_use]
     pub fn new(
         delay: Duration,
@@ -25,6 +27,12 @@ impl Backoff {
         randomization_factor: f64,
         max_attempts: Option<u32>,
     ) -> Self {
+        let randomization_factor = if randomization_factor > 0.0 && randomization_factor <= 1.0 {
+            randomization_factor
+        } else {
+            0.0
+        };
+
         Self {
             delay,
             delay_max,
@@ -106,6 +114,14 @@ mod tests {
             backoff.reset();
             let millis = backoff.next_delay().unwrap().as_millis();
             assert!((500..=1500).contains(&millis), "{millis}");
+        }
+    }
+
+    #[test]
+    fn factor_outside_zero_to_one_means_no_jitter() {
+        for factor in [-0.5, 1.5, f64::NAN] {
+            let mut backoff = backoff(factor, None);
+            assert_eq!(backoff.next_delay(), Some(Duration::from_secs(1)));
         }
     }
 
