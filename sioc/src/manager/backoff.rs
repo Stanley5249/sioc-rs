@@ -34,6 +34,12 @@ impl Backoff {
         }
     }
 
+    /// Returns the number of attempts since the last reset.
+    #[must_use]
+    pub fn attempts(&self) -> u32 {
+        self.attempts
+    }
+
     /// Counts an attempt and returns its delay, or `None` once the attempts
     /// ran out.
     pub fn next_delay(&mut self) -> Option<Duration> {
@@ -108,7 +114,7 @@ mod tests {
         let mut backoff = backoff(0.0, Some(2));
         backoff.next_delay().unwrap();
         backoff.next_delay().unwrap();
-        assert_eq!(backoff.attempts, 2);
+        assert_eq!(backoff.attempts(), 2);
         assert_eq!(backoff.next_delay(), None);
 
         backoff.reset();

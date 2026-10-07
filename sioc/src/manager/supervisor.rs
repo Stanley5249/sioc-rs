@@ -4,6 +4,7 @@ use std::future::Future;
 
 use eioc::prelude::Message;
 use tokio::sync::mpsc;
+use tracing::Instrument;
 
 use crate::error::ManagerError;
 use crate::manager::backoff::Backoff;
@@ -80,8 +81,11 @@ where
 
             if request == SessionRequest::Reconnect {
                 let Some(delay) = self.backoff.as_mut().and_then(Backoff::next_delay) else {
+                    tracing::warn!(attempts = self.attempts(), "gave up reconnecting");
                     break last_result;
                 };
+
+                tracing::info!(attempt = self.attempts(), ?delay, "reconnecting");
 
                 // The client-packet loop asks for one session at a time, so
                 // only its hang-up can arrive while waiting.
@@ -98,8 +102,11 @@ where
 
             let mut answered = false;
 
+            let span = tracing::info_span!("session", session = number, attempt = self.attempts());
+
             last_result = self
                 .run_session(number, &session_tx, routes, &mut answered)
+                .instrument(span)
                 .await;
 
             if answered {
@@ -118,6 +125,11 @@ where
         while session_request_rx.recv().await.is_some() {}
 
         result
+    }
+
+    /// Returns the number of reconnection attempts since the last reset.
+    fn attempts(&self) -> u32 {
+        self.backoff.as_ref().map_or(0, Backoff::attempts)
     }
 
     fn reset_backoff(&mut self) {

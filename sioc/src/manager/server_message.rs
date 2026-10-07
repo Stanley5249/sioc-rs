@@ -61,7 +61,9 @@ async fn deliver_server_messages(
     let mut reconstructor = None;
 
     while let Some(message) = server_message_rx.recv().await {
-        *answered = true;
+        if !std::mem::replace(answered, true) {
+            tracing::info!("session answered");
+        }
 
         match message {
             Message::Text(text) => {
