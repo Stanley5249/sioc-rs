@@ -4,7 +4,7 @@ use eioc::prelude::Message;
 use tokio::sync::mpsc;
 
 use crate::error::ManagerError;
-use crate::manager::client_packet::ConnectRequest;
+use crate::manager::connect_request::ConnectRequest;
 use crate::manager::routes::Routes;
 
 /// Routes packets between the namespace handles and the engine until the

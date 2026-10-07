@@ -9,7 +9,7 @@ use tokio::task::JoinHandle;
 
 use crate::client::SocketSender;
 use crate::error::{ManagerError, SocketError};
-use crate::manager::client_packet::ConnectRequest;
+use crate::manager::connect_request::ConnectRequest;
 use crate::packet::{ClientPacket, DynAck, ServerAckId, ServerPacket};
 
 const CONNECT_RESPONSE: &str = "0{\"sid\":\"test\"}";

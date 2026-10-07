@@ -11,7 +11,7 @@ use url::Url;
 
 use crate::ack::AckType;
 use crate::error::{ClientBuilderError, ClientError, ManagerError, PayloadError, SocketError};
-use crate::manager::client_packet::ConnectRequest;
+use crate::manager::connect_request::ConnectRequest;
 use crate::marker::{AckId, AckMarker, BinaryMarker};
 use crate::packet::{ClientPacket, DynEvent, ServerAckId, ServerPacket};
 

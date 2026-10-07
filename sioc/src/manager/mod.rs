@@ -5,6 +5,7 @@
 //! [`client_packet`] sends what the namespace handles ask for.
 
 pub mod client_packet;
+pub mod connect_request;
 pub mod routes;
 pub mod server_message;
 pub mod session;
