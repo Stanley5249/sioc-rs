@@ -81,7 +81,7 @@ _typecheck-py *args:
 
 # Lint TypeScript test servers with type-aware rules.
 _lint-js *args:
-    bunx oxlint {{ args }}
+    bun run oxlint {{ args }}
 
 # Format Rust sources and shared justfiles.
 [group("formatting")]
@@ -100,7 +100,7 @@ _fmt-ruff *args:
     uv run --locked ruff format -q {{ args }}
 
 _fmt-oxfmt *args:
-    bunx oxfmt {{ args }}
+    bun run oxfmt {{ args }}
 
 _fmt-just *args:
     just --fmt {{ args }}
