@@ -47,6 +47,17 @@ struct Answer(u32);
 #[derive(Debug, EventType, DeserializePayload)]
 #[sioc(event(ack = "Answer"))]
 struct Question(u32);
+#[derive(Debug, EventType, SerializePayload)]
+struct CloseEngine;
+#[derive(Debug, EventType, SerializePayload)]
+#[sioc(event(ack = "Total"))]
+struct CloseEngineLater;
+#[derive(Debug, EventType, SerializePayload)]
+#[sioc(event(ack = "Total"))]
+struct HangUp;
+#[derive(Debug, EventType, SerializePayload)]
+#[sioc(event(ack = "Total"))]
+struct Engines;
 #[derive(Debug, EventRouter)]
 enum Received {
     Item(Event<Item>),
@@ -91,10 +102,18 @@ impl Server {
         assert!(status.success());
     }
 
+    /// Opens a client that reconnects after 50 milliseconds, to keep the
+    /// reconnection tests short.
     fn client(&self, transport: TransportStrategy, capacity: usize) -> Client {
+        let reconnection = ReconnectionConfig {
+            delay: Duration::from_millis(50),
+            delay_max: Duration::from_millis(50),
+            ..ReconnectionConfig::default()
+        };
         ClientBuilder::new(self.url.clone())
             .transport(transport)
             .channels(capacity)
+            .reconnection(Some(reconnection))
             .open()
             .unwrap()
     }
@@ -122,7 +141,15 @@ async fn connected(client: &Client, ns: &str) -> (SocketSender, SocketReceiver) 
     (tx, rx)
 }
 
-/// Disconnects the namespace and waits until the session ends.
+/// Returns the namespace's next item, which must be a CONNECT.
+async fn next_connect(rx: &mut SocketReceiver) -> Connect {
+    match rx.recv().await {
+        Some(ServerPacket::Connect(connect)) => connect,
+        other => panic!("expected a CONNECT, got {other:?}"),
+    }
+}
+
+/// Disconnects the namespace and waits until the client ends.
 async fn finish(client: Client, tx: SocketSender, mut rx: SocketReceiver) {
     tx.disconnect();
     while rx.recv().await.is_some() {}
@@ -186,7 +213,7 @@ async fn echo_while_receiving_full() {
     .await;
 }
 
-/// Dropping the only sender mid-flood still ends the session.
+/// Dropping the only sender mid-flood still ends the client.
 #[tokio::test]
 #[ignore = "requires bun; run just test-e2e"]
 async fn drop_sender_mid_flood() {
@@ -309,6 +336,96 @@ async fn server_ack_reaches_server() {
             panic!("expected the answer back");
         };
         assert_eq!(event.payload.0, 14);
+        finish(client, tx, rx).await;
+    })
+    .await;
+}
+
+/// The server ends the Engine.IO session, and the namespace connects again.
+#[tokio::test]
+#[ignore = "requires bun; run just test-e2e"]
+async fn engine_close_reconnects() {
+    run(&ORDINARY, async |server: &Server, transport, capacity| {
+        let client = server.client(transport, capacity);
+        let (tx, mut rx) = client.connect("/").await.unwrap();
+        let first = next_connect(&mut rx).await;
+        tx.emit(Count).await.unwrap().await.unwrap();
+
+        tx.emit(CloseEngine).await.unwrap();
+        let second = next_connect(&mut rx).await;
+        assert_ne!(first.sid, second.sid);
+
+        // The server sees a new socket, which has seen nothing yet.
+        assert_eq!(tx.emit(Count).await.unwrap().await.unwrap().payload.0, 0);
+        finish(client, tx, rx).await;
+    })
+    .await;
+}
+
+/// The server refuses the CONNECT resent after a reconnection, which closes
+/// only that namespace.
+#[tokio::test]
+#[ignore = "requires bun; run just test-e2e"]
+async fn refused_reconnection_closes_namespace() {
+    run(&ORDINARY, async |server: &Server, transport, capacity| {
+        let client = server.client(transport, capacity);
+        let (tx, mut rx) = connected(&client, "/").await;
+        let auth = format!(r#"{{"token":"{transport:?}-{capacity}"}}"#);
+        let (once_tx, mut once_rx) = client.connect_with("/once", auth).await.unwrap();
+        next_connect(&mut once_rx).await;
+
+        tx.emit(CloseEngine).await.unwrap();
+        next_connect(&mut rx).await;
+        assert!(matches!(
+            once_rx.recv().await,
+            Some(ServerPacket::ConnectError(error)) if error.message == "used"
+        ));
+        assert!(once_rx.recv().await.is_none());
+        assert!(matches!(
+            once_tx.emit(Count).await,
+            Err(sioc::error::SocketError::Closed)
+        ));
+        finish(client, tx, rx).await;
+    })
+    .await;
+}
+
+/// An ack the server never sent fails when the session drops.
+#[tokio::test]
+#[ignore = "requires bun; run just test-e2e"]
+async fn pending_ack_fails_on_drop() {
+    run(&ORDINARY, async |server: &Server, transport, capacity| {
+        let client = server.client(transport, capacity);
+        let (tx, mut rx) = connected(&client, "/").await;
+        let handle = tx.emit(HangUp).await.unwrap();
+        assert!(matches!(handle.await, Err(sioc::error::AckError::Recv(_))));
+        next_connect(&mut rx).await;
+        finish(client, tx, rx).await;
+    })
+    .await;
+}
+
+/// A session that drops without open namespaces is not reopened until a
+/// namespace opens.
+#[tokio::test]
+#[ignore = "requires bun; run just test-e2e"]
+async fn no_reconnection_without_namespaces() {
+    run(&ORDINARY, async |server: &Server, transport, capacity| {
+        let client = server.client(transport, capacity);
+        let (tx, rx) = connected(&client, "/").await;
+        // Wait for the ack, because the server ignores an event that arrives
+        // with the DISCONNECT behind it in one polling request.
+        let handle = tx.emit(CloseEngineLater).await.unwrap();
+        let before = handle.await.unwrap().payload.0;
+        tx.disconnect();
+        drop(rx);
+
+        // Wait past the drop and the reconnection delay.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let (tx, rx) = connected(&client, "/").await;
+        let after = tx.emit(Engines).await.unwrap().await.unwrap().payload.0;
+        assert_eq!(after, before + 1);
         finish(client, tx, rx).await;
     })
     .await;
