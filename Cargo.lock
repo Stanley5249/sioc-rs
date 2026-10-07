@@ -1607,6 +1607,7 @@ dependencies = [
  "bytes",
  "bytestring",
  "eioc",
+ "fastrand",
  "futures-util",
  "miette",
  "pin-project",

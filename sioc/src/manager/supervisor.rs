@@ -1,12 +1,12 @@
 //! Opens one Engine.IO session after another while the namespaces need one.
 
 use std::future::Future;
-use std::time::Duration;
 
 use eioc::prelude::Message;
 use tokio::sync::mpsc;
 
 use crate::error::ManagerError;
+use crate::manager::backoff::Backoff;
 use crate::manager::routes::Routes;
 
 /// Why the client-packet loop asks for a session.
@@ -37,8 +37,8 @@ pub struct Supervisor<F> {
     pub server_message_capacity: usize,
     /// Capacity of the channel from the client-packet loop to the engine.
     pub client_message_capacity: usize,
-    /// How long to wait before a reconnection, or `None` to stop instead.
-    pub retry_delay: Option<Duration>,
+    /// Delays each reconnection, or `None` to stop instead of reconnecting.
+    pub backoff: Option<Backoff>,
     /// Runs one engine session; see [`eioc::engine::session::connect`].
     pub connect_engine: F,
 }
@@ -49,14 +49,17 @@ where
     Fut: Future<Output = Result<(), eioc::error::Error>>,
 {
     /// Opens a session for each request of the client-packet loop until the
-    /// loop hangs up, or until a reconnection is due without a `retry_delay`.
+    /// loop hangs up, or until a reconnection is due and `backoff` gives up.
     ///
-    /// Then drops `session_tx`, and waits until `session_request_rx` ends.
+    /// Restarts the backoff after a session the server answered, like
+    /// socket.io-client's `Manager.onreconnect`, and when a namespace opens
+    /// while no session is open. Then drops `session_tx`, and waits until
+    /// `session_request_rx` ends.
     ///
     /// # Errors
     ///
     /// Returns an internal error from a session, which ends the client, or the
-    /// last session's error when the supervisor stops instead of reconnecting.
+    /// last session's error when the supervisor gives up reconnecting.
     pub async fn supervise(
         mut self,
         mut session_request_rx: mpsc::Receiver<SessionRequest>,
@@ -71,15 +74,19 @@ where
                 break Ok(());
             };
 
+            if request == SessionRequest::Open {
+                self.reset_backoff();
+            }
+
             if request == SessionRequest::Reconnect {
-                let Some(retry_delay) = self.retry_delay else {
+                let Some(delay) = self.backoff.as_mut().and_then(Backoff::next_delay) else {
                     break last_result;
                 };
 
                 // The client-packet loop asks for one session at a time, so
                 // only its hang-up can arrive while waiting.
                 tokio::select! {
-                    () = tokio::time::sleep(retry_delay) => {}
+                    () = tokio::time::sleep(delay) => {}
                     request = session_request_rx.recv() => {
                         assert!(request.is_none(), "the client-packet loop asks for one session at a time");
                         break Ok(());
@@ -89,7 +96,15 @@ where
 
             let number = numbers.next().unwrap_or_default();
 
-            last_result = self.run_session(number, &session_tx, routes).await;
+            let mut answered = false;
+
+            last_result = self
+                .run_session(number, &session_tx, routes, &mut answered)
+                .await;
+
+            if answered {
+                self.reset_backoff();
+            }
 
             match &last_result {
                 Ok(()) => tracing::debug!(session = number, "session ended"),
@@ -105,13 +120,22 @@ where
         result
     }
 
+    fn reset_backoff(&mut self) {
+        if let Some(backoff) = &mut self.backoff {
+            backoff.reset();
+        }
+    }
+
     /// Hands a new session to the client-packet loop, then runs the
     /// server-message loop beside the engine until both end.
+    ///
+    /// Sets `answered` once the server sends a message.
     async fn run_session(
         &mut self,
         number: u64,
         session_tx: &mpsc::Sender<Session>,
         routes: &Routes,
+        answered: &mut bool,
     ) -> Result<(), ManagerError> {
         let (server_message_tx, server_message_rx) = mpsc::channel(self.server_message_capacity);
 
@@ -142,6 +166,7 @@ where
                 routes,
                 connected_generation_tx,
                 number,
+                answered,
             ),
             (self.connect_engine)(server_message_tx, client_message_rx),
         );

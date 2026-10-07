@@ -20,7 +20,8 @@ pub mod prelude {
     pub use crate::ack::{Ack, AckHandle, AckType};
     pub use crate::binary::{AttachmentsBuilder, Placeholder};
     pub use crate::client::{
-        Acknowledge, ChannelConfig, Client, ClientBuilder, Emit, SocketReceiver, SocketSender,
+        Acknowledge, ChannelConfig, Client, ClientBuilder, Emit, ReconnectionConfig,
+        SocketReceiver, SocketSender,
     };
     pub use crate::event::{Event, EventHandler, EventRouter, EventType};
     pub use crate::marker::{AckId, AckMarker, BinaryMarker, HasAck, HasBinary, NoAck, NoBinary};

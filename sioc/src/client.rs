@@ -12,6 +12,7 @@ use url::Url;
 
 use crate::ack::AckType;
 use crate::error::{ClientBuilderError, ClientError, ManagerError, PayloadError, SocketError};
+use crate::manager::backoff::Backoff;
 use crate::manager::connect_request::ConnectRequest;
 use crate::manager::supervisor::Supervisor;
 use crate::marker::{AckId, AckMarker, BinaryMarker};
@@ -51,9 +52,6 @@ where
     /// Returns an error if payload serialization fails.
     fn into_client_packet(self, id: ServerAckId) -> Result<ClientPacket, PayloadError>;
 }
-
-/// How long the client waits before it reconnects.
-const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Channel buffer capacities for each internal MPSC queue.
 ///
@@ -102,6 +100,40 @@ impl From<usize> for ChannelConfig {
     }
 }
 
+/// Reconnection settings, with the defaults of socket.io-client's `Manager`.
+///
+/// After an Engine.IO session drops while namespaces are open, attempt `n`
+/// waits `delay * 2^n`, moved up or down by a random share of up to
+/// `randomization_factor` of itself, and capped at `delay_max`. A session the
+/// server answers restarts the count.
+///
+/// Pass it to [`ClientBuilder::reconnection`].
+#[derive(Clone, Copy, Debug)]
+pub struct ReconnectionConfig {
+    /// The number of attempts before giving up, or `None` for no limit, like
+    /// `reconnectionAttempts` (default: `None`).
+    pub attempts: Option<u32>,
+    /// The delay before the first attempt, like `reconnectionDelay` (default:
+    /// 1 second).
+    pub delay: Duration,
+    /// The longest delay, like `reconnectionDelayMax` (default: 5 seconds).
+    pub delay_max: Duration,
+    /// The largest random share of each delay to add or subtract, like
+    /// `randomizationFactor` (default: 0.5).
+    pub randomization_factor: f64,
+}
+
+impl Default for ReconnectionConfig {
+    fn default() -> Self {
+        Self {
+            attempts: None,
+            delay: Duration::from_secs(1),
+            delay_max: Duration::from_secs(5),
+            randomization_factor: 0.5,
+        }
+    }
+}
+
 /// Builder for a [`Client`] connection.
 ///
 /// # Example
@@ -125,6 +157,7 @@ pub struct ClientBuilder<C = ()> {
     websocket_connector: C,
     transport_strategy: TransportStrategy,
     channels: ChannelConfig,
+    reconnection: Option<ReconnectionConfig>,
 }
 
 impl ClientBuilder<()> {
@@ -137,6 +170,7 @@ impl ClientBuilder<()> {
             websocket_connector: (),
             transport_strategy: TransportStrategy::default(),
             channels: ChannelConfig::default(),
+            reconnection: Some(ReconnectionConfig::default()),
         }
     }
 }
@@ -188,6 +222,7 @@ where
             websocket_connector: connector,
             transport_strategy: self.transport_strategy,
             channels: self.channels,
+            reconnection: self.reconnection,
         }
     }
 
@@ -204,6 +239,14 @@ where
     /// [`ChannelConfig`] for per-channel control.
     pub fn channels(mut self, config: impl Into<ChannelConfig>) -> Self {
         self.channels = config.into();
+        self
+    }
+
+    /// Override the reconnection settings, or pass `None` to end the client
+    /// when an Engine.IO session drops instead (default:
+    /// [`ReconnectionConfig::default`]).
+    pub fn reconnection(mut self, config: Option<ReconnectionConfig>) -> Self {
+        self.reconnection = config;
         self
     }
 
@@ -225,6 +268,14 @@ where
         let websocket_connector = self.websocket_connector;
         let transport_strategy = self.transport_strategy;
         let channels = self.channels;
+        let backoff = self.reconnection.map(|config| {
+            Backoff::new(
+                config.delay,
+                config.delay_max,
+                config.randomization_factor,
+                config.attempts,
+            )
+        });
         let url = self.url.join(&self.path)?;
 
         let (connect_request_tx, connect_request_rx) = mpsc::channel(channels.manager);
@@ -246,7 +297,7 @@ where
         let supervisor = Supervisor {
             server_message_capacity: channels.manager,
             client_message_capacity: channels.engine,
-            retry_delay: Some(RETRY_DELAY),
+            backoff,
             connect_engine,
         };
 
@@ -487,12 +538,14 @@ impl std::ops::DerefMut for SocketReceiver {
 
 #[cfg(test)]
 mod tests {
+    use std::io::ErrorKind;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use eioc::error::{Error as EngineIoError, TransportError, WebSocketError};
     use eioc::transport::TransportStrategy;
     use serde_json::Map;
-    use tokio::sync::mpsc;
+    use tokio::sync::{Semaphore, mpsc};
     use url::Url;
 
     use super::*;
@@ -683,29 +736,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn custom_connector_retries_while_a_namespace_is_open() {
+    async fn reconnection_gives_up_after_its_attempts() {
+        let gate = Arc::new(Semaphore::new(0));
         let attempts = Arc::new(AtomicUsize::new(0));
+        let connector_gate = Arc::clone(&gate);
         let counter = Arc::clone(&attempts);
         let client = ClientBuilder::new(Url::parse("http://localhost:3000/").unwrap())
             .path("custom/")
             .transport(TransportStrategy::WebSocket)
+            .reconnection(Some(ReconnectionConfig {
+                attempts: Some(2),
+                delay: Duration::from_millis(1),
+                delay_max: Duration::from_millis(1),
+                ..ReconnectionConfig::default()
+            }))
             .websocket_connector(move |url: Url| async move {
+                // Wait for the namespace, so that every session reconnects.
+                connector_gate.acquire().await.unwrap().forget();
                 assert_eq!(url.scheme(), "ws");
                 assert_eq!(url.path(), "/custom/");
                 counter.fetch_add(1, Ordering::Relaxed);
-                Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused).into())
+                Err(std::io::Error::new(ErrorKind::ConnectionRefused, "connector refused").into())
             })
             .open()
             .unwrap();
 
-        let handles = client.connect("/").await.unwrap();
-        while attempts.load(Ordering::Relaxed) < 2 {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        let (_tx, mut rx) = client.connect("/").await.unwrap();
+        gate.add_permits(16);
+        assert!(rx.recv().await.is_none());
+        assert_eq!(attempts.load(Ordering::Relaxed), 3);
 
-        // Without a namespace, the client ends instead of reconnecting.
-        drop(handles);
-        client.join().await.unwrap();
+        assert!(matches!(
+            client.connect("/chat").await,
+            Err(SocketError::Closed)
+        ));
+        assert!(matches!(
+            client.join().await,
+            Err(ClientError::Manager(ManagerError::Engine(
+                EngineIoError::Transport(TransportError::WebSocket(WebSocketError::Tungstenite(
+                    error
+                )))
+            ))) if error.to_string().contains("connector refused")
+        ));
+    }
+
+    #[tokio::test]
+    async fn without_reconnection_the_first_failure_ends_the_client() {
+        let client = ClientBuilder::new(Url::parse("http://localhost:3000/").unwrap())
+            .transport(TransportStrategy::WebSocket)
+            .reconnection(None)
+            .websocket_connector(async |_| {
+                Err(std::io::Error::from(ErrorKind::ConnectionRefused).into())
+            })
+            .open()
+            .unwrap();
+
+        let (_tx, mut rx) = client
+            .connect_with("/chat", r#"{"token":"secret"}"#)
+            .await
+            .unwrap();
+        assert!(rx.recv().await.is_none());
+        client.join().await.unwrap_err();
     }
 
     #[tokio::test]

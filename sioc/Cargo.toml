@@ -21,6 +21,7 @@ sioc-macros.workspace = true
 
 bytes.workspace = true
 bytestring.workspace = true
+fastrand.workspace = true
 futures-util.workspace = true
 miette.workspace = true
 pin-project.workspace = true

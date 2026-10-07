@@ -9,6 +9,7 @@ use tokio::task::JoinHandle;
 
 use crate::client::SocketSender;
 use crate::error::{ManagerError, SocketError};
+use crate::manager::backoff::Backoff;
 use crate::manager::connect_request::ConnectRequest;
 use crate::manager::supervisor::Supervisor;
 use crate::packet::{ClientPacket, DynAck, ServerAckId, ServerPacket};
@@ -77,10 +78,16 @@ impl TestManager {
 
     /// Spawns a manager that reconnects at once, and takes its first session.
     async fn spawn_reconnecting() -> Self {
-        Self::spawn_with(Some(Duration::ZERO)).await
+        Self::spawn_with(Some(Backoff::new(
+            Duration::ZERO,
+            Duration::ZERO,
+            0.0,
+            None,
+        )))
+        .await
     }
 
-    async fn spawn_with(retry_delay: Option<Duration>) -> Self {
+    async fn spawn_with(backoff: Option<Backoff>) -> Self {
         let (connect_request_tx, connect_request_rx) = mpsc::channel(32);
         let (session_tx, mut session_rx) = mpsc::channel(1);
         let connect_engine = move |server_message_tx, client_message_rx| {
@@ -102,7 +109,7 @@ impl TestManager {
         let supervisor = Supervisor {
             server_message_capacity: 32,
             client_message_capacity: 32,
-            retry_delay,
+            backoff,
             connect_engine,
         };
         let task = tokio::spawn(crate::manager::session::run(connect_request_rx, supervisor));
@@ -873,5 +880,25 @@ async fn no_reconnection_without_namespaces_until_one_opens() {
 
     drop(handles.client_packet_tx);
     assert_eq!(&*manager.recv_client_text().await, "1");
+    manager.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn answered_session_restarts_the_attempt_count() {
+    let backoff = Backoff::new(Duration::ZERO, Duration::ZERO, 0.0, Some(1));
+    let mut manager = TestManager::spawn_with(Some(backoff)).await;
+    let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
+    for _ in 0..3 {
+        manager.send_server_message(CONNECT_RESPONSE).await;
+        server_packet_rx.recv().await.unwrap();
+        manager.reconnect().await;
+        assert_eq!(&*manager.recv_client_text().await, "0");
+    }
+
+    // The open session is never answered, so it used up the one attempt.
+    manager.session.take().unwrap().end().await;
+    assert!(server_packet_rx.recv().await.is_none());
+
+    drop(client_packet_tx);
     manager.finish().await.unwrap();
 }

@@ -12,7 +12,8 @@ use crate::packet::{
 };
 
 /// Delivers server packets to the namespace receivers until the engine closes
-/// `server_message_rx`, tagging each event's ack ID with `session`.
+/// `server_message_rx`, tagging each event's ack ID with `session`, and sets
+/// `answered` once a server message arrives.
 ///
 /// Waiting on a full receiver holds up only this direction. After an error,
 /// drops `connected_generation_tx`, which tells the client-packet loop to
@@ -28,12 +29,14 @@ pub async fn server_messages_to_packets(
     routes: &Routes,
     connected_generation_tx: mpsc::UnboundedSender<u64>,
     session: u64,
+    answered: &mut bool,
 ) -> Result<(), ManagerError> {
     let result = deliver_server_messages(
         &mut server_message_rx,
         routes,
         &connected_generation_tx,
         session,
+        answered,
     )
     .await;
 
@@ -53,10 +56,13 @@ async fn deliver_server_messages(
     routes: &Routes,
     connected_generation_tx: &mpsc::UnboundedSender<u64>,
     session: u64,
+    answered: &mut bool,
 ) -> Result<(), ManagerError> {
     let mut reconstructor = None;
 
     while let Some(message) = server_message_rx.recv().await {
+        *answered = true;
+
         match message {
             Message::Text(text) => {
                 route_text(

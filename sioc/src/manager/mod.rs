@@ -6,6 +6,7 @@
 //! to each namespace, beside the session's engine. Each direction has its own
 //! loop, so neither waits on the other.
 
+pub mod backoff;
 pub mod client_packet;
 pub mod connect_request;
 pub mod routes;
