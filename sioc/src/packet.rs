@@ -42,13 +42,51 @@ pub struct ConnectError {
     pub extra: Map<String, Value>,
 }
 
+/// An ack ID the server assigned to an event, tagged with the session the
+/// event arrived in.
+///
+/// The server restarts its ack IDs in every Engine.IO session, so the client
+/// discards an ack from an ended session instead of answering a newer event
+/// with the same ID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ServerAckId {
+    id: u64,
+    session: u64,
+}
+
+impl ServerAckId {
+    /// Creates an ID in the first session.
+    #[must_use]
+    pub fn new(id: u64) -> Self {
+        Self { id, session: 0 }
+    }
+
+    /// Moves the ID to `session`.
+    #[must_use]
+    pub fn with_session(self, session: u64) -> Self {
+        Self { session, ..self }
+    }
+
+    /// Returns the wire-level ID.
+    #[must_use]
+    pub fn get(self) -> u64 {
+        self.id
+    }
+
+    /// Returns the session the ID belongs to.
+    #[must_use]
+    pub fn session(self) -> u64 {
+        self.session
+    }
+}
+
 /// Type-erased inbound event after binary reassembly.
 #[derive(Debug, Clone)]
 pub struct DynEvent {
     /// Raw JSON payload (includes the event name as the first array element).
     pub payload: ByteString,
     /// Ack ID assigned by the sender, if any.
-    pub id: Option<u64>,
+    pub id: Option<ServerAckId>,
     /// Reassembled binary attachments, if any.
     pub attachments: Option<Vec<Bytes>>,
 }
@@ -58,7 +96,7 @@ impl std::fmt::Display for DynEvent {
         let mut map = f.debug_map();
         map.entry(&"payload", &format_args!("{}", self.payload));
         if let Some(id) = self.id {
-            map.entry(&"id", &id);
+            map.entry(&"id", &id.get());
         }
         if let Some(attachments) = &self.attachments {
             map.entry(&"count", &attachments.len());
@@ -68,14 +106,14 @@ impl std::fmt::Display for DynEvent {
 }
 
 impl DynEvent {
-    /// Creates a `DynEvent` with no attachments.
+    /// Creates a `DynEvent` in the first session with no attachments.
     pub fn new<T>(payload: T, id: Option<u64>) -> Self
     where
         T: Into<ByteString>,
     {
         Self {
             payload: payload.into(),
-            id,
+            id: id.map(ServerAckId::new),
             attachments: None,
         }
     }
@@ -229,7 +267,7 @@ pub enum ClientPacket {
         /// The JSON array of the ack arguments.
         payload: ByteString,
         /// The ack ID of the event being acknowledged.
-        id: u64,
+        id: ServerAckId,
         /// Binary attachments, sent as frames after the packet.
         attachments: Option<Vec<Bytes>>,
     },

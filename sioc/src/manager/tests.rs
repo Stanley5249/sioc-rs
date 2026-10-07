@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 use crate::client::SocketSender;
 use crate::error::{ManagerError, SocketError};
 use crate::manager::client_packet::ConnectRequest;
-use crate::packet::{ClientPacket, DynAck, ServerPacket};
+use crate::packet::{ClientPacket, DynAck, ServerAckId, ServerPacket};
 
 const CONNECT_RESPONSE: &str = "0{\"sid\":\"test\"}";
 
@@ -329,7 +329,7 @@ async fn ack_is_not_buffered() {
     let (client_packet_tx, _server_packet_rx) = manager.open("/").await;
     let client_packet = ClientPacket::Ack {
         payload: ByteString::from_static("[true]"),
-        id: 42,
+        id: ServerAckId::new(42),
         attachments: None,
     };
     client_packet_tx.send(client_packet).await.unwrap();
@@ -343,7 +343,7 @@ async fn binary_ack_sends_attachments() {
     let (client_packet_tx, _server_packet_rx) = manager.open("/").await;
     let client_packet = ClientPacket::Ack {
         payload: ByteString::from_static("[true]"),
-        id: 7,
+        id: ServerAckId::new(7),
         attachments: Some(vec![Bytes::from_static(b"\xCA\xFE")]),
     };
     client_packet_tx.send(client_packet).await.unwrap();

@@ -293,10 +293,13 @@ async fn send_client_packet(
             attachments,
         } => {
             let packet = match &attachments {
-                None => Packet::Ack { payload, id },
+                None => Packet::Ack {
+                    payload,
+                    id: id.get(),
+                },
                 Some(attachments) => Packet::BinaryAck {
                     payload,
-                    id,
+                    id: id.get(),
                     count: attachments.len(),
                 },
             };

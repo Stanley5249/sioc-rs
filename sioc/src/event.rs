@@ -30,7 +30,7 @@ use crate::binary::AttachmentsBuilder;
 use crate::client::Emit;
 use crate::error::{EventError, PayloadError};
 use crate::marker::{AckMarker, BinaryMarker, HasAck, HasBinary, NoAck, NoBinary};
-use crate::packet::{ClientPacket, DynEvent};
+use crate::packet::{ClientPacket, DynEvent, ServerAckId};
 use crate::payload::{DeserializePayload, SerializePayload, event_from_json, event_to_json};
 
 /// Maps a Rust struct to a Socket.IO event name and compile-time policies.
@@ -113,7 +113,7 @@ pub trait EventHandler: Sized {
     /// deserialization fails.
     fn handle(
         payload: Self::Payload,
-        id: Option<u64>,
+        id: Option<ServerAckId>,
         attachments: Option<Vec<Bytes>>,
     ) -> Result<Self, EventError>;
 }
@@ -135,7 +135,7 @@ where
 
     fn handle(
         payload: Self::Payload,
-        id: Option<u64>,
+        id: Option<ServerAckId>,
         attachments: Option<Vec<Bytes>>,
     ) -> Result<Self, EventError> {
         let id = E::Ack::parse(id)?;
@@ -289,7 +289,7 @@ mod tests {
     fn ping_event(id: Option<u64>, attachments: Option<Vec<Bytes>>) -> DynEvent {
         DynEvent {
             payload: bss(r#"["ping"]"#),
-            id,
+            id: id.map(ServerAckId::new),
             attachments,
         }
     }
@@ -299,12 +299,12 @@ mod tests {
         let att = vec![Bytes::from_static(b"\xFF")];
         let ev: Event<PingWithAckAndBinary> = DynEvent {
             payload: bss(r#"["ping"]"#),
-            id: Some(1),
+            id: Some(ServerAckId::new(1)),
             attachments: Some(att),
         }
         .try_into()
         .unwrap();
-        assert_eq!(ev.id.get(), 1);
+        assert_eq!(ev.id.get(), ServerAckId::new(1));
     }
 
     #[test]
@@ -345,7 +345,7 @@ mod tests {
     #[test]
     fn try_from_with_ack_id_succeeds() {
         let ev: Event<PingWithAck> = ping_event(Some(5), None).try_into().unwrap();
-        assert_eq!(ev.id.get(), 5);
+        assert_eq!(ev.id.get(), ServerAckId::new(5));
     }
 
     #[test]
@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn event_handler_handle_bad_ack_fails() {
-        Event::<Ping>::handle(Ping, Some(1), None).unwrap_err();
+        Event::<Ping>::handle(Ping, Some(ServerAckId::new(1)), None).unwrap_err();
     }
 
     #[test]

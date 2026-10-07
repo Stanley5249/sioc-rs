@@ -13,7 +13,7 @@ use crate::ack::AckType;
 use crate::error::{ClientBuilderError, ClientError, ManagerError, PayloadError, SocketError};
 use crate::manager::client_packet::ConnectRequest;
 use crate::marker::{AckId, AckMarker, BinaryMarker};
-use crate::packet::{ClientPacket, DynEvent, ServerPacket};
+use crate::packet::{ClientPacket, DynEvent, ServerAckId, ServerPacket};
 
 /// Converts a typed event into a [`ClientPacket`] for emission.
 ///
@@ -47,7 +47,7 @@ where
     /// # Errors
     ///
     /// Returns an error if payload serialization fails.
-    fn into_client_packet(self, id: u64) -> Result<ClientPacket, PayloadError>;
+    fn into_client_packet(self, id: ServerAckId) -> Result<ClientPacket, PayloadError>;
 }
 
 /// Channel buffer capacities for each internal MPSC queue.
@@ -741,12 +741,12 @@ mod tests {
     #[tokio::test]
     async fn acknowledge_sends_ack_packet_with_correct_id() {
         let (sender, mut rx) = socket_sender();
-        let id = HasAck::<()>::parse(Some(5)).unwrap();
+        let id = HasAck::<()>::parse(Some(ServerAckId::new(5))).unwrap();
         sender.acknowledge(id, ()).await.unwrap();
         let ClientPacket::Ack { id, .. } = rx.try_recv().unwrap() else {
             panic!("expected Ack packet");
         };
-        assert_eq!(id, 5);
+        assert_eq!(id.get(), 5);
     }
 
     #[test]

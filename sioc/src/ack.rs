@@ -29,7 +29,7 @@ use crate::binary::AttachmentsBuilder;
 use crate::client::Acknowledge;
 use crate::error::{AckError, PayloadError};
 use crate::marker::{BinaryMarker, HasBinary, NoBinary};
-use crate::packet::{ClientPacket, DynAck};
+use crate::packet::{ClientPacket, DynAck, ServerAckId};
 use crate::payload::{DeserializePayload, SerializePayload, ack_from_json, ack_to_json};
 
 /// Maps a Rust struct to the Socket.IO ack JSON-array encoding.
@@ -110,7 +110,7 @@ impl<A> Acknowledge<A, NoBinary> for A
 where
     A: AckType<Binary = NoBinary> + SerializePayload,
 {
-    fn into_client_packet(self, id: u64) -> Result<ClientPacket, PayloadError> {
+    fn into_client_packet(self, id: ServerAckId) -> Result<ClientPacket, PayloadError> {
         let payload = ack_to_json(&self)?.into();
         Ok(ClientPacket::Ack {
             payload,
@@ -125,7 +125,7 @@ where
     F: FnOnce(&mut AttachmentsBuilder) -> A,
     A: AckType<Binary = HasBinary> + SerializePayload,
 {
-    fn into_client_packet(self, id: u64) -> Result<ClientPacket, PayloadError> {
+    fn into_client_packet(self, id: ServerAckId) -> Result<ClientPacket, PayloadError> {
         let mut builder = AttachmentsBuilder::new();
         let payload = ack_to_json(&self(&mut builder))?.into();
         Ok(ClientPacket::Ack {
@@ -323,7 +323,7 @@ mod tests {
     }
     #[test]
     fn send_ack_into_client_packet_binary() {
-        let id = <HasAck<BinaryBoolAck>>::parse(Some(3)).unwrap();
+        let id = <HasAck<BinaryBoolAck>>::parse(Some(ServerAckId::new(3))).unwrap();
         let client_packet = Acknowledge::<BinaryBoolAck, HasBinary>::into_client_packet(
             |builder: &mut AttachmentsBuilder| {
                 let _p = builder.attach(Bytes::from_static(b"\xCA\xFE"));
@@ -341,7 +341,7 @@ mod tests {
             panic!("expected Ack packet");
         };
         assert_eq!(&payload[..], "[true]");
-        assert_eq!(id, 3);
+        assert_eq!(id.get(), 3);
         let att = attachments.expect("expected attachments");
         assert_eq!(att.len(), 1);
         assert_eq!(att[0], Bytes::from_static(b"\xCA\xFE"));
@@ -359,7 +359,8 @@ mod tests {
 
     #[test]
     fn send_ack_into_client_packet_no_binary() {
-        let client_packet = Acknowledge::<(), NoBinary>::into_client_packet((), 7).unwrap();
+        let client_packet =
+            Acknowledge::<(), NoBinary>::into_client_packet((), ServerAckId::new(7)).unwrap();
         let ClientPacket::Ack {
             payload,
             id,
@@ -369,7 +370,7 @@ mod tests {
             panic!("expected Ack packet");
         };
         assert_eq!(&payload[..], "[]");
-        assert_eq!(id, 7);
+        assert_eq!(id.get(), 7);
         assert!(attachments.is_none());
     }
 

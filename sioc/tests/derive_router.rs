@@ -52,7 +52,7 @@ fn dispatches_each_variant_and_reports_wire_name() {
         panic!("expected upload variant");
     };
     assert_eq!(event.payload.0.slot(), 0);
-    assert_eq!(event.id.get(), 42);
+    assert_eq!(event.id.get(), ServerAckId::new(42));
     assert_eq!(event.attachments, vec![data]);
 }
 
