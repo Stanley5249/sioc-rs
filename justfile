@@ -62,12 +62,12 @@ _check-py: (_fmt-ruff "--check") _lint-py _typecheck-py
 _check-js: (_fmt-oxfmt "--check") _lint-js
 
 # Lint libraries, examples, and tests with warnings denied.
-[group("linting")]
+[group("checks")]
 lint *args:
     cargo clippy --quiet --locked --workspace --all-targets {{ args }} -- -D warnings
 
 # Lint every language and type-check the Python example.
-[group("linting")]
+[group("checks")]
 [parallel]
 lint-all: lint _lint-py _typecheck-py _lint-js
 
