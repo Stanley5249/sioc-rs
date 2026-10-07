@@ -22,7 +22,7 @@ pub enum SessionRequest {
 /// The client-packet loop's end of one Engine.IO session.
 #[derive(Debug)]
 pub struct Session {
-    /// Counts sessions from 0, so an ack from an ended session is discarded.
+    /// Counts sessions from 0.
     pub number: u64,
     /// Carries client messages to the session's engine. Dropping it closes
     /// the session.
@@ -177,7 +177,6 @@ where
                 server_message_rx,
                 routes,
                 connected_generation_tx,
-                number,
                 answered,
             ),
             (self.connect_engine)(server_message_tx, client_message_rx),

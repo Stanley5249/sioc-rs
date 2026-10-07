@@ -7,13 +7,10 @@ use tokio::sync::mpsc;
 
 use crate::error::{ManagerError, PacketError};
 use crate::manager::routes::Routes;
-use crate::packet::{
-    Connect, ConnectError, DynAck, DynEvent, Ns, Packet, ServerAckId, ServerPacket,
-};
+use crate::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Packet, ServerPacket};
 
 /// Delivers server packets to the namespace receivers until the engine closes
-/// `server_message_rx`, tagging each event's ack ID with `session`, and sets
-/// `answered` once a server message arrives.
+/// `server_message_rx`, and sets `answered` once a server message arrives.
 ///
 /// Waiting on a full receiver holds up only this direction. After an error,
 /// drops `connected_generation_tx`, which tells the client-packet loop to
@@ -28,14 +25,12 @@ pub async fn server_messages_to_packets(
     mut server_message_rx: mpsc::Receiver<Message>,
     routes: &Routes,
     connected_generation_tx: mpsc::UnboundedSender<u64>,
-    session: u64,
     answered: &mut bool,
 ) -> Result<(), ManagerError> {
     let result = deliver_server_messages(
         &mut server_message_rx,
         routes,
         &connected_generation_tx,
-        session,
         answered,
     )
     .await;
@@ -55,7 +50,6 @@ async fn deliver_server_messages(
     server_message_rx: &mut mpsc::Receiver<Message>,
     routes: &Routes,
     connected_generation_tx: &mpsc::UnboundedSender<u64>,
-    session: u64,
     answered: &mut bool,
 ) -> Result<(), ManagerError> {
     let mut reconstructor = None;
@@ -67,14 +61,7 @@ async fn deliver_server_messages(
 
         match message {
             Message::Text(text) => {
-                route_text(
-                    text,
-                    routes,
-                    connected_generation_tx,
-                    session,
-                    &mut reconstructor,
-                )
-                .await?;
+                route_text(text, routes, connected_generation_tx, &mut reconstructor).await?;
             }
             Message::Binary(attachment) => {
                 route_binary(attachment, routes, &mut reconstructor).await?;
@@ -89,7 +76,6 @@ async fn route_text(
     text: ByteString,
     routes: &Routes,
     connected_generation_tx: &mpsc::UnboundedSender<u64>,
-    session: u64,
     reconstructor: &mut Option<Ns<BinaryPacket>>,
 ) -> Result<(), ManagerError> {
     if reconstructor.is_some() {
@@ -124,10 +110,7 @@ async fn route_text(
             send_server_packet(routes.close(&ns), &ns, ServerPacket::Disconnect).await;
         }
         Packet::Event { payload, id } => {
-            let event = DynEvent {
-                id: tag(id, session),
-                ..DynEvent::new(payload, None)
-            };
+            let event = DynEvent::new(payload, id);
             let server_packet = ServerPacket::Event(event);
             send_server_packet(routes.server_packet_tx(&ns), &ns, server_packet).await;
         }
@@ -143,10 +126,7 @@ async fn route_text(
             send_server_packet(routes.close(&ns), &ns, ServerPacket::ConnectError(error)).await;
         }
         Packet::BinaryEvent { payload, id, count } => {
-            *reconstructor = Some(Ns(
-                ns,
-                BinaryPacket::event(payload, tag(id, session), count),
-            ));
+            *reconstructor = Some(Ns(ns, BinaryPacket::event(payload, id, count)));
         }
         Packet::BinaryAck { payload, id, count } => {
             *reconstructor = Some(Ns(ns, BinaryPacket::ack(payload, id, count)));
@@ -223,11 +203,6 @@ async fn send_server_packet(
     }
 }
 
-/// Tags an event's ack ID with the session it arrived in.
-fn tag(id: Option<u64>, session: u64) -> Option<ServerAckId> {
-    id.map(|id| ServerAckId::new(id).with_session(session))
-}
-
 /// Resolves a pending ack, discarding acks nobody waits for.
 fn resolve_ack(routes: &Routes, ns: &ByteString, id: u64, ack: DynAck) {
     let Some(ack_tx) = routes.take_ack(ns, id) else {
@@ -243,7 +218,7 @@ fn resolve_ack(routes: &Routes, ns: &ByteString, id: u64, ack: DynAck) {
 enum BinaryPacket {
     Event {
         payload: ByteString,
-        id: Option<ServerAckId>,
+        id: Option<u64>,
         attachments: Vec<Bytes>,
         count: usize,
     },
@@ -256,7 +231,7 @@ enum BinaryPacket {
 }
 
 impl BinaryPacket {
-    fn event(payload: ByteString, id: Option<ServerAckId>, count: usize) -> Self {
+    fn event(payload: ByteString, id: Option<u64>, count: usize) -> Self {
         Self::Event {
             payload,
             id,

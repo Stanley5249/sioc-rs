@@ -357,8 +357,8 @@ async fn flush_send_buffer(
 /// namespace in the open session.
 ///
 /// Discards packets the handles sent before the server closed the namespace,
-/// because the server no longer accepts them, and acks for events of another
-/// session, because the server restarts its ack IDs in every session.
+/// because the server no longer accepts them, and acks while no session is
+/// open, because there is no channel to send them on.
 async fn send_client_packet(
     namespace: &mut Namespace,
     generation: u64,
@@ -421,19 +421,16 @@ async fn send_client_packet(
             id,
             attachments,
         } => {
-            let Some(session) = session.filter(|session| session.number == id.session()) else {
-                tracing::debug!(%ns, id = id.get(), "discarded ack for an event of an ended session");
+            let Some(session) = session else {
+                tracing::debug!(%ns, id, "discarded ack while no session is open");
                 return Ok(());
             };
 
             let packet = match &attachments {
-                None => Packet::Ack {
-                    payload,
-                    id: id.get(),
-                },
+                None => Packet::Ack { payload, id },
                 Some(attachments) => Packet::BinaryAck {
                     payload,
-                    id: id.get(),
+                    id,
                     count: attachments.len(),
                 },
             };

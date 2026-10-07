@@ -12,7 +12,7 @@ use crate::error::{ManagerError, SocketError};
 use crate::manager::backoff::Backoff;
 use crate::manager::connect_request::ConnectRequest;
 use crate::manager::supervisor::Supervisor;
-use crate::packet::{ClientPacket, DynAck, ServerAckId, ServerPacket};
+use crate::packet::{ClientPacket, DynAck, ServerPacket};
 
 const CONNECT_RESPONSE: &str = "0{\"sid\":\"test\"}";
 
@@ -419,7 +419,7 @@ async fn ack_is_not_buffered() {
     let (client_packet_tx, _server_packet_rx) = manager.open("/").await;
     let client_packet = ClientPacket::Ack {
         payload: ByteString::from_static("[true]"),
-        id: ServerAckId::new(42),
+        id: 42,
         attachments: None,
     };
     client_packet_tx.send(client_packet).await.unwrap();
@@ -433,7 +433,7 @@ async fn binary_ack_sends_attachments() {
     let (client_packet_tx, _server_packet_rx) = manager.open("/").await;
     let client_packet = ClientPacket::Ack {
         payload: ByteString::from_static("[true]"),
-        id: ServerAckId::new(7),
+        id: 7,
         attachments: Some(vec![Bytes::from_static(b"\xCA\xFE")]),
     };
     client_packet_tx.send(client_packet).await.unwrap();
@@ -818,43 +818,6 @@ async fn session_end_fails_sent_acks_and_keeps_buffered_ones() {
     assert_eq!(&*manager.recv_client_text().await, r#"21["buffered"]"#);
     manager.send_server_message(r#"31["ok"]"#).await;
     assert_eq!(&*buffered_rx.await.unwrap().payload, r#"["ok"]"#);
-
-    drop(client_packet_tx);
-    assert_eq!(&*manager.recv_client_text().await, "1");
-    manager.finish().await.unwrap();
-}
-
-#[tokio::test]
-async fn ack_for_an_event_of_an_ended_session_is_discarded() {
-    let mut manager = TestManager::spawn_reconnecting().await;
-    let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
-    manager.send_server_message(CONNECT_RESPONSE).await;
-    server_packet_rx.recv().await.unwrap();
-
-    manager.send_server_message(r#"25["ask"]"#).await;
-    let Some(ServerPacket::Event(old)) = server_packet_rx.recv().await else {
-        panic!("expected an event");
-    };
-
-    manager.reconnect().await;
-    assert_eq!(&*manager.recv_client_text().await, "0");
-    manager.send_server_message(CONNECT_RESPONSE).await;
-    server_packet_rx.recv().await.unwrap();
-    manager.send_server_message(r#"25["ask"]"#).await;
-    let Some(ServerPacket::Event(new)) = server_packet_rx.recv().await else {
-        panic!("expected an event");
-    };
-
-    for event in [old, new] {
-        let client_packet = ClientPacket::Ack {
-            payload: ByteString::from_static("[true]"),
-            id: event.id.unwrap(),
-            attachments: None,
-        };
-        client_packet_tx.send(client_packet).await.unwrap();
-    }
-    assert_eq!(&*manager.recv_client_text().await, "35[true]");
-    assert_quiet(&mut manager.session().client_message_rx).await;
 
     drop(client_packet_tx);
     assert_eq!(&*manager.recv_client_text().await, "1");
