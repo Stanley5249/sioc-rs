@@ -439,6 +439,11 @@ impl SocketSender {
     /// Emits an event; returns `()` or an [`AckHandle`](crate::ack::AckHandle)
     /// depending on the ack policy.
     ///
+    /// The event waits until the server confirms the namespace, also after a
+    /// reconnection. The [`AckHandle`](crate::ack::AckHandle) fails if the
+    /// Engine.IO session drops after the event went out, like
+    /// socket.io-client's `Socket._clearAcks`.
+    ///
     /// # Errors
     ///
     /// Returns an error if serialization fails or the namespace has closed.
@@ -491,6 +496,24 @@ impl SocketSender {
 ///
 /// Read it continuously: bounded queues apply backpressure to the server.
 /// A stalled consumer can delay heartbeat responses until the server times out.
+///
+/// # Items and reconnection
+///
+/// The receiver yields only what the server sends. When the Engine.IO session
+/// drops, the client reconnects and sends CONNECT again, so a reconnection
+/// shows up as another [`ServerPacket::Connect`] with a new `sid`. The server
+/// forgets the socket's rooms in between.
+///
+/// | Server sends      | Item                           | Then                            |
+/// |-------------------|--------------------------------|---------------------------------|
+/// | `CONNECT`         | [`ServerPacket::Connect`]      | events, until the session drops |
+/// | `EVENT`           | [`ServerPacket::Event`]        | more items                      |
+/// | `CONNECT_ERROR`   | [`ServerPacket::ConnectError`] | `None`                          |
+/// | `DISCONNECT`      | [`ServerPacket::Disconnect`]   | `None`, with no reconnection    |
+///
+/// `None` ends the receiver after a server `DISCONNECT`, a `CONNECT_ERROR`, a
+/// client disconnect, an internal error, or when reconnection gives up.
+/// [`Client::join`] reports why the client ended.
 #[derive(Debug)]
 pub struct SocketReceiver {
     server_packet_rx: mpsc::Receiver<ServerPacket>,

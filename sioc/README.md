@@ -13,6 +13,7 @@ It adds _namespaces_ for multiple channels over a single connection, _events_ as
 - Async networking built on [`tokio`](https://docs.rs/tokio), [`reqwest`](https://docs.rs/reqwest), and [`tokio-tungstenite`](https://docs.rs/tokio-tungstenite).
 - Actor-model client: each client runs one background task that talks to the handles through channels.
 - Derive macros for events and acks.
+- Reconnection like the JavaScript client: after a dropped connection, the client backs off, opens a new Engine.IO session, and connects every open namespace again.
 - Event handling lives in match arms, no callbacks with boxed futures.
 - State lives in the enclosing scope, no Arc or Mutex.
 - Zero-copy packet parsing via [`bytestring`](https://docs.rs/bytestring) and [`bytes`](https://docs.rs/bytes).
