@@ -37,7 +37,7 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: uv sync --locked
       # just runs independent checks together and reports their timing.
-      - run: just --time --timestamp check
+      - run: just --time --timestamp check-all
       # Cargo work shares target/ and runs in order; preserve later results.
       - if: ${{ !cancelled() }}
         run: cargo doc --locked --no-deps --workspace --examples

@@ -202,19 +202,29 @@ Server and client use fundamentally different architectures, so `socketioxide`'s
 
 ## Development
 
-Requirements:
+Run `just --list` to browse commands. Unsuffixed aggregate recipes cover Rust; `-all` variants add other languages or end-to-end tests. See [`justfile`](justfile) for recipe details.
 
-- [just](https://just.systems/man/en/packages.html)
-- [Rust](https://rustup.rs/) stable channel with the nightly `rustfmt`
-- [cargo-nextest](https://nexte.st/docs/installation/pre-built-binaries/)
-- [cargo-deny](https://embarkstudios.github.io/cargo-deny/cli/index.html)
-- [Bun](https://bun.sh/docs/installation) for end-to-end tests.
+### Required
 
-Use `just check` for the full development gate, or `just check-rust`, `just check-py`, and `just check-js` for the changed stack. The JavaScript gate also checks Oxfmt-managed JSON, YAML, and Markdown. Use `just ci` for the full merge gate.
+For basic Rust development:
 
-`just test` runs Rust unit, integration, and documentation tests; pass tool-specific arguments to `just test-rust` or `just test-doc`. Run `just test-e2e` for live-server tests. CI combines regular and E2E tests in one nextest run, then runs doctests.
+- [just](https://just.systems/man/en/packages.html) to run recipes.
+- [rustup](https://rustup.rs/) for stable Rust and the components declared in [`rust-toolchain.toml`](rust-toolchain.toml).
 
-`just check-msrv` checks the minimum supported compiler. `just coverage` writes `lcov.info`; `just coverage-open` generates an HTML report and opens the report in a browser.
+Run `just install` to set up the pinned nightly formatter, then `just check` for Rust formatting and lint checks.
+
+### Optional
+
+Install tools for the workflows needed:
+
+- **Tests:** [cargo-nextest](https://nexte.st/docs/installation/pre-built-binaries/) for `just test` and `just test-e2e`.
+- **Dependency checks:** [cargo-deny](https://embarkstudios.github.io/cargo-deny/cli/index.html) for `just deny`.
+- **JavaScript tooling and end-to-end tests:** [Bun](https://bun.sh/docs/installation).
+- **Python example and tooling:** [uv](https://docs.astral.sh/uv/getting-started/installation/).
+- **Coverage:** [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov#installation), plus cargo-nextest.
+- **MSRV checks:** The Rust toolchain specified by `check-msrv` in `justfile`.
+
+Run `just install-all` to also install JavaScript and Python dependencies. Install the Rust CLI tools separately. `just ci` runs the Rust merge gate with cargo-nextest; `just ci-all` also requires Bun and uv. Dependency policy checks remain separate through `just deny` and are enforced in GitHub Actions.
 
 ## Origin
 
