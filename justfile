@@ -1,7 +1,12 @@
-# Suffix rules:
-# 1. No suffix for Rust.
-# 2. Scope suffixes select other workflows, such as -py, -js, and -e2e.
-# 3. The -all variants add other languages or Bun-backed E2E tests.
+# Recipe naming:
+# 1. Recipes without a suffix cover Rust and shared justfiles.
+# 2. The -all variants add Python, Oxfmt-managed files, TypeScript, and
+#    Bun-backed E2E tests.
+# 3. A few scoped recipes stay public: install-rustfmt, test-doc, and test-e2e.
+# 4. Private helpers run one tool each. Run one directly, such as
+#    `just _lint-py`, for a targeted run.
+# 5. Aggregate recipes take no arguments; pass arguments to a single-tool
+#    recipe instead.
 #
 # Dependency policy, coverage, and MSRV checks are independent.
 
@@ -23,16 +28,14 @@ install: install-rustfmt
 
 # Set up Rust formatting and all JavaScript and Python dependencies.
 [group("installation")]
-install-all: install install-js install-py
+install-all: install _install-js _install-py
 
 # Install Python dependencies and the required Python version.
-[group("installation")]
-install-py *args:
+_install-py *args:
     uv sync --quiet --locked {{ args }}
 
 # Install JavaScript dependencies from the lockfile.
-[group("installation")]
-install-js *args:
+_install-js *args:
     bun install --quiet --frozen-lockfile {{ args }}
 
 # Install the minimal nightly toolchain with rustfmt.
@@ -40,44 +43,44 @@ install-js *args:
 install-rustfmt *args:
     rustup toolchain install "{{ rustfmt_toolchain }}" --profile minimal --component rustfmt {{ args }}
 
-# Check Rust and shared justfile formatting during development.
-[group("check")]
+# Check Rust and shared justfile formatting, and lint Rust targets.
+[group("checks")]
 [parallel]
 check: (_fmt-cargo "--check") (_fmt-just "--check") lint
 
-# Check every language and shared justfile formatting.
-[group("check")]
+# Run format, lint, and type checks for every language.
+[group("checks")]
 [parallel]
-check-all: check check-py check-js
+check-all: check _check-py _check-js
 
 # Check Python formatting, linting, and types.
-[group("check")]
 [parallel]
-check-py: (_fmt-ruff "--check") lint-py typecheck-py
+_check-py: (_fmt-ruff "--check") _lint-py _typecheck-py
 
 # Check Oxfmt-managed files and lint the TypeScript servers.
-[group("check")]
 [parallel]
-check-js: (_fmt-oxfmt "--check") lint-js
+_check-js: (_fmt-oxfmt "--check") _lint-js
 
 # Lint libraries, examples, and tests with warnings denied.
-[group("check")]
+[group("linting")]
 lint *args:
     cargo clippy --quiet --locked --workspace --all-targets {{ args }} -- -D warnings
 
+# Lint every language and type-check the Python example.
+[group("linting")]
+[parallel]
+lint-all: lint _lint-py _typecheck-py _lint-js
+
 # Lint the Python example with warnings treated as errors.
-[group("check")]
-lint-py *args:
+_lint-py *args:
     uv run --locked ruff check -q {{ args }}
 
 # Type-check the Python example; pyrefly warnings fail too.
-[group("check")]
-typecheck-py *args:
+_typecheck-py *args:
     uv run --locked pyrefly check --summary=none --min-severity warn {{ args }}
 
 # Lint TypeScript test servers with type-aware rules.
-[group("check")]
-lint-js *args:
+_lint-js *args:
     bunx oxlint {{ args }}
 
 # Format Rust sources and shared justfiles.
@@ -85,20 +88,10 @@ lint-js *args:
 [parallel]
 fmt: _fmt-cargo _fmt-just
 
-# Format every language and shared justfiles.
+# Format Rust, Python, Oxfmt-managed files, and shared justfiles.
 [group("formatting")]
 [parallel]
 fmt-all: fmt _fmt-ruff _fmt-oxfmt
-
-# Check Rust and justfile formatting without rewriting files.
-[group("formatting")]
-[parallel]
-fmt-check: (_fmt-cargo "--check") (_fmt-just "--check")
-
-# Check formatting of every language and shared justfiles.
-[group("formatting")]
-[parallel]
-fmt-check-all: fmt-check (_fmt-ruff "--check") (_fmt-oxfmt "--check")
 
 _fmt-cargo *args:
     cargo +{{ rustfmt_toolchain }} fmt --all {{ args }}
