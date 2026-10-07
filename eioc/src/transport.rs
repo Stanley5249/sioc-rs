@@ -12,7 +12,7 @@ use crate::error::TransportError;
 use crate::packet::{Frame, Handshake};
 
 /// Selects which transport to use when opening an Engine.IO connection.
-#[derive(Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub enum TransportStrategy {
     /// Start with HTTP long-polling, then upgrade to WebSocket when the server
     /// offers it.
