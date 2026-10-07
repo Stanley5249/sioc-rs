@@ -25,11 +25,9 @@ struct Route {
     /// Tells a reopened namespace apart from the one before it.
     generation: u64,
     server_packet_tx: mpsc::Sender<ServerPacket>,
-    /// Acks of events sent in the current session, which the server may
+    /// Acks of events sent or waiting in the send buffer, which the server may
     /// answer.
     ack_txs: HashMap<u64, oneshot::Sender<DynAck>>,
-    /// Acks of events that wait in the send buffer for the server's CONNECT.
-    buffered_ack_txs: HashMap<u64, oneshot::Sender<DynAck>>,
     /// Whether the server confirmed the namespace in the current session.
     connected: bool,
     _closed: DropGuard,
@@ -60,7 +58,6 @@ impl Routes {
             generation,
             server_packet_tx,
             ack_txs: HashMap::new(),
-            buffered_ack_txs: HashMap::new(),
             connected: false,
             _closed: closed.drop_guard(),
         };
@@ -117,9 +114,8 @@ impl Routes {
             .map(|route| route.server_packet_tx.clone())
     }
 
-    /// Registers the ack receiver of an event about to be sent. Without an
-    /// open route it is dropped, which fails the
-    /// [`AckHandle`](crate::ack::AckHandle).
+    /// Registers an ack receiver. Without an open route it is dropped, which
+    /// fails the [`AckHandle`](crate::ack::AckHandle).
     pub fn register_ack(
         &self,
         ns: &str,
@@ -136,31 +132,6 @@ impl Routes {
         }
     }
 
-    /// Registers the ack receiver of a buffered event, which keeps waiting
-    /// when a session ends, because the server has not seen the event.
-    pub fn buffer_ack(&self, ns: &str, generation: u64, id: u64, ack_tx: oneshot::Sender<DynAck>) {
-        if let Some(route) = self
-            .lock()
-            .get_mut(ns)
-            .filter(|route| route.generation == generation)
-        {
-            route.buffered_ack_txs.insert(id, ack_tx);
-        }
-    }
-
-    /// Moves the acks of buffered events to the sent ones, before the send
-    /// buffer goes out.
-    pub fn flush_acks(&self, ns: &str, generation: u64) {
-        if let Some(route) = self
-            .lock()
-            .get_mut(ns)
-            .filter(|route| route.generation == generation)
-        {
-            let buffered_ack_txs = std::mem::take(&mut route.buffered_ack_txs);
-            route.ack_txs.extend(buffered_ack_txs);
-        }
-    }
-
     /// Removes the ack receiver for `id`, so each ack is delivered at most
     /// once.
     pub fn take_ack(&self, ns: &str, id: u64) -> Option<oneshot::Sender<DynAck>> {
@@ -172,12 +143,19 @@ impl Routes {
         self.lock().is_empty()
     }
 
-    /// Fails the acks of sent events and marks every namespace unconfirmed,
+    /// Marks every namespace unconfirmed and fails the acks of sent events,
     /// for when an Engine.IO session ends but the namespaces stay open, like
     /// socket.io-client's `Socket._clearAcks`.
+    ///
+    /// A connected route flushed its send buffer, so all its acks belong to
+    /// sent events. An unconnected route sent nothing since the last session
+    /// ended, so all its acks belong to buffered events and keep waiting.
     pub fn end_session(&self) {
         for route in self.lock().values_mut() {
-            route.ack_txs.clear();
+            if route.connected {
+                route.ack_txs.clear();
+            }
+
             route.connected = false;
         }
     }

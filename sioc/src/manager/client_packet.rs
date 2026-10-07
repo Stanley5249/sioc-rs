@@ -208,7 +208,7 @@ pub async fn client_packets_to_messages(
                 };
 
                 if let Some(namespace) = namespaces.get_mut(&generation) {
-                    flush_send_buffer(namespace, generation, routes, session).await?;
+                    flush_send_buffer(namespace, session).await?;
                 }
             }
         }
@@ -333,8 +333,6 @@ async fn close_namespace(
 /// Sends the events a namespace buffered until the server confirmed it.
 async fn flush_send_buffer(
     namespace: &mut Namespace,
-    generation: u64,
-    routes: &Routes,
     session: &Session,
 ) -> Result<(), ManagerError> {
     namespace.connected = true;
@@ -342,9 +340,6 @@ async fn flush_send_buffer(
     if !namespace.send_buffer.is_empty() {
         tracing::trace!(ns = %namespace.ns, count = namespace.send_buffer.len(), "flushed send buffer");
     }
-
-    // Register before sending, so the server's answers always find them.
-    routes.flush_acks(&namespace.ns, generation);
 
     for message in namespace.send_buffer.drain(..) {
         session.client_message_tx.send(message).await?;
@@ -379,13 +374,13 @@ async fn send_client_packet(
             ack_tx,
             attachments,
         } => {
-            let ack = ack_tx.map(|ack_tx| {
+            // Register before sending, so the server's answer always finds it.
+            let id = ack_tx.map(|ack_tx| {
                 let id = namespace.next_ack_id;
                 namespace.next_ack_id += 1;
-                (id, ack_tx)
+                routes.register_ack(ns, generation, id, ack_tx);
+                id
             });
-
-            let id = ack.as_ref().map(|(id, _)| *id);
 
             let packet = match &attachments {
                 None => Packet::Event { payload, id },
@@ -397,10 +392,6 @@ async fn send_client_packet(
             };
 
             let Some(session) = session.filter(|_| namespace.connected) else {
-                if let Some((id, ack_tx)) = ack {
-                    routes.buffer_ack(ns, generation, id, ack_tx);
-                }
-
                 tracing::trace!(%ns, %packet, "buffered packet");
 
                 let messages = encode_packet(ns, &packet, attachments);
@@ -408,11 +399,6 @@ async fn send_client_packet(
 
                 return Ok(());
             };
-
-            // Register before sending, so the server's answer always finds it.
-            if let Some((id, ack_tx)) = ack {
-                routes.register_ack(ns, generation, id, ack_tx);
-            }
 
             send_wire_packet(&session.client_message_tx, ns, packet, attachments).await
         }
