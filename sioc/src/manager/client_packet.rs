@@ -180,9 +180,9 @@ async fn send_client_packets(
                     continue;
                 };
 
-                let ConnectRequest { ns, payload, client_packet_rx, closed, server_packet_tx, reply_tx } = request;
+                let ConnectRequest { ns, payload, client_packet_rx, closed, server_packet_tx, terminal_packet_tx, reply_tx } = request;
 
-                if !routes.insert(ns.clone(), server_packet_tx, closed.clone()) {
+                if !routes.insert(ns.clone(), server_packet_tx, terminal_packet_tx, closed.clone()) {
                     // A cancelled connect drops its reply receiver.
                     let _ = reply_tx.send(Err(crate::error::SocketError::NamespaceConflict { ns }));
                     continue;
@@ -600,6 +600,7 @@ fn encode_packet(
 
 #[cfg(test)]
 mod tests {
+    use tokio::sync::oneshot;
     use tokio::sync::oneshot::error::TryRecvError;
 
     use super::*;
@@ -647,7 +648,13 @@ mod tests {
     fn defer_reopen_refuses_an_open_name() {
         let routes = Routes::default();
         let (server_packet_tx, _server_packet_rx) = mpsc::channel(1);
-        assert!(routes.insert("/".into(), server_packet_tx, CancellationToken::new()));
+        let (terminal_packet_tx, _terminal_packet_rx) = oneshot::channel();
+        assert!(routes.insert(
+            "/".into(),
+            server_packet_tx,
+            terminal_packet_tx,
+            CancellationToken::new()
+        ));
         let mut namespaces = HashMap::from([(ByteString::from("/"), namespace("/"))]);
 
         let (request, mut handles) = ConnectRequest::new("/".into(), ByteString::new(), 1, 1);

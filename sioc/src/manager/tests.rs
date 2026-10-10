@@ -7,7 +7,7 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::client::{ChannelConfig, SocketSender};
+use crate::client::{ChannelConfig, SocketReceiver, SocketSender};
 use crate::error::{ManagerError, SocketError};
 use crate::manager::backoff::Backoff;
 use crate::manager::connect_request::ConnectRequest;
@@ -141,7 +141,7 @@ impl TestManager {
 
     /// Opens a namespace as `Client::connect` does and consumes its CONNECT
     /// packet.
-    async fn open(&mut self, ns: &str) -> (SocketSender, mpsc::Receiver<ServerPacket>) {
+    async fn open(&mut self, ns: &str) -> (SocketSender, SocketReceiver) {
         self.open_with(ns, ByteString::new(), 32).await
     }
 
@@ -150,14 +150,14 @@ impl TestManager {
         ns: &str,
         auth: ByteString,
         server_packet_capacity: usize,
-    ) -> (SocketSender, mpsc::Receiver<ServerPacket>) {
+    ) -> (SocketSender, SocketReceiver) {
         let (connect_request, handles) =
             ConnectRequest::new(ns.into(), auth, 32, server_packet_capacity);
         self.connect_request_tx.send(connect_request).await.unwrap();
         assert!(self.recv_client_text().await.starts_with('0'));
-        handles.reply_rx.await.unwrap().unwrap();
-        let client_packet_tx = SocketSender::new(handles.client_packet_tx, handles.closed);
-        (client_packet_tx, handles.server_packet_rx)
+        let (tx, rx, reply_rx) = handles.into_socket();
+        reply_rx.await.unwrap().unwrap();
+        (tx, rx)
     }
 
     /// Reports a successful handshake, as the engine does first.
@@ -871,6 +871,42 @@ async fn engine_close_ends_receivers_and_pending_acks() {
     manager.finish().await.unwrap();
     assert!(server_packet_rx.recv().await.is_none());
     ack_rx.await.unwrap_err();
+}
+
+#[tokio::test]
+async fn local_disconnect_finishes_with_a_full_retained_receiver() {
+    let mut manager = TestManager::spawn().await;
+    let (tx, mut rx) = manager.open_with("/", ByteString::new(), 1).await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    rx.recv().await.unwrap();
+    manager.send_server_message(r#"2["first"]"#).await;
+    manager.send_server_message(r#"2["blocked"]"#).await;
+    tx.disconnect();
+
+    tokio::time::timeout(Duration::from_secs(1), manager.finish())
+        .await
+        .expect("disconnect must release blocked delivery")
+        .unwrap();
+    while rx.recv().await.is_some() {}
+}
+
+#[tokio::test]
+async fn server_disconnect_finishes_and_keeps_its_terminal_packet() {
+    let mut manager = TestManager::spawn().await;
+    let (tx, mut rx) = manager.open_with("/", ByteString::new(), 1).await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    rx.recv().await.unwrap();
+    manager.send_server_message(r#"2["first"]"#).await;
+    manager.send_server_message("1").await;
+    tx.closed().await;
+
+    tokio::time::timeout(Duration::from_secs(1), manager.finish())
+        .await
+        .expect("terminal delivery must not wait for channel capacity")
+        .unwrap();
+    assert!(matches!(rx.recv().await, Some(ServerPacket::Event(_))));
+    assert!(matches!(rx.recv().await, Some(ServerPacket::Disconnect)));
+    assert!(rx.recv().await.is_none());
 }
 
 #[tokio::test]

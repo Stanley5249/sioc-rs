@@ -23,6 +23,8 @@ pub struct Routes(Mutex<HashMap<ByteString, Route>>);
 /// and the senders close.
 struct Route {
     server_packet_tx: mpsc::Sender<ServerPacket>,
+    terminal_packet_tx: oneshot::Sender<ServerPacket>,
+    closed: CancellationToken,
     /// Acks of events sent or waiting in the send buffer, which the server may
     /// answer.
     ack_txs: HashMap<u64, oneshot::Sender<DynAck>>,
@@ -43,6 +45,7 @@ impl Routes {
         &self,
         ns: ByteString,
         server_packet_tx: mpsc::Sender<ServerPacket>,
+        terminal_packet_tx: oneshot::Sender<ServerPacket>,
         closed: CancellationToken,
     ) -> bool {
         let mut routes = self.lock();
@@ -53,6 +56,8 @@ impl Routes {
 
         let route = Route {
             server_packet_tx,
+            terminal_packet_tx,
+            closed: closed.clone(),
             ack_txs: HashMap::new(),
             connected: false,
             _closed: closed.drop_guard(),
@@ -62,12 +67,10 @@ impl Routes {
         true
     }
 
-    /// Closes a namespace for the server, returning its receiver's sender for
-    /// one last packet.
-    pub fn close(&self, ns: &str) -> Option<mpsc::Sender<ServerPacket>> {
+    /// Closes a namespace for the server, returning its terminal packet sender.
+    pub fn close(&self, ns: &str) -> Option<oneshot::Sender<ServerPacket>> {
         let route = self.lock().remove(ns)?;
-
-        Some(route.server_packet_tx)
+        Some(route.terminal_packet_tx)
     }
 
     /// Closes a namespace for the client, returning whether the server
@@ -97,10 +100,13 @@ impl Routes {
 
     /// Returns the sender to the namespace's receiver, if the namespace is
     /// open.
-    pub fn server_packet_tx(&self, ns: &str) -> Option<mpsc::Sender<ServerPacket>> {
+    pub fn server_packet_tx(
+        &self,
+        ns: &str,
+    ) -> Option<(mpsc::Sender<ServerPacket>, CancellationToken)> {
         self.lock()
             .get(ns)
-            .map(|route| route.server_packet_tx.clone())
+            .map(|route| (route.server_packet_tx.clone(), route.closed.clone()))
     }
 
     /// Registers a pending ack sender. Without an open route it is dropped,
@@ -159,7 +165,13 @@ mod tests {
     fn registering_acks_reclaims_cancelled_waiters() {
         let routes = Routes::default();
         let (server_packet_tx, _server_packet_rx) = mpsc::channel(1);
-        assert!(routes.insert("/".into(), server_packet_tx, CancellationToken::new()));
+        let (terminal_packet_tx, _terminal_packet_rx) = oneshot::channel();
+        assert!(routes.insert(
+            "/".into(),
+            server_packet_tx,
+            terminal_packet_tx,
+            CancellationToken::new()
+        ));
 
         let (live_tx, live_rx) = oneshot::channel();
         routes.register_ack("/", 0, live_tx);

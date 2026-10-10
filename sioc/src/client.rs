@@ -5,7 +5,7 @@ use std::time::Duration;
 use bytestring::ByteString;
 use eioc::connector::WebSocketConnector;
 use eioc::transport::TransportStrategy;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -13,7 +13,7 @@ use url::Url;
 use crate::ack::AckType;
 use crate::error::{ClientBuilderError, ClientError, ManagerError, PayloadError, SocketError};
 use crate::manager::backoff::Backoff;
-use crate::manager::connect_request::ConnectRequest;
+use crate::manager::connect_request::{ConnectHandles, ConnectRequest};
 use crate::marker::{AckId, AckMarker, BinaryMarker};
 use crate::packet::{ClientPacket, DynEvent, ServerPacket};
 
@@ -67,7 +67,7 @@ pub struct ChannelConfig {
     /// namespace's client packets.
     pub manager: usize,
     /// Per-namespace inbox: server packets delivered to each
-    /// [`SocketReceiver`].
+    /// [`SocketReceiver`], plus one separate slot for the terminal packet.
     pub socket: usize,
 }
 
@@ -403,14 +403,9 @@ impl Client {
             .await
             .map_err(|_| SocketError::Closed)?;
 
-        handles.reply_rx.await.map_err(|_| SocketError::Closed)??;
-
-        Ok((
-            SocketSender::new(handles.client_packet_tx, handles.closed),
-            SocketReceiver {
-                server_packet_rx: handles.server_packet_rx,
-            },
-        ))
+        let (tx, rx, reply_rx) = handles.into_socket();
+        reply_rx.await.map_err(|_| SocketError::Closed)??;
+        Ok((tx, rx))
     }
 
     /// Drops the client handle and waits for the client to end.
@@ -429,6 +424,26 @@ impl Client {
         drop(self.connect_request_tx);
         self.task.await??;
         Ok(())
+    }
+}
+
+impl ConnectHandles {
+    /// Converts the manager's channel ends into the public namespace handles.
+    pub fn into_socket(
+        self,
+    ) -> (
+        SocketSender,
+        SocketReceiver,
+        oneshot::Receiver<Result<(), SocketError>>,
+    ) {
+        (
+            SocketSender::new(self.client_packet_tx, self.closed),
+            SocketReceiver {
+                server_packet_rx: self.server_packet_rx,
+                terminal_packet_rx: Some(self.terminal_packet_rx),
+            },
+            self.reply_rx,
+        )
     }
 }
 
@@ -572,17 +587,60 @@ impl SocketSender {
 #[derive(Debug)]
 pub struct SocketReceiver {
     server_packet_rx: mpsc::Receiver<ServerPacket>,
+    terminal_packet_rx: Option<oneshot::Receiver<ServerPacket>>,
 }
 
 impl SocketReceiver {
+    /// Receives the next server packet, then the server's terminal packet
+    /// after queued packets drain. Repeated calls after the end return `None`.
+    ///
+    /// Cancel safe: both receivers retain their item until their await
+    /// completes, and the terminal receiver is removed only after completion.
+    pub async fn recv(&mut self) -> Option<ServerPacket> {
+        if let Some(packet) = self.server_packet_rx.recv().await {
+            return Some(packet);
+        }
+        let packet = self.terminal_packet_rx.as_mut()?.await.ok();
+        self.terminal_packet_rx = None;
+        packet
+    }
+
+    /// Receives the next packet without waiting, with the same ordering as
+    /// [`recv`](Self::recv).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Empty` while waiting for a packet, or `Disconnected` after
+    /// the namespace has ended and its queued packets were consumed.
+    pub fn try_recv(&mut self) -> Result<ServerPacket, mpsc::error::TryRecvError> {
+        match self.server_packet_rx.try_recv() {
+            Ok(packet) => return Ok(packet),
+            Err(mpsc::error::TryRecvError::Empty) => return Err(mpsc::error::TryRecvError::Empty),
+            Err(mpsc::error::TryRecvError::Disconnected) => {}
+        }
+        let Some(rx) = &mut self.terminal_packet_rx else {
+            return Err(mpsc::error::TryRecvError::Disconnected);
+        };
+        match rx.try_recv() {
+            Ok(packet) => {
+                self.terminal_packet_rx = None;
+                Ok(packet)
+            }
+            Err(oneshot::error::TryRecvError::Empty) => Err(mpsc::error::TryRecvError::Empty),
+            Err(oneshot::error::TryRecvError::Closed) => {
+                self.terminal_packet_rx = None;
+                Err(mpsc::error::TryRecvError::Disconnected)
+            }
+        }
+    }
+
     /// Returns the next application event. [`ServerPacket::Connect`],
     /// [`ServerPacket::Disconnect`], and [`ServerPacket::ConnectError`] are
     /// skipped. Returns `None` once the namespace closes, by either side,
     /// or the client ends.
     ///
-    /// Cancel safe: the only suspend point is `recv`; skipped protocol packets
-    /// have no suspend point after consumption, so no events are lost on
-    /// cancellation.
+    /// Cancel safe: [`recv`](Self::recv) retains pending packets, and skipped
+    /// protocol packets have no suspend point after consumption.
     ///
     /// # Errors
     ///
@@ -592,26 +650,12 @@ impl SocketReceiver {
         E: TryFrom<DynEvent>,
     {
         loop {
-            match self.server_packet_rx.recv().await {
+            match self.recv().await {
                 None => return Ok(None),
                 Some(ServerPacket::Event(e)) => return E::try_from(e).map(Some),
                 Some(_) => {}
             }
         }
-    }
-}
-
-impl std::ops::Deref for SocketReceiver {
-    type Target = mpsc::Receiver<ServerPacket>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.server_packet_rx
-    }
-}
-
-impl std::ops::DerefMut for SocketReceiver {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.server_packet_rx
     }
 }
 
@@ -758,6 +802,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(8);
         let mut receiver = SocketReceiver {
             server_packet_rx: rx,
+            terminal_packet_rx: None,
         };
         tx.send(ServerPacket::Connect(Connect {
             sid: ByteString::default(),
@@ -784,6 +829,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<ServerPacket>(4);
         let mut receiver = SocketReceiver {
             server_packet_rx: rx,
+            terminal_packet_rx: None,
         };
         drop(tx);
         assert!(receiver.listen::<Pass>().await.unwrap().is_none());
@@ -1009,12 +1055,53 @@ mod tests {
         assert_eq!(id, 5);
     }
 
-    #[test]
-    fn socket_receiver_deref_gives_inner_receiver() {
-        let (_tx, rx) = mpsc::channel::<ServerPacket>(4);
-        let receiver = SocketReceiver {
+    #[tokio::test]
+    async fn cancelling_terminal_receive_preserves_the_packet() {
+        use futures_util::FutureExt;
+
+        let (tx, rx) = mpsc::channel(1);
+        let (terminal_tx, terminal_rx) = oneshot::channel();
+        let mut receiver = SocketReceiver {
             server_packet_rx: rx,
+            terminal_packet_rx: Some(terminal_rx),
         };
-        let _ = &*receiver;
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        drop(tx);
+        assert!(receiver.recv().now_or_never().is_none());
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        terminal_tx.send(ServerPacket::Disconnect).unwrap();
+        assert!(matches!(receiver.try_recv(), Ok(ServerPacket::Disconnect)));
+        assert!(receiver.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn terminal_packet_follows_buffered_packets_and_receiver_stays_ended() {
+        let (tx, rx) = mpsc::channel(1);
+        let (terminal_tx, terminal_rx) = oneshot::channel();
+        let mut receiver = SocketReceiver {
+            server_packet_rx: rx,
+            terminal_packet_rx: Some(terminal_rx),
+        };
+        tx.send(ServerPacket::Event(DynEvent::new(r#"["last"]"#, None)))
+            .await
+            .unwrap();
+        terminal_tx.send(ServerPacket::Disconnect).unwrap();
+        drop(tx);
+        assert!(matches!(receiver.try_recv(), Ok(ServerPacket::Event(_))));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(ServerPacket::Disconnect)
+        ));
+        assert!(receiver.recv().await.is_none());
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        ));
     }
 }
