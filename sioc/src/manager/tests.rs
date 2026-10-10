@@ -610,6 +610,17 @@ async fn late_ack_never_resolves_a_reopened_namespace() {
         .unwrap();
     assert_eq!(&*manager.recv_client_text().await, r#"21["new"]"#);
 
+    // Another name counts on its own, from 0.
+    let (other_tx, mut other_rx) = manager.open("/other").await;
+    manager.send_server_message(r#"0/other,{"sid":"o"}"#).await;
+    other_rx.recv().await.unwrap();
+    let (other_ack_tx, _other_ack_rx) = oneshot::channel();
+    other_tx
+        .send(event(r#"["other"]"#, Some(other_ack_tx)))
+        .await
+        .unwrap();
+    assert_eq!(&*manager.recv_client_text().await, r#"2/other,0["other"]"#);
+
     // The server answers the old event after the reopen, as socket.io's
     // `Socket.ack` allows.
     manager.send_server_message(r#"30["late"]"#).await;

@@ -138,6 +138,10 @@ where
 ///
 /// Panics if a client packet arrives for a namespace this loop does not hold,
 /// which one entry per name rules out.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one select! arm per input; splitting the arms would pass most of the loop state around"
+)]
 async fn send_client_packets(
     routes: &Routes,
     mut connect_request_rx: mpsc::Receiver<ConnectRequest>,
@@ -151,11 +155,11 @@ async fn send_client_packets(
     let mut client_open = true;
     let mut result = Ok(());
 
-    // One counter for every namespace that never restarts, so a late ack for
-    // a closed namespace never answers an event of the same name reopened,
-    // like socket.io-client's `Socket.ids` on the `Socket` that `Manager`
-    // reuses for each name.
-    let mut next_ack_id = 0;
+    // One ack id counter per name, kept after the namespace closes, so a late
+    // ack for a closed namespace never answers an event of the same name
+    // reopened. Like socket.io-client's `Socket.ids` on the `Socket` that
+    // `Manager.nsps` keeps for each name, which it never prunes.
+    let mut next_ack_ids = HashMap::<ByteString, u64>::new();
 
     // Open the first engine at once, like socket.io-client's `Manager`.
     let mut state = start_engine(&open_request_tx, channels, routes, &namespaces, 0).await?;
@@ -191,6 +195,7 @@ async fn send_client_packets(
                 };
 
                 namespaces.insert(ns.clone(), namespace);
+                next_ack_ids.entry(ns.clone()).or_default();
                 client_packets.push(recv_client_packet(ns.clone(), client_packet_rx, closed));
 
                 match &state {
@@ -228,7 +233,7 @@ async fn send_client_packets(
                     .get_mut(&ns)
                     .expect("a namespace lives until its client packets end");
 
-                send_client_packet(namespace, routes, engine, &mut next_ack_id, client_packet).await?;
+                send_client_packet(namespace, routes, engine, &mut next_ack_ids, client_packet).await?;
                 client_packets.push(recv_client_packet(ns, client_packet_rx, closed));
             }
 
@@ -471,7 +476,7 @@ async fn send_client_packet(
     namespace: &mut Namespace,
     routes: &Routes,
     engine: Option<&OpenHandles>,
-    next_ack_id: &mut u64,
+    next_ack_ids: &mut HashMap<ByteString, u64>,
     client_packet: ClientPacket,
 ) -> Result<(), ManagerError> {
     let ns = &namespace.ns;
@@ -489,6 +494,9 @@ async fn send_client_packet(
         } => {
             // Register before sending, so the server's answer always finds it.
             let id = ack_tx.map(|ack_tx| {
+                let next_ack_id = next_ack_ids
+                    .get_mut(ns)
+                    .expect("a namespace's counter outlives it");
                 let id = *next_ack_id;
                 *next_ack_id += 1;
                 routes.register_ack(ns, id, ack_tx);
