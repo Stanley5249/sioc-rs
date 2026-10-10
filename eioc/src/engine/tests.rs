@@ -248,7 +248,7 @@ async fn protocol_accepts_client_messages_until_sender_dropped() {
 
 #[tokio::test]
 async fn protocol_client_messages_flow_while_upper_layer_is_full() {
-    let engine = TestEngine::spawn(make_handshake(), 1).await;
+    let mut engine = TestEngine::spawn(make_handshake(), 1).await;
     for text in ["fills", "blocks"] {
         engine
             .server_frame_tx
@@ -261,14 +261,20 @@ async fn protocol_client_messages_flow_while_upper_layer_is_full() {
         .send(Message::Text("out".into()))
         .await
         .unwrap();
-    let TestEngine {
-        mut client_frame_rx,
-        ..
-    } = engine;
-    let frame = tokio::time::timeout(Duration::from_secs(5), client_frame_rx.recv())
+    let frame = tokio::time::timeout(Duration::from_secs(5), engine.client_frame_rx.recv())
         .await
         .unwrap();
     assert!(matches!(frame, Some(Frame::Packet(Packet::Message(m))) if m == "out"));
+    let (result, frames, messages) = engine.finish().await;
+    result.unwrap();
+    assert_eq!(frames, [] as [Frame; 0]);
+    assert_eq!(
+        messages,
+        [
+            Message::Text("fills".into()),
+            Message::Text("blocks".into())
+        ]
+    );
 }
 
 #[tokio::test]

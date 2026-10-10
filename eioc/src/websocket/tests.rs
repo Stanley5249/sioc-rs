@@ -329,9 +329,9 @@ async fn run_discards_client_frames_after_server_close() {
 #[tokio::test]
 async fn run_sends_client_frames_while_engine_is_full() {
     let (client, mut server) = ws_pair().await;
-    let (server_frame_tx, _frame_rx) = mpsc::channel(1);
+    let (server_frame_tx, mut server_frame_rx) = mpsc::channel(1);
     let (client_frame_tx, client_frame_rx) = mpsc::channel::<Frame>(4);
-    tokio::spawn(crate::websocket::session::run(
+    let transport = tokio::spawn(crate::websocket::session::run(
         client,
         None,
         server_frame_tx,
@@ -351,6 +351,19 @@ async fn run_sends_client_frames_while_engine_is_full() {
         .unwrap()
         .unwrap();
     assert_eq!(msg.to_text().unwrap(), "4out");
+    server.close(None).await.unwrap();
+    for text in ["fills", "blocks"] {
+        assert!(matches!(
+            server_frame_rx.recv().await,
+            Some(Frame::Packet(Packet::Message(m))) if m == text
+        ));
+    }
+    assert!(server_frame_rx.recv().await.is_none());
+    drop(client_frame_tx);
+    let (result, ()) = tokio::join!(transport, async {
+        while let Some(Ok(_)) = server.next().await {}
+    });
+    result.unwrap().unwrap();
 }
 
 #[tokio::test]
