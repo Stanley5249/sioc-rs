@@ -3,12 +3,12 @@
 use bytes::Bytes;
 use bytestring::ByteString;
 use eioc::prelude::ServerMessage;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{ManagerError, PacketError};
+use crate::manager::namespaces::Namespaces;
 use crate::manager::open_request::EngineEvent;
-use crate::manager::routes::Routes;
 use crate::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Packet, ServerPacket};
 
 /// Delivers server packets to the namespace receivers until the engine closes
@@ -25,10 +25,11 @@ use crate::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Packet, ServerP
 /// loop stopped while a namespace was still connecting.
 pub async fn server_messages_to_packets(
     mut server_message_rx: mpsc::Receiver<ServerMessage>,
-    routes: &Routes,
+    namespaces: &Namespaces,
     engine_event_tx: mpsc::UnboundedSender<EngineEvent>,
 ) -> Result<(), ManagerError> {
-    let result = deliver_server_messages(&mut server_message_rx, routes, &engine_event_tx).await;
+    let result =
+        deliver_server_messages(&mut server_message_rx, namespaces, &engine_event_tx).await;
 
     drop(engine_event_tx);
 
@@ -43,7 +44,7 @@ pub async fn server_messages_to_packets(
 /// server breaks the protocol.
 async fn deliver_server_messages(
     server_message_rx: &mut mpsc::Receiver<ServerMessage>,
-    routes: &Routes,
+    namespaces: &Namespaces,
     engine_event_tx: &mpsc::UnboundedSender<EngineEvent>,
 ) -> Result<(), ManagerError> {
     let mut reconstructor = None;
@@ -56,10 +57,10 @@ async fn deliver_server_messages(
                 send_engine_event(engine_event_tx, EngineEvent::Open)?;
             }
             ServerMessage::Text(text) => {
-                route_text(text, routes, engine_event_tx, &mut reconstructor).await?;
+                route_text(text, namespaces, engine_event_tx, &mut reconstructor).await?;
             }
             ServerMessage::Binary(attachment) => {
-                route_binary(attachment, routes, &mut reconstructor).await?;
+                route_binary(attachment, namespaces, &mut reconstructor).await?;
             }
         }
     }
@@ -80,7 +81,7 @@ fn send_engine_event(
 
 async fn route_text(
     text: ByteString,
-    routes: &Routes,
+    namespaces: &Namespaces,
     engine_event_tx: &mpsc::UnboundedSender<EngineEvent>,
     reconstructor: &mut Option<Ns<BinaryPacket>>,
 ) -> Result<(), ManagerError> {
@@ -98,11 +99,11 @@ async fn route_text(
 
             tracing::debug!(%ns, sid = %connect.sid, "connected");
 
-            if routes.mark_connected(&ns) {
+            if namespaces.mark_connected(&ns) {
                 send_engine_event(engine_event_tx, EngineEvent::Connect(ns.clone()))?;
             }
             send_server_packet(
-                routes.server_packet_tx(&ns),
+                namespaces.server_packet_tx(&ns),
                 &ns,
                 ServerPacket::Connect(connect),
             )
@@ -111,15 +112,15 @@ async fn route_text(
         Packet::Disconnect => {
             tracing::debug!(%ns, "server closed");
 
-            send_terminal_packet(routes.close(&ns), &ns, ServerPacket::Disconnect);
+            namespaces.close(&ns, ServerPacket::Disconnect);
         }
         Packet::Event { payload, id } => {
             let event = DynEvent::new(payload, id);
             let server_packet = ServerPacket::Event(event);
-            send_server_packet(routes.server_packet_tx(&ns), &ns, server_packet).await;
+            send_server_packet(namespaces.server_packet_tx(&ns), &ns, server_packet).await;
         }
         Packet::Ack { payload, id } => {
-            resolve_ack(routes, &ns, id, DynAck::new(payload));
+            resolve_ack(namespaces, &ns, id, DynAck::new(payload));
         }
         Packet::ConnectError(payload) => {
             let error: ConnectError = serde_json::from_str(&payload).map_err(PacketError::Json)?;
@@ -127,7 +128,7 @@ async fn route_text(
             tracing::debug!(%ns, %error, "namespace connection refused");
 
             // The server refused the namespace, so it closes like a DISCONNECT.
-            send_terminal_packet(routes.close(&ns), &ns, ServerPacket::ConnectError(error));
+            namespaces.close(&ns, ServerPacket::ConnectError(error));
         }
         Packet::BinaryEvent { payload, id, count } => {
             validate_placeholders(&payload, count)?;
@@ -175,7 +176,7 @@ fn validate_placeholder_value(value: &serde_json::Value, count: usize) -> Result
 
 async fn route_binary(
     attachment: Bytes,
-    routes: &Routes,
+    namespaces: &Namespaces,
     reconstructor: &mut Option<Ns<BinaryPacket>>,
 ) -> Result<(), ManagerError> {
     let bytes = attachment.len();
@@ -200,7 +201,7 @@ async fn route_binary(
             }
             .with_attachments(attachments);
             send_server_packet(
-                routes.server_packet_tx(&ns),
+                namespaces.server_packet_tx(&ns),
                 &ns,
                 ServerPacket::Event(event),
             )
@@ -213,7 +214,7 @@ async fn route_binary(
             ..
         } => {
             let ack = DynAck::new(payload).with_attachments(attachments);
-            resolve_ack(routes, &ns, id, ack);
+            resolve_ack(namespaces, &ns, id, ack);
         }
     }
 
@@ -250,21 +251,9 @@ async fn send_server_packet(
     }
 }
 
-/// One terminal packet per route needs one slot, independent of the data
-/// queue, so closing a namespace never waits for its consumer.
-fn send_terminal_packet(
-    terminal_packet_tx: Option<oneshot::Sender<ServerPacket>>,
-    ns: &ByteString,
-    packet: ServerPacket,
-) {
-    if terminal_packet_tx.is_some_and(|tx| tx.send(packet).is_err()) {
-        tracing::debug!(%ns, "discarded terminal packet for a dropped receiver");
-    }
-}
-
 /// Resolves a pending ack, discarding acks nobody waits for.
-fn resolve_ack(routes: &Routes, ns: &ByteString, id: u64, ack: DynAck) {
-    let Some(ack_tx) = routes.take_ack(ns, id) else {
+fn resolve_ack(namespaces: &Namespaces, ns: &ByteString, id: u64, ack: DynAck) {
+    let Some(ack_tx) = namespaces.take_ack(ns, id) else {
         tracing::debug!(%ns, id, "discarded ack with no pending handle");
         return;
     };

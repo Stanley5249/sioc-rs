@@ -101,7 +101,7 @@ pub enum SocketError {
     #[error("namespace conflict: `{ns}`")]
     #[diagnostic(code(sioc::socket::namespace_conflict))]
     NamespaceConflict {
-        /// The namespace that already has an open route.
+        /// The namespace that is already open on the client.
         ns: ByteString,
     },
     /// The namespace or the whole session has closed.

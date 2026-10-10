@@ -849,8 +849,9 @@ async fn closed_engine_channel_is_error() {
     drop(client_message_rx);
     let (connect_request, handles) = ConnectRequest::new("/".into(), ByteString::new(), 1, 1);
     connect_request_tx.send(connect_request).await.unwrap();
-    // The failed CONNECT drops the reply.
-    handles.reply_rx.await.unwrap_err();
+    // The namespace opens before its CONNECT fails, so the reply succeeds and
+    // the client ends with the error.
+    handles.reply_rx.await.unwrap().unwrap();
 
     drop(server_message_tx);
     drop(result_tx);

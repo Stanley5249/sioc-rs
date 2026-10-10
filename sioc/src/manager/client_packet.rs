@@ -1,6 +1,5 @@
 //! Sends what the namespace handles ask for.
 
-use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::ops::ControlFlow;
 
@@ -10,100 +9,52 @@ use eioc::prelude::{Message, ServerMessage};
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 use crate::config::ChannelConfig;
 use crate::error::ManagerError;
 use crate::manager::backoff::Backoff;
 use crate::manager::connect_request::ConnectRequest;
 use crate::manager::engine::ReadyState;
+use crate::manager::namespaces::{ClientEnd, Namespaces};
 use crate::manager::open_request::{EngineEvent, OpenHandles, OpenRequest};
-use crate::manager::routes::Routes;
 use crate::packet::{ClientPacket, Packet};
 
-/// The client-packet loop's view of one namespace.
-///
-/// It lives until its client packets end, which can be after the server
-/// closed the namespace. A reopen of the same name waits in `reopen` until
-/// then, so each name has at most one entry.
-struct Namespace {
-    ns: ByteString,
-    /// The JSON auth payload, sent with the CONNECT packet to every engine.
-    auth: ByteString,
-    /// Set by the server's CONNECT response to the open engine; events wait
-    /// in `buffered_messages_rx` until then.
-    connected: bool,
-    buffered_messages_rx: mpsc::Receiver<Vec<Message>>,
-    /// A request to open the same name again, held until this entry ends.
-    reopen: Option<ConnectRequest>,
-}
-
-/// A namespace input with one reserved send-buffer slot. Reserving before
-/// receiving bounds the work retained outside its client inbox.
-struct ClientInput {
-    ns: ByteString,
-    client_packet: Option<ClientPacket>,
-    client_packet_rx: mpsc::Receiver<ClientPacket>,
-    closed: CancellationToken,
-    buffered_messages_tx: mpsc::Sender<Vec<Message>>,
-    buffer_permit: Option<mpsc::OwnedPermit<Vec<Message>>>,
-}
-
-/// Reserves space before receiving, so an unconfirmed namespace eventually
-/// applies backpressure without holding up any other namespace.
+/// Receives the next client packet of a namespace, with one send-buffer slot
+/// reserved first. Reserving before receiving bounds the work retained outside
+/// the client inbox, so an unconfirmed namespace eventually applies
+/// backpressure without holding up any other namespace.
 ///
 /// Closing bypasses the buffer reservation and drains accepted packets.
-/// Connected packets still go out; unconfirmed packets are discarded.
+/// Flushed packets still go out; unconfirmed packets are discarded.
 async fn recv_client_packet(
-    ns: ByteString,
-    mut client_packet_rx: mpsc::Receiver<ClientPacket>,
-    closed: CancellationToken,
-    buffered_messages_tx: mpsc::Sender<Vec<Message>>,
-) -> ClientInput {
+    mut client_end: ClientEnd,
+) -> (
+    ClientEnd,
+    Option<ClientPacket>,
+    Option<mpsc::OwnedPermit<Vec<Message>>>,
+) {
     let buffer_permit = tokio::select! {
         biased;
-        () = closed.cancelled() => {
-            client_packet_rx.close();
+        () = client_end.closed.cancelled() => {
+            client_end.client_packet_rx.close();
             None
         }
-        permit = buffered_messages_tx.clone().reserve_owned() => {
-            Some(permit.expect("a namespace retains its send-buffer receiver until its input ends"))
+        permit = client_end.buffered_messages_tx.clone().reserve_owned() => {
+            Some(permit.expect("an open namespace retains its send-buffer receiver"))
         }
     };
 
     // Prefer the channel, so buffered packets drain before the close takes effect.
     let client_packet = tokio::select! {
         biased;
-        client_packet = client_packet_rx.recv() => client_packet,
-        () = closed.cancelled() => {
-            client_packet_rx.close();
-            client_packet_rx.recv().await
+        client_packet = client_end.client_packet_rx.recv() => client_packet,
+        () = client_end.closed.cancelled() => {
+            client_end.client_packet_rx.close();
+            client_end.client_packet_rx.recv().await
         }
     };
 
-    ClientInput {
-        ns,
-        client_packet,
-        client_packet_rx,
-        closed,
-        buffered_messages_tx,
-        buffer_permit,
-    }
-}
-
-/// Takes a reopen whose old namespace has ended, or else the client's next
-/// connect request.
-///
-/// Cancel safe: taking a reopen has no suspend point, and `recv` is cancel
-/// safe.
-async fn next_connect_request(
-    reopens: &mut VecDeque<ConnectRequest>,
-    connect_request_rx: &mut mpsc::Receiver<ConnectRequest>,
-) -> Option<ConnectRequest> {
-    match reopens.pop_front() {
-        Some(request) => Some(request),
-        None => connect_request_rx.recv().await,
-    }
+    (client_end, client_packet, buffer_permit)
 }
 
 /// Sends what the namespace handles ask for, across engines, until the client
@@ -111,7 +62,7 @@ async fn next_connect_request(
 ///
 /// Runs the client-packet loop beside
 /// [`run_engines`](crate::manager::engine::run_engines), and both share the
-/// routes. Each direction has its own loop, so neither waits on the other.
+/// namespaces. Each direction has its own loop, so neither waits on the other.
 ///
 /// # Errors
 ///
@@ -126,7 +77,7 @@ where
     F: FnMut(mpsc::Sender<ServerMessage>, mpsc::Receiver<Message>) -> Fut,
     Fut: Future<Output = Result<(), eioc::error::Error>>,
 {
-    let routes = Routes::default();
+    let namespaces = Namespaces::default();
 
     // The client-packet loop sends the next request only after the previous
     // engine's result arrived, so one slot is enough.
@@ -134,13 +85,13 @@ where
 
     let (result, ()) = tokio::join!(
         send_client_packets(
-            &routes,
+            &namespaces,
             connect_request_rx,
             open_request_tx,
             channels,
             backoff
         ),
-        crate::manager::engine::run_engines(&routes, open_request_rx, connect_engine, channels),
+        crate::manager::engine::run_engines(&namespaces, open_request_rx, connect_engine, channels),
     );
 
     result
@@ -156,174 +107,133 @@ where
 /// Closes the engine once no namespace is open, like socket.io-client's
 /// `Manager._destroy`, and opens the next one with the next namespace.
 ///
-/// Ends once the client handle and every namespace are gone, so having no
-/// namespace at startup or between namespaces keeps it open. Then closes every
-/// namespace and waits for the engine to finish. Dropping `open_request_tx`
-/// then ends `run_engines`.
-///
-/// # Panics
-///
-/// Panics if a client packet arrives for a namespace this loop does not hold,
-/// which one entry per name rules out.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one select! arm per input; splitting the arms would pass most of the loop state around"
-)]
+/// Ends once the client handle and every namespace's handles are gone, so
+/// having no namespace at startup or between namespaces keeps it open. Then
+/// closes every namespace and waits for the engine to finish. Dropping
+/// `open_request_tx` then ends `run_engines`.
 async fn send_client_packets(
-    routes: &Routes,
+    namespaces: &Namespaces,
     mut connect_request_rx: mpsc::Receiver<ConnectRequest>,
     open_request_tx: mpsc::Sender<OpenRequest>,
     channels: ChannelConfig,
     mut backoff: Option<Backoff>,
 ) -> Result<(), ManagerError> {
-    let mut namespaces = HashMap::<ByteString, Namespace>::new();
+    // One pending receive per namespace with live handles.
     let mut client_packets = FuturesUnordered::new();
-    let mut reopens = VecDeque::new();
     let mut client_open = true;
-
-    // One ack id counter per name, kept after the namespace closes, so a late
-    // ack for a closed namespace never answers an event of the same name
-    // reopened. Like socket.io-client's `Socket.ids` on the `Socket` that
-    // `Manager.nsps` keeps for each name, which it never prunes.
-    let mut next_ack_ids = HashMap::<ByteString, u64>::new();
-
     let mut state = ReadyState::Closed;
 
     // Keep all fallible driving inside this block, so every error follows the
     // same namespace cancellation and engine half-close path below.
     let result = async {
-    // Open the first engine at once, like socket.io-client's `Manager`.
-    state = start_engine(&open_request_tx, channels, routes, &namespaces, 0).await?;
+        // Open the first engine at once, like socket.io-client's `Manager`.
+        state = start_engine(&open_request_tx, channels, namespaces, 0).await?;
 
-    while client_open || !namespaces.is_empty() || !reopens.is_empty() {
-        // Every handler sends only to the open engine, so waiting there holds
-        // up only this direction, which no other arm could serve anyway.
-        tokio::select! {
-            connect_request = next_connect_request(&mut reopens, &mut connect_request_rx), if client_open || !reopens.is_empty() => {
-                let Some(request) = connect_request else {
-                    client_open = false;
-                    continue;
-                };
-
-                let Some(request) = defer_reopen(request, &mut namespaces, routes) else {
-                    continue;
-                };
-
-                let ConnectRequest { ns, payload, client_packet_rx, closed, server_packet_tx, terminal_packet_tx, reply_tx } = request;
-
-                if !routes.insert(ns.clone(), server_packet_tx, terminal_packet_tx, closed.clone()) {
-                    // A cancelled connect drops its reply receiver.
-                    let _ = reply_tx.send(Err(crate::error::SocketError::NamespaceConflict { ns }));
-                    continue;
-                }
-
-                let (buffered_messages_tx, buffered_messages_rx) = mpsc::channel(channels.manager);
-                let namespace = Namespace {
-                    ns: ns.clone(),
-                    auth: payload.clone(),
-                    connected: false,
-                    buffered_messages_rx,
-                    reopen: None,
-                };
-
-                namespaces.insert(ns.clone(), namespace);
-                next_ack_ids.entry(ns.clone()).or_default();
-                client_packets.push(recv_client_packet(ns.clone(), client_packet_rx, closed, buffered_messages_tx));
-
-                match &state {
-                    ReadyState::Open(engine) => {
-                        send_wire_packet(&engine.client_message_tx, &ns, Packet::Connect(payload), None).await?;
-                    }
-                    ReadyState::Closed => {
-                        reset_backoff(&mut backoff);
-
-                        state = start_engine(&open_request_tx, channels, routes, &namespaces, 0).await?;
-                    }
-                    // The CONNECT goes out with the next engine.
-                    ReadyState::Closing { .. } | ReadyState::Reconnecting(_) => {}
-                }
-
-                // The caller may have cancelled connect while the request was queued.
-                let _ = reply_tx.send(Ok(()));
-            }
-
-            Some(ClientInput { ns, client_packet, client_packet_rx, closed, buffered_messages_tx, buffer_permit }) = client_packets.next() => {
-                let engine = state.engine();
-
-                let Some(client_packet) = client_packet else {
-                    let namespace = namespaces
-                        .remove(&ns)
-                        .expect("a namespace lives until its client packets end");
-
-                    close_namespace(&ns, routes, engine).await?;
-                    reopens.extend(namespace.reopen);
-
-                    if routes.is_empty() && reopens.is_empty() {
-                        state.destroy();
-                    }
-
-                    continue;
-                };
-
-                let namespace = namespaces
-                    .get_mut(&ns)
-                    .expect("a namespace lives until its client packets end");
-
-                send_client_packet(namespace, routes, engine, &mut next_ack_ids, client_packet, buffer_permit).await?;
-                client_packets.push(recv_client_packet(ns, client_packet_rx, closed, buffered_messages_tx));
-            }
-
-            event = state.next_event() => match event {
-                // The handshake succeeded, so the next drop starts counting
-                // attempts again, like socket.io-client's `Manager.onreconnect`.
-                EngineEvent::Open => reset_backoff(&mut backoff),
-
-                EngineEvent::Connect(ns) => {
-                    // A late report can find the name closed and reopened, with
-                    // the new route not confirmed yet, so check the route.
-                    let namespace = namespaces.get_mut(&ns).filter(|_| routes.is_connected(&ns));
-
-                    if let (Some(engine), Some(namespace)) = (state.engine(), namespace) {
-                        flush_send_buffer(namespace, engine).await?;
-                    }
-                }
-
-                EngineEvent::Close(engine_result) => {
-                    // The finished receiver must never be polled again.
-                    let ReadyState::Closing { reconnect, .. } = std::mem::replace(&mut state, ReadyState::Closed) else {
-                        unreachable!("only a closing engine reports its result");
+        while client_open || !client_packets.is_empty() {
+            // Every handler sends only to the open engine, so waiting there
+            // holds up only this direction, which no other arm could serve.
+            tokio::select! {
+                request = connect_request_rx.recv(), if client_open => {
+                    let Some(request) = request else {
+                        client_open = false;
+                        continue;
                     };
 
-                    match close_engine(engine_result, &mut namespaces, routes, backoff.as_mut(), reconnect) {
-                        ControlFlow::Continue(next) => state = next,
-                        ControlFlow::Break(error) => return Err(error),
-                    }
-
-                    // A namespace opened while the client closed the engine, so
-                    // the next one opens at once, like socket.io-client's
-                    // `Socket.connect`, which calls `Manager.open`.
-                    if !reconnect && !routes.is_empty() {
-                        reset_backoff(&mut backoff);
-
-                        state = start_engine(&open_request_tx, channels, routes, &namespaces, 0).await?;
-                    }
+                    let opened = open_namespace(
+                        request,
+                        namespaces,
+                        &mut state,
+                        &mut backoff,
+                        &open_request_tx,
+                        channels,
+                    )
+                    .await?;
+                    client_packets.extend(opened.map(recv_client_packet));
                 }
 
-                EngineEvent::Reconnect => {
-                    let attempt = backoff.as_ref().map_or(0, Backoff::attempts);
-                    state = start_engine(&open_request_tx, channels, routes, &namespaces, attempt).await?;
+                Some((client_end, client_packet, buffer_permit)) = client_packets.next() => {
+                    let Some(client_packet) = client_packet else {
+                        let reopen = close_namespace(namespaces, &client_end.ns, &state).await?;
+
+                        if let Some(request) = reopen {
+                            let opened = open_namespace(
+                                request,
+                                namespaces,
+                                &mut state,
+                                &mut backoff,
+                                &open_request_tx,
+                                channels,
+                            )
+                            .await?;
+                            client_packets.extend(opened.map(recv_client_packet));
+                        }
+
+                        if !namespaces.any_open() {
+                            state.destroy();
+                        }
+
+                        continue;
+                    };
+
+                    let engine = state.engine();
+                    let ns = &client_end.ns;
+                    send_client_packet(namespaces, ns, engine, client_packet, buffer_permit)
+                        .await?;
+                    client_packets.push(recv_client_packet(client_end));
+                }
+
+                event = state.next_event() => match event {
+                    // The handshake succeeded, so the next drop starts counting
+                    // attempts again, like socket.io-client's `Manager.onreconnect`.
+                    EngineEvent::Open => reset_backoff(&mut backoff),
+
+                    EngineEvent::Connect(ns) => {
+                        if let Some(engine) = state.engine() {
+                            flush_send_buffer(namespaces, &ns, engine).await?;
+                        }
+                    }
+
+                    EngineEvent::Close(engine_result) => {
+                        // The finished receiver must never be polled again.
+                        let closing = std::mem::replace(&mut state, ReadyState::Closed);
+                        let ReadyState::Closing { reconnect, .. } = closing else {
+                            unreachable!("only a closing engine reports its result");
+                        };
+
+                        let backoff_mut = backoff.as_mut();
+                        match close_engine(engine_result, namespaces, backoff_mut, reconnect) {
+                            ControlFlow::Continue(next) => state = next,
+                            ControlFlow::Break(error) => return Err(error),
+                        }
+
+                        // A namespace opened while the client closed the engine,
+                        // so the next one opens at once, like socket.io-client's
+                        // `Socket.connect`, which calls `Manager.open`.
+                        if !reconnect && namespaces.any_open() {
+                            reset_backoff(&mut backoff);
+
+                            state = start_engine(&open_request_tx, channels, namespaces, 0)
+                                .await?;
+                        }
+                    }
+
+                    EngineEvent::Reconnect => {
+                        let attempt = backoff.as_ref().map_or(0, Backoff::attempts);
+                        state = start_engine(&open_request_tx, channels, namespaces, attempt)
+                            .await?;
+                    }
                 }
             }
         }
-    }
 
-    Ok(())
-    }.await;
+        Ok(())
+    }
+    .await;
 
     tracing::debug!("client ended");
 
     // Closing the namespaces ends their receivers and fails their pending acks.
-    routes.clear();
+    namespaces.close_all();
     drop(client_packets);
 
     state.close(false);
@@ -341,30 +251,62 @@ async fn send_client_packets(
     result
 }
 
-/// Returns the request if its name is free. Otherwise holds it on the old
-/// namespace, whose handles are still draining after the server closed it,
-/// or refuses it if the name is open or already has a reopen waiting.
-fn defer_reopen(
+/// Opens a namespace as [`Namespaces::open`] decides, and returns the client
+/// end to receive from.
+///
+/// Sends CONNECT on the open engine, or opens an engine if none is running.
+/// Otherwise the CONNECT goes out with the next engine.
+async fn open_namespace(
     request: ConnectRequest,
-    namespaces: &mut HashMap<ByteString, Namespace>,
-    routes: &Routes,
-) -> Option<ConnectRequest> {
-    let Some(old) = namespaces.get_mut(&request.ns) else {
-        return Some(request);
+    namespaces: &Namespaces,
+    state: &mut ReadyState,
+    backoff: &mut Option<Backoff>,
+    open_request_tx: &mpsc::Sender<OpenRequest>,
+    channels: ChannelConfig,
+) -> Result<Option<ClientEnd>, ManagerError> {
+    let auth = request.payload.clone();
+
+    let Some(client_end) = namespaces.open(request, channels.manager) else {
+        return Ok(None);
     };
 
-    if routes.is_open(&request.ns) || old.reopen.is_some() {
-        let ns = request.ns;
+    match state {
+        ReadyState::Open(engine) => {
+            let packet = Packet::Connect(auth);
+            send_wire_packet(&engine.client_message_tx, &client_end.ns, packet, None).await?;
+        }
+        ReadyState::Closed => {
+            reset_backoff(backoff);
 
-        // A cancelled connect drops its reply receiver.
-        let _ = request
-            .reply_tx
-            .send(Err(crate::error::SocketError::NamespaceConflict { ns }));
-    } else {
-        old.reopen = Some(request);
+            *state = start_engine(open_request_tx, channels, namespaces, 0).await?;
+        }
+        ReadyState::Closing { .. } | ReadyState::Reconnecting(_) => {}
     }
 
-    None
+    Ok(Some(client_end))
+}
+
+/// Closes one namespace after its client packets end, and returns the request
+/// waiting to open the name again.
+///
+/// Sends DISCONNECT only if the server confirmed the namespace to the open
+/// engine, like socket.io-client's `Socket.disconnect`, because the server
+/// closes the whole connection on any other packet for a namespace it has not
+/// joined.
+async fn close_namespace(
+    namespaces: &Namespaces,
+    ns: &ByteString,
+    state: &ReadyState,
+) -> Result<Option<ConnectRequest>, ManagerError> {
+    let (connected, reopen) = namespaces.close_client(ns);
+
+    tracing::debug!(%ns, "client closed");
+
+    if let Some(engine) = state.engine().filter(|_| connected) {
+        send_wire_packet(&engine.client_message_tx, ns, Packet::Disconnect, None).await?;
+    }
+
+    Ok(reopen)
 }
 
 /// Handles a finished engine: fails the acks of sent events and picks the
@@ -375,38 +317,33 @@ fn defer_reopen(
 /// `Manager` and `Socket`s outlive `reconnect_failed`.
 fn close_engine(
     engine_result: Result<(), ManagerError>,
-    namespaces: &mut HashMap<ByteString, Namespace>,
-    routes: &Routes,
+    namespaces: &Namespaces,
     backoff: Option<&mut Backoff>,
     reconnect: bool,
 ) -> ControlFlow<ManagerError, ReadyState> {
     tracing::debug!("engine closed");
 
     // Like socket.io-client's `Socket.onclose`, which calls `_clearAcks`.
-    routes.clear_acks();
-
-    for namespace in namespaces.values_mut() {
-        namespace.connected = false;
-    }
+    namespaces.clear_acks();
 
     if is_fatal(&engine_result) {
         return ControlFlow::Break(engine_result.unwrap_err());
     }
 
     // Like `Manager._destroy`, wait for the next namespace instead.
-    if !reconnect || routes.is_empty() {
+    if !reconnect || !namespaces.any_open() {
         return ControlFlow::Continue(ReadyState::Closed);
     }
 
     let Some(backoff) = backoff else {
         tracing::warn!("reconnection is off");
-        routes.clear();
+        namespaces.close_all();
         return ControlFlow::Continue(ReadyState::Closed);
     };
 
     let Some(delay) = backoff.next_delay() else {
         tracing::warn!(attempts = backoff.attempts(), "gave up reconnecting");
-        routes.clear();
+        namespaces.close_all();
         return ControlFlow::Continue(ReadyState::Closed);
     };
 
@@ -449,8 +386,7 @@ fn reset_backoff(backoff: &mut Option<Backoff>) {
 async fn start_engine(
     open_request_tx: &mpsc::Sender<OpenRequest>,
     channels: ChannelConfig,
-    routes: &Routes,
-    namespaces: &HashMap<ByteString, Namespace>,
+    namespaces: &Namespaces,
     attempt: u32,
 ) -> Result<ReadyState, ManagerError> {
     let (request, engine) = OpenRequest::new(attempt, channels.engine);
@@ -463,78 +399,50 @@ async fn start_engine(
 
     tracing::debug!(attempt, "engine opened");
 
-    for namespace in namespaces.values() {
-        if routes.is_open(&namespace.ns) {
-            let packet = Packet::Connect(namespace.auth.clone());
-            send_wire_packet(&engine.client_message_tx, &namespace.ns, packet, None).await?;
-        }
+    for (ns, auth) in namespaces.auths() {
+        send_wire_packet(&engine.client_message_tx, &ns, Packet::Connect(auth), None).await?;
     }
 
     Ok(ReadyState::Open(engine))
 }
 
-/// Closes one namespace after its client packets end.
-///
-/// Only a namespace the client closed still has its route. Sends DISCONNECT
-/// only if the server confirmed the namespace to the open engine, like
-/// socket.io-client's `Socket.disconnect`, because the server closes the whole
-/// connection on any other packet for a namespace it has not joined.
-async fn close_namespace(
+/// Sends the events a namespace buffered until the server confirmed it.
+async fn flush_send_buffer(
+    namespaces: &Namespaces,
     ns: &ByteString,
-    routes: &Routes,
-    engine: Option<&OpenHandles>,
+    engine: &OpenHandles,
 ) -> Result<(), ManagerError> {
-    let Some(connected) = routes.close_client(ns) else {
+    // A late report can find the name closed and reopened, with the new
+    // namespace not confirmed yet, which `flush` skips.
+    let Some(messages) = namespaces.flush(ns) else {
         return Ok(());
     };
 
-    tracing::debug!(%ns, "client closed");
+    if !messages.is_empty() {
+        tracing::trace!(%ns, count = messages.len(), "flushed send buffer");
+    }
 
-    if let Some(engine) = engine.filter(|_| connected) {
-        send_wire_packet(&engine.client_message_tx, ns, Packet::Disconnect, None).await?;
+    for message in messages {
+        engine.client_message_tx.send(message).await?;
     }
 
     Ok(())
 }
 
-/// Sends the events a namespace buffered until the server confirmed it.
-async fn flush_send_buffer(
-    namespace: &mut Namespace,
-    engine: &OpenHandles,
-) -> Result<(), ManagerError> {
-    namespace.connected = true;
-
-    let count = namespace.buffered_messages_rx.len();
-    if count > 0 {
-        tracing::trace!(ns = %namespace.ns, count, "flushed send buffer");
-    }
-
-    while let Ok(messages) = namespace.buffered_messages_rx.try_recv() {
-        for message in messages {
-            engine.client_message_tx.send(message).await?;
-        }
-    }
-
-    Ok(())
-}
-
-/// Encodes one event or ack, holding events until the server confirms the
-/// namespace to the open engine.
+/// Encodes one event or ack, holding events until the client-packet loop
+/// flushed the namespace's send buffer.
 ///
 /// Discards packets the handles sent before the server closed the namespace,
 /// because the server no longer accepts them, and acks until the server
 /// confirms the namespace to the open engine.
 async fn send_client_packet(
-    namespace: &mut Namespace,
-    routes: &Routes,
+    namespaces: &Namespaces,
+    ns: &ByteString,
     engine: Option<&OpenHandles>,
-    next_ack_ids: &mut HashMap<ByteString, u64>,
     client_packet: ClientPacket,
     buffer_permit: Option<mpsc::OwnedPermit<Vec<Message>>>,
 ) -> Result<(), ManagerError> {
-    let ns = &namespace.ns;
-
-    if !routes.is_open(ns) {
+    if !namespaces.is_open(ns) {
         tracing::debug!(%ns, "discarded client packet for a closed namespace");
         return Ok(());
     }
@@ -545,22 +453,14 @@ async fn send_client_packet(
             ack_tx,
             attachments,
         } => {
-            let engine = engine.filter(|_| namespace.connected);
+            let engine = engine.filter(|_| namespaces.is_flushed(ns));
             if engine.is_none() && buffer_permit.is_none() {
                 tracing::debug!(%ns, "discarded buffered event for a closing namespace");
                 return Ok(());
             }
 
             // Register before sending, so the server's answer always finds it.
-            let id = ack_tx.map(|ack_tx| {
-                let next_ack_id = next_ack_ids
-                    .get_mut(ns)
-                    .expect("a namespace's counter outlives it");
-                let id = *next_ack_id;
-                *next_ack_id += 1;
-                routes.register_ack(ns, id, ack_tx);
-                id
-            });
+            let id = ack_tx.map(|ack_tx| namespaces.register_ack(ns, ack_tx));
 
             let packet = match &attachments {
                 None => Packet::Event { payload, id },
@@ -590,7 +490,7 @@ async fn send_client_packet(
         } => {
             // The event came from an earlier engine, and its id means nothing
             // to the server now.
-            let Some(engine) = engine.filter(|_| routes.is_connected(ns)) else {
+            let Some(engine) = engine.filter(|_| namespaces.is_confirmed(ns)) else {
                 tracing::debug!(%ns, id, "discarded ack for an unconfirmed namespace");
                 return Ok(());
             };
@@ -635,73 +535,4 @@ fn encode_packet(
     let binaries = attachments.into_iter().flatten().map(Message::Binary);
 
     std::iter::once(text).chain(binaries)
-}
-
-#[cfg(test)]
-mod tests {
-    use tokio::sync::oneshot;
-    use tokio::sync::oneshot::error::TryRecvError;
-
-    use super::*;
-    use crate::error::SocketError;
-
-    fn namespace(ns: &str) -> Namespace {
-        Namespace {
-            ns: ns.into(),
-            auth: ByteString::new(),
-            connected: false,
-            buffered_messages_rx: mpsc::channel(1).1,
-            reopen: None,
-        }
-    }
-
-    #[test]
-    fn defer_reopen_passes_a_free_name() {
-        let mut namespaces = HashMap::new();
-        let (request, _handles) = ConnectRequest::new("/".into(), ByteString::new(), 1, 1);
-        assert!(defer_reopen(request, &mut namespaces, &Routes::default()).is_some());
-    }
-
-    #[test]
-    fn defer_reopen_holds_one_request_while_the_old_namespace_drains() {
-        let routes = Routes::default();
-        let mut namespaces = HashMap::from([(ByteString::from("/"), namespace("/"))]);
-
-        let (request, mut handles) = ConnectRequest::new("/".into(), ByteString::new(), 1, 1);
-        assert!(defer_reopen(request, &mut namespaces, &routes).is_none());
-        assert!(namespaces["/"].reopen.is_some());
-        assert!(matches!(
-            handles.reply_rx.try_recv(),
-            Err(TryRecvError::Empty)
-        ));
-
-        let (request, mut handles) = ConnectRequest::new("/".into(), ByteString::new(), 1, 1);
-        assert!(defer_reopen(request, &mut namespaces, &routes).is_none());
-        assert!(matches!(
-            handles.reply_rx.try_recv(),
-            Ok(Err(SocketError::NamespaceConflict { .. }))
-        ));
-    }
-
-    #[test]
-    fn defer_reopen_refuses_an_open_name() {
-        let routes = Routes::default();
-        let (server_packet_tx, _server_packet_rx) = mpsc::channel(1);
-        let (terminal_packet_tx, _terminal_packet_rx) = oneshot::channel();
-        assert!(routes.insert(
-            "/".into(),
-            server_packet_tx,
-            terminal_packet_tx,
-            CancellationToken::new()
-        ));
-        let mut namespaces = HashMap::from([(ByteString::from("/"), namespace("/"))]);
-
-        let (request, mut handles) = ConnectRequest::new("/".into(), ByteString::new(), 1, 1);
-        assert!(defer_reopen(request, &mut namespaces, &routes).is_none());
-        assert!(namespaces["/"].reopen.is_none());
-        assert!(matches!(
-            handles.reply_rx.try_recv(),
-            Ok(Err(SocketError::NamespaceConflict { .. }))
-        ));
-    }
 }

@@ -6,7 +6,7 @@
 //! another one after the backoff delay when a connection drops.
 //! `run_engines` runs each engine beside [`server_message`], which delivers
 //! what the server sends to each namespace. Each direction has its own loop,
-//! so neither waits on the other, and both share the [`routes`].
+//! so neither waits on the other, and both share the [`namespaces`].
 //!
 //! The reconnection follows socket.io-client 4.8.4:
 //!
@@ -29,8 +29,8 @@ pub mod backoff;
 pub mod client_packet;
 pub mod connect_request;
 pub mod engine;
+pub mod namespaces;
 pub mod open_request;
-pub mod routes;
 pub mod server_message;
 
 #[cfg(test)]

@@ -15,8 +15,8 @@ use tracing::Instrument;
 
 use crate::config::ChannelConfig;
 use crate::error::ManagerError;
+use crate::manager::namespaces::Namespaces;
 use crate::manager::open_request::{EngineEvent, OpenHandles, OpenRequest};
-use crate::manager::routes::Routes;
 
 /// Runs each requested engine beside the server-message loop, one at a time,
 /// until the client-packet loop drops its sender.
@@ -24,7 +24,7 @@ use crate::manager::routes::Routes;
 /// The server-message loop and its half-built binary packet end with their
 /// engine.
 pub async fn run_engines<F, Fut>(
-    routes: &Routes,
+    namespaces: &Namespaces,
     mut open_request_rx: mpsc::Receiver<OpenRequest>,
     mut connect_engine: F,
     channels: ChannelConfig,
@@ -48,7 +48,7 @@ pub async fn run_engines<F, Fut>(
             let (server_result, engine_result) = tokio::join!(
                 crate::manager::server_message::server_messages_to_packets(
                     server_message_rx,
-                    routes,
+                    namespaces,
                     engine_event_tx,
                 ),
                 engine,

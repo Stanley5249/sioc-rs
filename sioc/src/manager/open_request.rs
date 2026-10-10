@@ -64,9 +64,9 @@ impl OpenRequest {
         // The channel is unbounded so that delivering server packets never
         // waits on the client's sending direction, which waits on the engine,
         // which waits on server packet delivery. Its length stays below the
-        // number of namespaces opened in this engine, because each one travels
-        // at most once per route, plus one `Open`, so the server cannot grow
-        // it.
+        // number of namespaces opened in this engine, because each opening
+        // reports `Connect` at most once, plus one `Open`, so the server cannot
+        // grow it.
         let (engine_event_tx, engine_event_rx) = mpsc::unbounded_channel();
 
         let (engine_result_tx, engine_result_rx) = oneshot::channel();
