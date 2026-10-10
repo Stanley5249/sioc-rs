@@ -159,6 +159,7 @@ pub struct ClientBuilder<C = ()> {
     transport_strategy: TransportStrategy,
     channels: ChannelConfig,
     reconnection: Option<ReconnectionConfig>,
+    timeout: Option<Duration>,
 }
 
 impl ClientBuilder<()> {
@@ -172,6 +173,7 @@ impl ClientBuilder<()> {
             transport_strategy: TransportStrategy::default(),
             channels: ChannelConfig::default(),
             reconnection: Some(ReconnectionConfig::default()),
+            timeout: Some(Duration::from_secs(20)),
         }
     }
 }
@@ -224,6 +226,7 @@ where
             transport_strategy: self.transport_strategy,
             channels: self.channels,
             reconnection: self.reconnection,
+            timeout: self.timeout,
         }
     }
 
@@ -251,6 +254,19 @@ where
         self
     }
 
+    /// Override how long each connection attempt waits for the server to
+    /// accept the Engine.IO handshake, or pass `None` to wait without a limit,
+    /// like socket.io-client's `timeout` option (default: 20 seconds).
+    ///
+    /// An attempt that times out counts as failed, so the client reconnects as
+    /// after a dropped session. This limit covers only the handshake, unlike
+    /// [`reqwest::ClientBuilder::timeout`], which limits every HTTP request,
+    /// including each long poll.
+    pub fn timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
     /// Connects to the Engine.IO server and returns a [`Client`].
     ///
     /// Spawns the manager task, which opens a new engine after the backoff
@@ -269,6 +285,7 @@ where
         let websocket_connector = self.websocket_connector;
         let transport_strategy = self.transport_strategy;
         let channels = self.channels;
+        let timeout = self.timeout;
         let backoff = self.reconnection.map(|config| {
             Backoff::new(
                 config.delay,
@@ -290,6 +307,7 @@ where
                 transport_strategy,
                 event_tx,
                 client_message_rx,
+                timeout,
                 channels.engine,
                 channels.transport,
             )
@@ -564,7 +582,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use eioc::error::{Error as EngineIoError, TransportError, WebSocketError};
+    use eioc::error::{EngineError, Error as EngineIoError, TransportError, WebSocketError};
     use eioc::transport::TransportStrategy;
     use serde_json::Map;
     use tokio::sync::{Semaphore, mpsc};
@@ -819,6 +837,26 @@ mod tests {
             .unwrap();
         assert!(rx.recv().await.is_none());
         client.join().await.unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn handshake_timeout_fails_the_attempt() {
+        let client = ClientBuilder::new(Url::parse("http://localhost:3000/").unwrap())
+            .transport(TransportStrategy::WebSocket)
+            .reconnection(None)
+            .timeout(Some(Duration::from_millis(10)))
+            .websocket_connector(async |_| std::future::pending().await)
+            .open()
+            .unwrap();
+
+        let (_tx, mut rx) = client.connect("/").await.unwrap();
+        assert!(rx.recv().await.is_none());
+        assert!(matches!(
+            client.join().await,
+            Err(ClientError::Manager(ManagerError::Engine(
+                EngineIoError::Engine(EngineError::HandshakeTimeout)
+            )))
+        ));
     }
 
     #[tokio::test]

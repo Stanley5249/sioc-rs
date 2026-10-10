@@ -31,7 +31,7 @@ impl Error {
             Self::Transport(
                 TransportError::WebSocket(_) | TransportError::Polling(_) | TransportError::Open(_),
             )
-            | Self::Engine(EngineError::HeartbeatTimeout) => false,
+            | Self::Engine(EngineError::HeartbeatTimeout | EngineError::HandshakeTimeout) => false,
 
             Self::Transport(TransportError::ServerFrame(_) | TransportError::Handshake(_))
             | Self::Engine(
@@ -68,6 +68,14 @@ pub enum EngineError {
         help("the server stopped responding; check the network or server load")
     )]
     HeartbeatTimeout,
+
+    /// The server did not accept the handshake in time.
+    #[error("handshake timeout")]
+    #[diagnostic(
+        code(eioc::engine::handshake_timeout),
+        help("the server did not answer in time; check the URL, the network, or server load")
+    )]
+    HandshakeTimeout,
 }
 
 /// Errors that occur during Engine.IO connection setup and transport
@@ -213,11 +221,12 @@ mod tests {
 
     #[test]
     fn network_and_server_faults_are_not_internal() {
-        let errors: [Error; 4] = [
+        let errors: [Error; 5] = [
             TransportError::WebSocket(WebSocketError::Closed).into(),
             TransportError::Polling(PollingError::Response(String::new())).into(),
             TransportError::Open(frame()).into(),
             EngineError::HeartbeatTimeout.into(),
+            EngineError::HandshakeTimeout.into(),
         ];
         for error in errors {
             assert!(!error.is_internal(), "{error:?}");

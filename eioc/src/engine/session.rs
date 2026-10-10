@@ -1,5 +1,7 @@
 //! One Engine.IO session: the protocol loops beside the transport.
 
+use std::time::Duration;
+
 use futures_util::TryFutureExt;
 use tokio::sync::{mpsc, oneshot};
 use url::Url;
@@ -18,6 +20,10 @@ use crate::transport::TransportStrategy;
 /// the engine drops `event_tx` once the session has ended, whichever side
 /// closed it.
 ///
+/// Fails with [`EngineError::HandshakeTimeout`](crate::error::EngineError)
+/// if the server has not accepted the handshake within `handshake_timeout`,
+/// like engine.io-client's `timeout` option. `None` waits without a limit.
+///
 /// Returns once the session has ended and the sender of `client_message_rx` is
 /// dropped, even after an error, so sends to `client_message_rx` never fail.
 ///
@@ -35,6 +41,7 @@ pub async fn connect<C>(
     strategy: TransportStrategy,
     event_tx: mpsc::Sender<Event>,
     mut client_message_rx: mpsc::Receiver<Message>,
+    handshake_timeout: Option<Duration>,
     server_frame_capacity: usize,
     client_frame_capacity: usize,
 ) -> Result<(), Error>
@@ -53,6 +60,7 @@ where
         &mut client_message_rx,
         client_frame_tx,
         handshake_rx,
+        handshake_timeout,
     );
 
     let transport_future = crate::transport::open(

@@ -47,6 +47,7 @@ impl TestEngine {
                 &mut client_message_rx,
                 client_frame_tx,
                 handshake_rx,
+                None,
             )
             .await
         });
@@ -113,9 +114,30 @@ async fn protocol_handshake_dropped_is_error() {
         &mut client_message_rx,
         client_frame_tx,
         handshake_rx,
+        None,
     )
     .await;
     assert!(matches!(result, Err(EngineError::Handshake(_))));
+}
+
+#[tokio::test]
+async fn protocol_handshake_times_out() {
+    let (_server_frame_tx, server_frame_rx) = mpsc::channel(4);
+    let (event_tx, mut event_rx) = mpsc::channel(4);
+    let (_client_message_tx, mut client_message_rx) = mpsc::channel(4);
+    let (client_frame_tx, _client_frame_rx) = mpsc::channel(4);
+    let (_handshake_tx, handshake_rx) = oneshot::channel::<Handshake>();
+    let result = crate::engine::protocol::run_protocol(
+        server_frame_rx,
+        event_tx,
+        &mut client_message_rx,
+        client_frame_tx,
+        handshake_rx,
+        Some(Duration::from_millis(10)),
+    )
+    .await;
+    assert!(matches!(result, Err(EngineError::HandshakeTimeout)));
+    assert!(event_rx.recv().await.is_none());
 }
 
 #[tokio::test]
@@ -137,6 +159,7 @@ async fn protocol_reports_open_before_messages() {
         &mut client_message_rx,
         client_frame_tx,
         handshake_rx,
+        Some(Duration::from_secs(20)),
     );
     let events = async {
         let mut events = Vec::new();
@@ -382,6 +405,7 @@ async fn session_failure_accepts_client_messages_until_hang_up() {
         TransportStrategy::WebSocket,
         event_tx,
         client_message_rx,
+        None,
         4,
         4,
     ));

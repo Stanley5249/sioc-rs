@@ -16,8 +16,14 @@ pub async fn run_protocol(
     client_message_rx: &mut mpsc::Receiver<Message>,
     client_frame_tx: mpsc::Sender<Frame>,
     handshake_rx: oneshot::Receiver<Handshake>,
+    handshake_timeout: Option<Duration>,
 ) -> Result<(), EngineError> {
-    let handshake = handshake_rx.await?;
+    let handshake = match handshake_timeout {
+        Some(timeout) => tokio::time::timeout(timeout, handshake_rx)
+            .await
+            .map_err(|_| EngineError::HandshakeTimeout)??,
+        None => handshake_rx.await?,
+    };
     tracing::debug!(sid = %handshake.sid, "received handshake");
 
     let ping_window = handshake.ping_window();
