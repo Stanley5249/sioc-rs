@@ -1,5 +1,6 @@
 //! Socket.IO client and namespace handles.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytestring::ByteString;
@@ -7,7 +8,7 @@ use eioc::connector::WebSocketConnector;
 use eioc::transport::TransportStrategy;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard};
 use url::Url;
 
 use crate::ack::AckType;
@@ -64,7 +65,7 @@ pub struct ChannelConfig {
     /// Transport channel: encoded frames to send to the transport.
     pub transport: usize,
     /// Manager inboxes: messages from the engine, new namespaces, and each
-    /// namespace's client packets.
+    /// namespace's client packets and buffered outgoing events.
     pub manager: usize,
     /// Per-namespace inbox: server packets delivered to each
     /// [`SocketReceiver`], plus one separate slot for the terminal packet.
@@ -457,6 +458,8 @@ pub struct SocketSender {
     /// Carries packets to the manager task, which encodes and sends them.
     client_packet_tx: mpsc::Sender<ClientPacket>,
     closed: CancellationToken,
+    // Last-handle drop also wakes a namespace whose send buffer is full.
+    _closed: Arc<DropGuard>,
 }
 
 impl SocketSender {
@@ -465,6 +468,7 @@ impl SocketSender {
     pub fn new(client_packet_tx: mpsc::Sender<ClientPacket>, closed: CancellationToken) -> Self {
         Self {
             client_packet_tx,
+            _closed: Arc::new(closed.clone().drop_guard()),
             closed,
         }
     }
@@ -504,7 +508,9 @@ impl SocketSender {
     /// depending on the ack policy.
     ///
     /// The event waits until the server confirms the namespace, also after a
-    /// reconnection. The [`AckHandle`](crate::ack::AckHandle) fails if the
+    /// reconnection. The outgoing inbox and pre-connect buffer are each bounded
+    /// by [`ChannelConfig::manager`], so emitting awaits space when both fill.
+    /// The [`AckHandle`](crate::ack::AckHandle) fails if the
     /// Engine.IO session drops after the event went out, like
     /// socket.io-client's `Socket._clearAcks`.
     ///

@@ -31,28 +31,46 @@ struct Namespace {
     /// The JSON auth payload, sent with the CONNECT packet to every engine.
     auth: ByteString,
     /// Set by the server's CONNECT response to the open engine; events wait
-    /// in `send_buffer` until then.
+    /// in `buffered_messages_rx` until then.
     connected: bool,
-    send_buffer: Vec<Message>,
+    buffered_messages_rx: mpsc::Receiver<Vec<Message>>,
     /// A request to open the same name again, held until this entry ends.
     reopen: Option<ConnectRequest>,
 }
 
-/// Waits for the next client packet of one namespace.
+/// A namespace input with one reserved send-buffer slot. Reserving before
+/// receiving bounds the work retained outside its client inbox.
+struct ClientInput {
+    ns: ByteString,
+    client_packet: Option<ClientPacket>,
+    client_packet_rx: mpsc::Receiver<ClientPacket>,
+    closed: CancellationToken,
+    buffered_messages_tx: mpsc::Sender<Vec<Message>>,
+    buffer_permit: Option<mpsc::OwnedPermit<Vec<Message>>>,
+}
+
+/// Reserves space before receiving, so an unconfirmed namespace eventually
+/// applies backpressure without holding up any other namespace.
 ///
-/// Once `closed` is cancelled, closes the channel, so the packets sent before
-/// still arrive and then the channel ends, as it does when every handle drops.
-/// Hands the receiver back, so the caller decides whether to keep listening.
+/// Closing bypasses the buffer reservation and drains accepted packets.
+/// Connected packets still go out; unconfirmed packets are discarded.
 async fn recv_client_packet(
     ns: ByteString,
     mut client_packet_rx: mpsc::Receiver<ClientPacket>,
     closed: CancellationToken,
-) -> (
-    ByteString,
-    Option<ClientPacket>,
-    mpsc::Receiver<ClientPacket>,
-    CancellationToken,
-) {
+    buffered_messages_tx: mpsc::Sender<Vec<Message>>,
+) -> ClientInput {
+    let buffer_permit = tokio::select! {
+        biased;
+        () = closed.cancelled() => {
+            client_packet_rx.close();
+            None
+        }
+        permit = buffered_messages_tx.clone().reserve_owned() => {
+            Some(permit.expect("a namespace retains its send-buffer receiver until its input ends"))
+        }
+    };
+
     // Prefer the channel, so buffered packets drain before the close takes effect.
     let client_packet = tokio::select! {
         biased;
@@ -63,7 +81,14 @@ async fn recv_client_packet(
         }
     };
 
-    (ns, client_packet, client_packet_rx, closed)
+    ClientInput {
+        ns,
+        client_packet,
+        client_packet_rx,
+        closed,
+        buffered_messages_tx,
+        buffer_permit,
+    }
 }
 
 /// Takes a reopen whose old namespace has ended, or else the client's next
@@ -188,17 +213,18 @@ async fn send_client_packets(
                     continue;
                 }
 
+                let (buffered_messages_tx, buffered_messages_rx) = mpsc::channel(channels.manager);
                 let namespace = Namespace {
                     ns: ns.clone(),
                     auth: payload.clone(),
                     connected: false,
-                    send_buffer: Vec::new(),
+                    buffered_messages_rx,
                     reopen: None,
                 };
 
                 namespaces.insert(ns.clone(), namespace);
                 next_ack_ids.entry(ns.clone()).or_default();
-                client_packets.push(recv_client_packet(ns.clone(), client_packet_rx, closed));
+                client_packets.push(recv_client_packet(ns.clone(), client_packet_rx, closed, buffered_messages_tx));
 
                 match &state {
                     ReadyState::Open(engine) => {
@@ -217,7 +243,7 @@ async fn send_client_packets(
                 let _ = reply_tx.send(Ok(()));
             }
 
-            Some((ns, client_packet, client_packet_rx, closed)) = client_packets.next() => {
+            Some(ClientInput { ns, client_packet, client_packet_rx, closed, buffered_messages_tx, buffer_permit }) = client_packets.next() => {
                 let engine = state.engine();
 
                 let Some(client_packet) = client_packet else {
@@ -239,8 +265,8 @@ async fn send_client_packets(
                     .get_mut(&ns)
                     .expect("a namespace lives until its client packets end");
 
-                send_client_packet(namespace, routes, engine, &mut next_ack_ids, client_packet).await?;
-                client_packets.push(recv_client_packet(ns, client_packet_rx, closed));
+                send_client_packet(namespace, routes, engine, &mut next_ack_ids, client_packet, buffer_permit).await?;
+                client_packets.push(recv_client_packet(ns, client_packet_rx, closed, buffered_messages_tx));
             }
 
             event = state.next_event() => match event {
@@ -476,12 +502,15 @@ async fn flush_send_buffer(
 ) -> Result<(), ManagerError> {
     namespace.connected = true;
 
-    if !namespace.send_buffer.is_empty() {
-        tracing::trace!(ns = %namespace.ns, count = namespace.send_buffer.len(), "flushed send buffer");
+    let count = namespace.buffered_messages_rx.len();
+    if count > 0 {
+        tracing::trace!(ns = %namespace.ns, count, "flushed send buffer");
     }
 
-    for message in namespace.send_buffer.drain(..) {
-        engine.client_message_tx.send(message).await?;
+    while let Ok(messages) = namespace.buffered_messages_rx.try_recv() {
+        for message in messages {
+            engine.client_message_tx.send(message).await?;
+        }
     }
 
     Ok(())
@@ -499,6 +528,7 @@ async fn send_client_packet(
     engine: Option<&OpenHandles>,
     next_ack_ids: &mut HashMap<ByteString, u64>,
     client_packet: ClientPacket,
+    buffer_permit: Option<mpsc::OwnedPermit<Vec<Message>>>,
 ) -> Result<(), ManagerError> {
     let ns = &namespace.ns;
 
@@ -513,6 +543,12 @@ async fn send_client_packet(
             ack_tx,
             attachments,
         } => {
+            let engine = engine.filter(|_| namespace.connected);
+            if engine.is_none() && buffer_permit.is_none() {
+                tracing::debug!(%ns, "discarded buffered event for a closing namespace");
+                return Ok(());
+            }
+
             // Register before sending, so the server's answer always finds it.
             let id = ack_tx.map(|ack_tx| {
                 let next_ack_id = next_ack_ids
@@ -533,11 +569,12 @@ async fn send_client_packet(
                 },
             };
 
-            let Some(engine) = engine.filter(|_| namespace.connected) else {
+            let Some(engine) = engine else {
                 tracing::trace!(%ns, %packet, "buffered packet");
 
-                let messages = encode_packet(ns, &packet, attachments);
-                namespace.send_buffer.extend(messages);
+                if let Some(permit) = buffer_permit {
+                    permit.send(encode_packet(ns, &packet, attachments).collect());
+                }
 
                 return Ok(());
             };
@@ -611,7 +648,7 @@ mod tests {
             ns: ns.into(),
             auth: ByteString::new(),
             connected: false,
-            send_buffer: Vec::new(),
+            buffered_messages_rx: mpsc::channel(1).1,
             reopen: None,
         }
     }

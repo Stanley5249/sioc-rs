@@ -374,6 +374,79 @@ async fn dropping_handles_disconnects_only_that_namespace() {
     manager.finish().await.unwrap();
 }
 
+#[tokio::test(start_paused = true)]
+async fn unconfirmed_namespace_applies_backpressure_and_flushes_in_order() {
+    let mut manager = TestManager::spawn().await;
+    let (tx, mut rx) = manager.open("/").await;
+    for _ in 0..64 {
+        tx.send(event(r#"["queued"]"#, None)).await.unwrap();
+    }
+    let pending = tx.send(event(r#"["last"]"#, None));
+    tokio::pin!(pending);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut pending)
+            .await
+            .is_err(),
+        "the unconfirmed buffer must apply backpressure"
+    );
+
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    let receive = async {
+        for _ in 0..64 {
+            assert_eq!(&*manager.recv_client_text().await, r#"2["queued"]"#);
+        }
+        assert_eq!(&*manager.recv_client_text().await, r#"2["last"]"#);
+    };
+    let ((), sent) = tokio::join!(receive, &mut pending);
+    sent.unwrap();
+    assert!(matches!(rx.recv().await, Some(ServerPacket::Connect(_))));
+    tx.disconnect();
+    manager.finish().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn full_unconfirmed_buffer_does_not_block_other_namespaces() {
+    let mut manager = TestManager::spawn().await;
+    let (tx, _rx) = manager.open("/").await;
+    for _ in 0..64 {
+        tx.send(event(r#"["queued"]"#, None)).await.unwrap();
+    }
+    let pending = tx.send(event(r#"["blocked"]"#, None));
+    tokio::pin!(pending);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut pending)
+            .await
+            .is_err(),
+        "the first namespace must be backpressured"
+    );
+
+    let (other_tx, mut other_rx) = manager.open("/other").await;
+    manager
+        .send_server_message(r#"0/other,{"sid":"other"}"#)
+        .await;
+    other_rx.recv().await.unwrap();
+    other_tx.send(event(r#"["out"]"#, None)).await.unwrap();
+    assert_eq!(&*manager.recv_client_text().await, r#"2/other,["out"]"#);
+    tx.disconnect();
+    assert!(matches!(pending.await, Err(SocketError::Closed)));
+    other_tx.disconnect();
+    manager.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn dropping_last_sender_releases_a_full_unconfirmed_buffer() {
+    let mut manager = TestManager::spawn().await;
+    let (tx, _rx) = manager.open("/").await;
+    for _ in 0..64 {
+        tx.send(event(r#"["queued"]"#, None)).await.unwrap();
+    }
+    drop(tx);
+    tokio::time::timeout(Duration::from_secs(1), manager.finish())
+        .await
+        .expect("dropping the final sender releases buffered work")
+        .unwrap();
+}
+
 #[tokio::test]
 async fn events_wait_for_server_connect_in_order() {
     let mut manager = TestManager::spawn().await;
