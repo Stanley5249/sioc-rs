@@ -10,7 +10,7 @@ mod serialize_payload;
 use proc_macro::TokenStream;
 use syn::parse_macro_input;
 
-/// Derives the [`EventType`](https://docs.rs/sioc/latest/sioc/event/trait.EventType.html) trait,
+/// Derives the [`EventType`](https://docs.rs/sioc/latest/sioc/marker/trait.EventType.html) trait,
 /// providing the event name constant and ack/binary policy associated types.
 ///
 /// See the [crate documentation](self) for the full attribute reference.
@@ -21,7 +21,7 @@ pub fn derive_event_type(input: TokenStream) -> TokenStream {
         .into()
 }
 
-/// Derives the [`AckType`](https://docs.rs/sioc/latest/sioc/ack/trait.AckType.html) trait,
+/// Derives the [`AckType`](https://docs.rs/sioc/latest/sioc/marker/trait.AckType.html) trait,
 /// providing the binary policy associated type.
 ///
 /// See the [crate documentation](self) for the full attribute reference.

@@ -12,13 +12,15 @@
 //! [`Ack`](crate::ack::Ack) are parameterised over these markers
 //! so the compiler catches misuse (e.g. sending binary data where none is
 //! expected) at build time rather than at runtime.
+//!
+//! [`EventType`] and [`AckType`] pick these markers for each event and ack
+//! type, so the payload, event, and ack modules all build on this one.
 
 use std::fmt::DebugMap;
 use std::marker::PhantomData;
 
 use bytes::Bytes;
 
-use crate::ack::AckType;
 use crate::error::{AckIdError, AttachmentsError};
 
 /// Determines how acknowledgement IDs are handled at the type level.
@@ -157,6 +159,55 @@ impl BinaryMarker for HasBinary {
     fn format(attachments: &Self::Attachments, map: &mut DebugMap<'_, '_>) {
         map.entry(&"count", &attachments.len());
     }
+}
+
+/// Maps a Rust struct to a Socket.IO event name and compile-time policies.
+///
+/// Prefer `#[derive(EventType)]` over a manual implementation.  The derive
+/// generates `NAME` and the associated types.  Add
+/// `#[derive(SerializePayload)]` for emit and `#[derive(DeserializePayload)]`
+/// for recv.
+pub trait EventType: Sized {
+    /// The Socket.IO event name used as the first element of the wire array.
+    const NAME: &'static str;
+
+    /// Ack policy: [`NoAck`] or [`HasAck<A>`](HasAck).
+    type Ack: AckMarker;
+
+    /// Binary policy: [`NoBinary`] or [`HasBinary`].
+    type Binary: BinaryMarker;
+}
+
+/// Maps a Rust struct to the Socket.IO ack JSON-array encoding.
+///
+/// Prefer `#[derive(AckType)]` over a manual implementation.  The derive
+/// generates the binary policy associated type.  Add
+/// `#[derive(SerializePayload)]` to send acks and
+/// `#[derive(DeserializePayload)]` to receive them.
+///
+/// Unlike [`EventType`], ack arrays have no leading name element; the fields
+/// map directly to array positions.
+///
+/// # Example
+///
+/// ```rust
+/// use sioc::prelude::*;
+///
+/// #[derive(AckType, SerializePayload)]
+/// struct SaveAck { ok: bool, id: u64 }
+///
+/// fn main() {
+///     assert_eq!(ack_to_json(&()).unwrap(), "[]");
+///     assert_eq!(ack_to_json(&SaveAck { ok: true, id: 7 }).unwrap(), "[true,7]");
+/// }
+/// ```
+pub trait AckType: Sized {
+    /// Binary policy: [`NoBinary`] or [`HasBinary`].
+    type Binary: BinaryMarker;
+}
+
+impl AckType for () {
+    type Binary = NoBinary;
 }
 
 #[cfg(test)]

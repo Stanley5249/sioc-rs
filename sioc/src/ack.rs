@@ -26,42 +26,23 @@ use tokio::sync::oneshot;
 use tokio::time::Instant;
 
 use crate::binary::AttachmentsBuilder;
-use crate::client::Acknowledge;
 use crate::error::{AckError, PayloadError};
-use crate::marker::{BinaryMarker, HasBinary, NoBinary};
+use crate::marker::{AckType, BinaryMarker, HasBinary, NoBinary};
 use crate::packet::{ClientPacket, DynAck};
 use crate::payload::{DeserializePayload, SerializePayload};
 
-/// Maps a Rust struct to the Socket.IO ack JSON-array encoding.
-///
-/// Prefer `#[derive(AckType)]` over a manual implementation.  The derive
-/// generates the binary policy associated type.  Add
-/// `#[derive(SerializePayload)]` to send acks and
-/// `#[derive(DeserializePayload)]` to receive them.
-///
-/// Unlike [`EventType`](crate::event::EventType), ack arrays have no leading
-/// name element; the fields map directly to array positions.
-///
-/// # Example
-///
-/// ```rust
-/// use sioc::prelude::*;
-///
-/// #[derive(AckType, SerializePayload)]
-/// struct SaveAck { ok: bool, id: u64 }
-///
-/// fn main() {
-///     assert_eq!(ack_to_json(&()).unwrap(), "[]");
-///     assert_eq!(ack_to_json(&SaveAck { ok: true, id: 7 }).unwrap(), "[true,7]");
-/// }
-/// ```
-pub trait AckType: Sized {
-    /// Binary policy: [`NoBinary`] or [`HasBinary`].
-    type Binary: BinaryMarker;
-}
-
-impl AckType for () {
-    type Binary = NoBinary;
+/// Converts a typed acknowledgement into an ack [`ClientPacket`].
+pub trait Acknowledge<A, B>
+where
+    A: AckType,
+    B: BinaryMarker,
+{
+    /// Serializes into an ack [`ClientPacket`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if payload serialization fails.
+    fn into_client_packet(self, id: u64) -> Result<ClientPacket, PayloadError>;
 }
 
 /// A typed inbound acknowledgement with a compile-time binary policy marker.
@@ -152,7 +133,7 @@ pub struct AckHandle<A> {
 impl<A: AckType> AckHandle<A> {
     /// Wraps a oneshot receiver into a typed ack handle.
     ///
-    /// An [`Emit`](crate::client::Emit) implementation pairs this receiver
+    /// An [`Emit`](crate::event::Emit) implementation pairs this receiver
     /// with the sender it puts in [`ClientPacket::Event`]'s `ack_tx`.
     ///
     /// [`ClientPacket::Event`]: crate::packet::ClientPacket::Event

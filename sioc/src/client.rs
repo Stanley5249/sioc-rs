@@ -11,47 +11,13 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::{CancellationToken, DropGuard};
 use url::Url;
 
-use crate::ack::AckType;
-use crate::error::{ClientBuilderError, ClientError, ManagerError, PayloadError, SocketError};
+use crate::ack::Acknowledge;
+use crate::error::{ClientBuilderError, ClientError, ManagerError, SocketError};
+use crate::event::Emit;
 use crate::manager::backoff::Backoff;
 use crate::manager::connect_request::{ConnectHandles, ConnectRequest};
-use crate::marker::{AckId, AckMarker, BinaryMarker};
+use crate::marker::{AckId, AckMarker, AckType, BinaryMarker};
 use crate::packet::{ClientPacket, DynEvent, ServerPacket};
-
-/// Converts a typed event into a [`ClientPacket`] for emission.
-///
-/// `Output` is `()` for fire-and-forget events and
-/// [`AckHandle`](crate::ack::AckHandle) for events that expect an
-/// acknowledgement.
-pub trait Emit<A, B>
-where
-    A: AckMarker,
-    B: BinaryMarker,
-{
-    /// Return value after the packet is sent.
-    type Output;
-
-    /// Serializes into a [`ClientPacket`] and the output handle.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if payload serialization fails.
-    fn prepare(self) -> Result<(ClientPacket, Self::Output), PayloadError>;
-}
-
-/// Converts a typed acknowledgement into an ack [`ClientPacket`].
-pub trait Acknowledge<A, B>
-where
-    A: AckType,
-    B: BinaryMarker,
-{
-    /// Serializes into an ack [`ClientPacket`].
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if payload serialization fails.
-    fn into_client_packet(self, id: u64) -> Result<ClientPacket, PayloadError>;
-}
 
 /// Channel buffer capacities for each internal MPSC queue.
 ///

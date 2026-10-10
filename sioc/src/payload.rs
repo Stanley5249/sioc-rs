@@ -4,9 +4,8 @@ use std::marker::PhantomData;
 
 use serde::ser::SerializeSeq;
 
-use crate::ack::AckType;
 use crate::error::PayloadError;
-use crate::event::EventType;
+use crate::marker::{AckType, EventType};
 
 /// Serializes `payload` to JSON, returning the encoded string.
 ///

@@ -25,29 +25,33 @@
 use bytes::Bytes;
 use tokio::sync::oneshot;
 
-use crate::ack::{AckHandle, AckType};
+use crate::ack::AckHandle;
 use crate::binary::AttachmentsBuilder;
-use crate::client::Emit;
 use crate::error::{EventError, PayloadError};
-use crate::marker::{AckMarker, BinaryMarker, HasAck, HasBinary, NoAck, NoBinary};
+use crate::marker::{
+    AckMarker, AckType, BinaryMarker, EventType, HasAck, HasBinary, NoAck, NoBinary,
+};
 use crate::packet::{ClientPacket, DynEvent};
 use crate::payload::{DeserializePayload, SerializePayload};
 
-/// Maps a Rust struct to a Socket.IO event name and compile-time policies.
+/// Converts a typed event into a [`ClientPacket`] for emission.
 ///
-/// Prefer `#[derive(EventType)]` over a manual implementation.  The derive
-/// generates `NAME` and the associated types.  Add
-/// `#[derive(SerializePayload)]` for emit and `#[derive(DeserializePayload)]`
-/// for recv.
-pub trait EventType: Sized {
-    /// The Socket.IO event name used as the first element of the wire array.
-    const NAME: &'static str;
+/// `Output` is `()` for fire-and-forget events and [`AckHandle`] for events
+/// that expect an acknowledgement.
+pub trait Emit<A, B>
+where
+    A: AckMarker,
+    B: BinaryMarker,
+{
+    /// Return value after the packet is sent.
+    type Output;
 
-    /// Ack policy: [`NoAck`] or [`HasAck<A>`](crate::marker::HasAck).
-    type Ack: AckMarker;
-
-    /// Binary policy: [`NoBinary`] or [`HasBinary`].
-    type Binary: BinaryMarker;
+    /// Serializes into a [`ClientPacket`] and the output handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if payload serialization fails.
+    fn prepare(self) -> Result<(ClientPacket, Self::Output), PayloadError>;
 }
 
 /// A typed inbound event with compile-time ack and binary policy markers.
@@ -240,8 +244,8 @@ mod tests {
 
     use super::*;
     use crate::binary::AttachmentsBuilder;
-    use crate::client::Emit;
     use crate::error::{AckIdError, AttachmentsError, EventError};
+    use crate::event::Emit;
     use crate::marker::{HasAck, HasBinary, NoAck, NoBinary};
     use crate::packet::DynEvent;
     use crate::payload::{DeserializePayload, SerializePayload};
