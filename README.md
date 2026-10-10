@@ -68,7 +68,7 @@ while let Some(event) = rx.listen::<ChatEvent>().await? {
 
 Socket.IO acks let the two sides confirm receipt of an event. `sioc` models this through the type system so the compiler catches mismatches at build time.
 
-**Client requests an ack.** Associate an ack type with an event using `ack = "TypeName"`. When you emit that event, `emit` returns `Ack<A>` instead of `()`, and you can await the response with an optional timeout.
+**Client requests an ack.** Associate an ack type with an event using `ack = "TypeName"`. When you emit that event, `emit` returns `AckHandle<A>` instead of `()`, and you can await the `Ack<A>` response with an optional timeout.
 
 ```rust
 use std::time::Duration;

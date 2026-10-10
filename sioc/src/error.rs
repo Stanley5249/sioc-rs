@@ -141,11 +141,13 @@ pub enum EventError {
 /// Error returned when receiving or parsing a typed acknowledgement.
 #[derive(Debug, Error, Diagnostic)]
 pub enum AckError {
-    /// Server dropped the ack channel before responding.
+    /// The client stopped waiting for the server's answer, because the
+    /// namespace closed or the Engine.IO session dropped after the event went
+    /// out.
     #[error("failed to receive ack")]
     #[diagnostic(
         code(sioc::ack::recv),
-        help("the ack sender was dropped before responding; the connection may have been lost")
+        help("the namespace closed or the connection dropped before the server answered")
     )]
     Recv(#[from] oneshot::error::RecvError),
 

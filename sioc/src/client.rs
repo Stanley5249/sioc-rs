@@ -183,7 +183,11 @@ impl<C> ClientBuilder<C>
 where
     C: WebSocketConnector + Clone,
 {
-    /// Override the Engine.IO path segment (default: `"socket.io"`).
+    /// Override the Engine.IO path, joined to the URL (default:
+    /// `"socket.io/"`).
+    ///
+    /// Keep the trailing slash: by default the server matches its path with
+    /// one, as engine.io's `addTrailingSlash` option does.
     pub fn path(mut self, path: impl Into<String>) -> Self {
         self.path = path.into();
         self
@@ -382,7 +386,8 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Returns an error if the client has ended.
+    /// Returns [`SocketError::NamespaceConflict`] if the namespace is already
+    /// open, or [`SocketError::Closed`] if the client has ended.
     pub async fn connect_with<S, B>(
         &self,
         ns: S,
@@ -478,7 +483,9 @@ impl SocketSender {
     ///
     /// # Errors
     ///
-    /// Returns [`SocketError::Closed`] once the namespace is closed.
+    /// Returns [`SocketError::AttachmentCount`] if a binary packet has zero or
+    /// more than [`MAX_ATTACHMENTS`](crate::binary::MAX_ATTACHMENTS)
+    /// attachments, or [`SocketError::Closed`] once the namespace is closed.
     pub async fn send(&self, packet: ClientPacket) -> Result<(), SocketError> {
         if self.closed.is_cancelled() {
             return Err(SocketError::Closed);
@@ -516,7 +523,8 @@ impl SocketSender {
     ///
     /// # Errors
     ///
-    /// Returns an error if serialization fails or the namespace has closed.
+    /// Returns an error if serialization fails, or any error from
+    /// [`send`](Self::send).
     pub async fn emit<E, A, B>(&self, event: E) -> Result<E::Output, SocketError>
     where
         E: Emit<A, B>,
@@ -532,7 +540,8 @@ impl SocketSender {
     ///
     /// # Errors
     ///
-    /// Returns an error if serialization fails or the namespace has closed.
+    /// Returns an error if serialization fails, or any error from
+    /// [`send`](Self::send).
     pub async fn acknowledge<T, A, B>(&self, id: AckId<A>, payload: T) -> Result<(), SocketError>
     where
         T: Acknowledge<A, B>,
@@ -545,8 +554,11 @@ impl SocketSender {
 
     /// Disconnects the namespace for every clone.
     ///
-    /// Events and acks sent before the call still go out, followed by a
-    /// DISCONNECT packet. Later sends fail with [`SocketError::Closed`].
+    /// Once the server has confirmed the namespace, events and acks sent
+    /// before the call still go out, followed by a DISCONNECT packet. Before
+    /// that, buffered events are discarded and no DISCONNECT goes out, because
+    /// socket.io-client's `Socket.disconnect` sends one only to a connected
+    /// namespace. Later sends fail with [`SocketError::Closed`].
     /// Calling it after the namespace has closed, by either side, does
     /// nothing.
     pub fn disconnect(&self) {
