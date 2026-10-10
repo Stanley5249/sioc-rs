@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use bytestring::ByteString;
-use eioc::prelude::{Event, Handshake, Message};
+use eioc::prelude::{Handshake, Message, ServerMessage};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -17,7 +17,7 @@ const CONNECT_RESPONSE: &str = "0{\"sid\":\"test\"}";
 
 /// The engine end of one session, which a test plays.
 struct TestSession {
-    event_tx: mpsc::Sender<Event>,
+    server_message_tx: mpsc::Sender<ServerMessage>,
     client_message_rx: mpsc::Receiver<Message>,
     /// Finishes the engine; dropping it finishes the engine without an error.
     result_tx: oneshot::Sender<Result<(), eioc::error::Error>>,
@@ -30,11 +30,11 @@ impl TestSession {
     /// Returns the client messages that were still queued.
     async fn end(self) -> Vec<Message> {
         let Self {
-            event_tx,
+            server_message_tx,
             mut client_message_rx,
             result_tx,
         } = self;
-        drop(event_tx);
+        drop(server_message_tx);
         let mut messages = Vec::new();
         while let Some(message) = client_message_rx.recv().await {
             messages.push(message);
@@ -89,12 +89,12 @@ impl TestManager {
     async fn spawn_with(backoff: Option<Backoff>) -> Self {
         let (connect_request_tx, connect_request_rx) = mpsc::channel(32);
         let (session_tx, mut session_rx) = mpsc::channel(1);
-        let connect_engine = move |event_tx, client_message_rx| {
+        let connect_engine = move |server_message_tx, client_message_rx| {
             let session_tx = session_tx.clone();
             async move {
                 let (result_tx, result_rx) = oneshot::channel();
                 let session = TestSession {
-                    event_tx,
+                    server_message_tx,
                     client_message_rx,
                     result_tx,
                 };
@@ -170,26 +170,24 @@ impl TestManager {
             max_payload: 1_000_000,
         };
         self.session()
-            .event_tx
-            .send(Event::Open(handshake))
+            .server_message_tx
+            .send(ServerMessage::Open(handshake))
             .await
             .unwrap();
     }
 
     async fn send_server_message(&mut self, text: &'static str) {
-        let message = Message::Text(ByteString::from_static(text));
         self.session()
-            .event_tx
-            .send(Event::Message(message))
+            .server_message_tx
+            .send(ServerMessage::Text(ByteString::from_static(text)))
             .await
             .unwrap();
     }
 
     async fn send_server_binary(&mut self, bytes: &'static [u8]) {
-        let message = Message::Binary(Bytes::from_static(bytes));
         self.session()
-            .event_tx
-            .send(Event::Message(message))
+            .server_message_tx
+            .send(ServerMessage::Binary(Bytes::from_static(bytes)))
             .await
             .unwrap();
     }
@@ -770,7 +768,7 @@ async fn closed_engine_channel_is_error() {
         task,
     } = TestManager::spawn().await;
     let TestSession {
-        event_tx,
+        server_message_tx,
         client_message_rx,
         result_tx,
     } = session.unwrap();
@@ -780,7 +778,7 @@ async fn closed_engine_channel_is_error() {
     // The failed CONNECT drops the reply.
     handles.reply_rx.await.unwrap_err();
 
-    drop(event_tx);
+    drop(server_message_tx);
     drop(result_tx);
     assert!(matches!(
         task.await.unwrap(),
@@ -791,27 +789,29 @@ async fn closed_engine_channel_is_error() {
 /// Breaks the protocol in an open session, then checks that the manager closes
 /// the session, keeps accepting server messages until the engine hangs up, and
 /// reconnects.
-async fn assert_protocol_error_reconnects(breach: &[Message]) {
+async fn assert_protocol_error_reconnects(breach: &[ServerMessage]) {
     let mut manager = TestManager::spawn_reconnecting().await;
     let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
     manager.send_server_message(CONNECT_RESPONSE).await;
     server_packet_rx.recv().await.unwrap();
 
     let TestSession {
-        event_tx,
+        server_message_tx,
         mut client_message_rx,
         result_tx,
     } = manager.session.take().unwrap();
-    for message in breach {
-        event_tx
-            .send(Event::Message(message.clone()))
+    for server_message in breach {
+        server_message_tx
+            .send(server_message.clone())
             .await
             .unwrap();
     }
     assert!(client_message_rx.recv().await.is_none());
-    let late = Message::Text(ByteString::from_static(r#"2["late"]"#));
-    event_tx.send(Event::Message(late)).await.unwrap();
-    drop(event_tx);
+    server_message_tx
+        .send(ServerMessage::Text(ByteString::from_static(r#"2["late"]"#)))
+        .await
+        .unwrap();
+    drop(server_message_tx);
     result_tx.send(Ok(())).unwrap();
 
     manager.session = manager.session_rx.recv().await;
@@ -829,14 +829,14 @@ async fn assert_protocol_error_reconnects(breach: &[Message]) {
 
 #[tokio::test]
 async fn unexpected_binary_reconnects() {
-    assert_protocol_error_reconnects(&[Message::Binary(Bytes::from_static(b"\xFF"))]).await;
+    assert_protocol_error_reconnects(&[ServerMessage::Binary(Bytes::from_static(b"\xFF"))]).await;
 }
 
 #[tokio::test]
 async fn text_during_binary_reassembly_reconnects() {
     assert_protocol_error_reconnects(&[
-        Message::Text(ByteString::from_static(r#"51-["img"]"#)),
-        Message::Text(ByteString::from_static(r#"2["oops"]"#)),
+        ServerMessage::Text(ByteString::from_static(r#"51-["img"]"#)),
+        ServerMessage::Text(ByteString::from_static(r#"2["oops"]"#)),
     ])
     .await;
 }

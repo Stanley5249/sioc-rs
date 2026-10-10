@@ -9,7 +9,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use bytestring::ByteString;
-use eioc::prelude::{Event, Message};
+use eioc::prelude::{Message, ServerMessage};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Sleep;
 use tracing::Instrument;
@@ -31,7 +31,7 @@ pub async fn run_engines<F, Fut>(
     mut connect_engine: F,
     channels: ChannelConfig,
 ) where
-    F: FnMut(mpsc::Sender<Event>, mpsc::Receiver<Message>) -> Fut,
+    F: FnMut(mpsc::Sender<ServerMessage>, mpsc::Receiver<Message>) -> Fut,
     Fut: Future<Output = Result<(), eioc::error::Error>>,
 {
     while let Some(request) = open_request_rx.recv().await {
@@ -42,14 +42,14 @@ pub async fn run_engines<F, Fut>(
             engine_result_tx,
         } = request;
 
-        let (event_tx, event_rx) = mpsc::channel(channels.manager);
+        let (server_message_tx, server_message_rx) = mpsc::channel(channels.manager);
 
-        let engine = connect_engine(event_tx, client_message_rx);
+        let engine = connect_engine(server_message_tx, client_message_rx);
 
         let engine_result = async {
             let (server_result, engine_result) = tokio::join!(
                 crate::manager::server_message::server_messages_to_packets(
-                    event_rx,
+                    server_message_rx,
                     routes,
                     server_event_tx,
                 ),

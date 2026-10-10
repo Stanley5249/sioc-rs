@@ -302,13 +302,13 @@ where
         let (connect_request_tx, connect_request_rx) = mpsc::channel(channels.manager);
 
         // Each engine gets its own connector.
-        let connect_engine = move |event_tx, client_message_rx| {
+        let connect_engine = move |server_message_tx, client_message_rx| {
             eioc::engine::session::connect(
                 url.clone(),
                 http_client.clone(),
                 websocket_connector.clone(),
                 transport_strategy,
-                event_tx,
+                server_message_tx,
                 client_message_rx,
                 timeout,
                 channels.engine,

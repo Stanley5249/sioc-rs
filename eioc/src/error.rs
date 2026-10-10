@@ -5,7 +5,7 @@ use miette::Diagnostic;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::packet::{Event, Frame, Handshake};
+use crate::packet::{Frame, Handshake, ServerMessage};
 
 /// Top-level error aggregator for `eioc`.
 #[derive(Debug, Error, Diagnostic)]
@@ -35,7 +35,9 @@ impl Error {
 
             Self::Transport(TransportError::ServerFrame(_) | TransportError::Handshake(_))
             | Self::Engine(
-                EngineError::ClientFrame(_) | EngineError::Event(_) | EngineError::Handshake(_),
+                EngineError::ClientFrame(_)
+                | EngineError::ServerMessage(_)
+                | EngineError::Handshake(_),
             ) => true,
         }
     }
@@ -50,11 +52,11 @@ pub enum EngineError {
     #[diagnostic(code(eioc::engine::client_frame), help("library bug, please report"))]
     ClientFrame(#[from] mpsc::error::SendError<Frame>),
 
-    /// Delivering an event to the upper layer failed because its receiver is
-    /// gone.
-    #[error("event channel closed")]
-    #[diagnostic(code(eioc::engine::event), help("library bug, please report"))]
-    Event(#[from] mpsc::error::SendError<Event>),
+    /// Delivering a server message to the upper layer failed because its
+    /// receiver is gone.
+    #[error("server message channel closed")]
+    #[diagnostic(code(eioc::engine::server_message), help("library bug, please report"))]
+    ServerMessage(#[from] mpsc::error::SendError<ServerMessage>),
 
     /// The handshake oneshot channel was dropped before the server responded.
     #[error("failed to receive Engine.IO handshake")]
@@ -213,7 +215,6 @@ pub enum PacketError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::packet::Message;
 
     fn frame() -> Frame {
         crate::packet::Packet::Noop.into()
@@ -249,10 +250,8 @@ mod tests {
             TransportError::ServerFrame(mpsc::error::SendError(frame())).into(),
             TransportError::Handshake(handshake).into(),
             EngineError::ClientFrame(mpsc::error::SendError(frame())).into(),
-            EngineError::Event(mpsc::error::SendError(Event::Message(Message::Text(
-                "".into(),
-            ))))
-            .into(),
+            EngineError::ServerMessage(mpsc::error::SendError(ServerMessage::Text("".into())))
+                .into(),
             EngineError::Handshake(handshake_rx.await.unwrap_err()).into(),
         ];
         for error in errors {

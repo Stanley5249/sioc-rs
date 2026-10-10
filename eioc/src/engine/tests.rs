@@ -8,7 +8,7 @@ use tokio::task::JoinHandle;
 use url::Url;
 
 use crate::error::{EngineError, Error, TransportError};
-use crate::packet::{Event, Frame, Handshake, Message, Packet};
+use crate::packet::{Frame, Handshake, Message, Packet, ServerMessage};
 use crate::transport::TransportStrategy;
 
 fn make_handshake() -> Handshake {
@@ -25,16 +25,16 @@ fn make_handshake() -> Handshake {
 /// channels, past its `Open` event.
 struct TestEngine {
     server_frame_tx: mpsc::Sender<Frame>,
-    event_rx: mpsc::Receiver<Event>,
+    server_message_rx: mpsc::Receiver<ServerMessage>,
     client_message_tx: mpsc::Sender<Message>,
     client_frame_rx: mpsc::Receiver<Frame>,
     task: JoinHandle<Result<(), EngineError>>,
 }
 
 impl TestEngine {
-    async fn spawn(handshake: Handshake, event_capacity: usize) -> Self {
+    async fn spawn(handshake: Handshake, server_message_capacity: usize) -> Self {
         let (server_frame_tx, server_frame_rx) = mpsc::channel(4);
-        let (event_tx, mut event_rx) = mpsc::channel(event_capacity);
+        let (server_message_tx, mut server_message_rx) = mpsc::channel(server_message_capacity);
         let (client_message_tx, client_message_rx) = mpsc::channel(4);
         let (client_frame_tx, client_frame_rx) = mpsc::channel(4);
         let (handshake_tx, handshake_rx) = oneshot::channel();
@@ -43,7 +43,7 @@ impl TestEngine {
             let mut client_message_rx = client_message_rx;
             crate::engine::protocol::run_protocol(
                 server_frame_rx,
-                event_tx,
+                server_message_tx,
                 &mut client_message_rx,
                 client_frame_tx,
                 handshake_rx,
@@ -51,10 +51,13 @@ impl TestEngine {
             )
             .await
         });
-        assert!(matches!(event_rx.recv().await, Some(Event::Open(_))));
+        assert!(matches!(
+            server_message_rx.recv().await,
+            Some(ServerMessage::Open(_))
+        ));
         Self {
             server_frame_tx,
-            event_rx,
+            server_message_rx,
             client_message_tx,
             client_frame_rx,
             task,
@@ -71,7 +74,7 @@ impl TestEngine {
     async fn finish(self) -> (Result<(), EngineError>, Vec<Frame>, Vec<Message>) {
         let Self {
             server_frame_tx,
-            mut event_rx,
+            mut server_message_rx,
             client_message_tx,
             mut client_frame_rx,
             task,
@@ -87,11 +90,12 @@ impl TestEngine {
         };
         let messages = async move {
             let mut messages = Vec::new();
-            while let Some(event) = event_rx.recv().await {
-                let Event::Message(message) = event else {
-                    panic!("expected a message, got {event:?}");
-                };
-                messages.push(message);
+            while let Some(server_message) = server_message_rx.recv().await {
+                messages.push(match server_message {
+                    ServerMessage::Text(text) => Message::Text(text),
+                    ServerMessage::Binary(bytes) => Message::Binary(bytes),
+                    ServerMessage::Open(_) => panic!("a second open"),
+                });
             }
             messages
         };
@@ -103,14 +107,14 @@ impl TestEngine {
 #[tokio::test]
 async fn protocol_handshake_dropped_is_error() {
     let (_server_frame_tx, server_frame_rx) = mpsc::channel(4);
-    let (event_tx, _event_rx) = mpsc::channel(4);
+    let (server_message_tx, _server_message_rx) = mpsc::channel(4);
     let (_client_message_tx, mut client_message_rx) = mpsc::channel(4);
     let (client_frame_tx, _) = mpsc::channel(4);
     let (handshake_tx, handshake_rx) = oneshot::channel::<Handshake>();
     drop(handshake_tx);
     let result = crate::engine::protocol::run_protocol(
         server_frame_rx,
-        event_tx,
+        server_message_tx,
         &mut client_message_rx,
         client_frame_tx,
         handshake_rx,
@@ -123,13 +127,13 @@ async fn protocol_handshake_dropped_is_error() {
 #[tokio::test]
 async fn protocol_handshake_times_out() {
     let (_server_frame_tx, server_frame_rx) = mpsc::channel(4);
-    let (event_tx, mut event_rx) = mpsc::channel(4);
+    let (server_message_tx, mut server_message_rx) = mpsc::channel(4);
     let (_client_message_tx, mut client_message_rx) = mpsc::channel(4);
     let (client_frame_tx, _client_frame_rx) = mpsc::channel(4);
     let (_handshake_tx, handshake_rx) = oneshot::channel::<Handshake>();
     let result = crate::engine::protocol::run_protocol(
         server_frame_rx,
-        event_tx,
+        server_message_tx,
         &mut client_message_rx,
         client_frame_tx,
         handshake_rx,
@@ -137,13 +141,13 @@ async fn protocol_handshake_times_out() {
     )
     .await;
     assert!(matches!(result, Err(EngineError::HandshakeTimeout)));
-    assert!(event_rx.recv().await.is_none());
+    assert!(server_message_rx.recv().await.is_none());
 }
 
 #[tokio::test]
 async fn protocol_reports_open_before_messages() {
     let (server_frame_tx, server_frame_rx) = mpsc::channel(4);
-    let (event_tx, mut event_rx) = mpsc::channel(4);
+    let (server_message_tx, mut server_message_rx) = mpsc::channel(4);
     let (client_message_tx, mut client_message_rx) = mpsc::channel(4);
     let (client_frame_tx, _client_frame_rx) = mpsc::channel(4);
     let (handshake_tx, handshake_rx) = oneshot::channel();
@@ -155,42 +159,42 @@ async fn protocol_reports_open_before_messages() {
     handshake_tx.send(make_handshake()).unwrap();
     let protocol = crate::engine::protocol::run_protocol(
         server_frame_rx,
-        event_tx,
+        server_message_tx,
         &mut client_message_rx,
         client_frame_tx,
         handshake_rx,
         Some(Duration::from_secs(20)),
     );
-    let events = async {
-        let mut events = Vec::new();
-        while let Some(event) = event_rx.recv().await {
-            events.push(event);
+    let server_messages = async {
+        let mut server_messages = Vec::new();
+        while let Some(server_message) = server_message_rx.recv().await {
+            server_messages.push(server_message);
         }
         drop(client_message_tx);
-        events
+        server_messages
     };
-    let (result, events) = tokio::join!(protocol, events);
+    let (result, server_messages) = tokio::join!(protocol, server_messages);
     result.unwrap();
     assert_eq!(
-        events,
+        server_messages,
         [
-            Event::Open(make_handshake()),
-            Event::Message(Message::Text("first".into())),
+            ServerMessage::Open(make_handshake()),
+            ServerMessage::Text("first".into()),
         ]
     );
 }
 
 #[tokio::test]
-async fn protocol_transport_closed_ends_event_stream() {
+async fn protocol_transport_closed_ends_message_stream() {
     let TestEngine {
         server_frame_tx,
-        mut event_rx,
+        mut server_message_rx,
         client_message_tx,
         mut client_frame_rx,
         task,
     } = TestEngine::spawn(make_handshake(), 4).await;
     drop(server_frame_tx);
-    assert!(event_rx.recv().await.is_none());
+    assert!(server_message_rx.recv().await.is_none());
     assert!(client_frame_rx.recv().await.is_none());
     drop(client_message_tx);
     task.await.unwrap().unwrap();
@@ -200,7 +204,7 @@ async fn protocol_transport_closed_ends_event_stream() {
 async fn protocol_client_close_ends_frame_stream() {
     let TestEngine {
         server_frame_tx,
-        mut event_rx,
+        mut server_message_rx,
         client_message_tx,
         mut client_frame_rx,
         task,
@@ -215,10 +219,10 @@ async fn protocol_client_close_ends_frame_stream() {
         .unwrap();
     drop(server_frame_tx);
     assert!(matches!(
-        event_rx.recv().await,
-        Some(Event::Message(Message::Text(t))) if t == "late"
+        server_message_rx.recv().await,
+        Some(ServerMessage::Text(t)) if t == "late"
     ));
-    assert!(event_rx.recv().await.is_none());
+    assert!(server_message_rx.recv().await.is_none());
     task.await.unwrap().unwrap();
 }
 
@@ -226,13 +230,13 @@ async fn protocol_client_close_ends_frame_stream() {
 async fn protocol_accepts_client_messages_until_sender_dropped() {
     let TestEngine {
         server_frame_tx,
-        mut event_rx,
+        mut server_message_rx,
         client_message_tx,
         mut client_frame_rx,
         task,
     } = TestEngine::spawn(make_handshake(), 4).await;
     drop(server_frame_tx);
-    assert!(event_rx.recv().await.is_none());
+    assert!(server_message_rx.recv().await.is_none());
     assert!(client_frame_rx.recv().await.is_none());
     client_message_tx
         .send(Message::Text("late".into()))
@@ -336,7 +340,7 @@ async fn protocol_server_messages_forwarded() {
 async fn protocol_client_messages_sent_to_transport() {
     let TestEngine {
         server_frame_tx,
-        event_rx: _event_rx,
+        server_message_rx: _server_message_rx,
         client_message_tx,
         mut client_frame_rx,
         task,
@@ -378,39 +382,42 @@ async fn protocol_heartbeat_timeout_fires() {
 }
 
 #[tokio::test]
-async fn protocol_closed_event_receiver_is_error() {
+async fn protocol_closed_message_receiver_is_error() {
     let TestEngine {
         server_frame_tx,
-        event_rx,
+        server_message_rx,
         client_message_tx: _client_message_tx,
         client_frame_rx: _client_frame_rx,
         task,
     } = TestEngine::spawn(make_handshake(), 4).await;
-    drop(event_rx);
+    drop(server_message_rx);
     server_frame_tx
         .send(Packet::Message("x".into()).into())
         .await
         .unwrap();
-    assert!(matches!(task.await.unwrap(), Err(EngineError::Event(_))));
+    assert!(matches!(
+        task.await.unwrap(),
+        Err(EngineError::ServerMessage(_))
+    ));
 }
 
 #[tokio::test]
 async fn session_failure_accepts_client_messages_until_hang_up() {
-    let (event_tx, mut event_rx) = mpsc::channel(4);
+    let (server_message_tx, mut server_message_rx) = mpsc::channel(4);
     let (client_message_tx, client_message_rx) = mpsc::channel(4);
     let session = tokio::spawn(crate::engine::session::connect(
         Url::parse("http://localhost:3000/").unwrap(),
         reqwest::Client::new(),
         async |_| Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused).into()),
         TransportStrategy::WebSocket,
-        event_tx,
+        server_message_tx,
         client_message_rx,
         None,
         4,
         4,
     ));
 
-    assert!(event_rx.recv().await.is_none());
+    assert!(server_message_rx.recv().await.is_none());
     client_message_tx
         .send(Message::Text("late".into()))
         .await

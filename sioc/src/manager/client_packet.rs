@@ -6,7 +6,7 @@ use std::ops::ControlFlow;
 
 use bytes::Bytes;
 use bytestring::ByteString;
-use eioc::prelude::{Event, Message};
+use eioc::prelude::{Message, ServerMessage};
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use tokio::sync::mpsc;
@@ -98,7 +98,7 @@ pub async fn client_packets_to_messages<F, Fut>(
     backoff: Option<Backoff>,
 ) -> Result<(), ManagerError>
 where
-    F: FnMut(mpsc::Sender<Event>, mpsc::Receiver<Message>) -> Fut,
+    F: FnMut(mpsc::Sender<ServerMessage>, mpsc::Receiver<Message>) -> Fut,
     Fut: Future<Output = Result<(), eioc::error::Error>>,
 {
     let routes = Routes::default();

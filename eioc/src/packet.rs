@@ -30,15 +30,17 @@ impl std::fmt::Display for Message {
     }
 }
 
-/// What the engine reports to the upper layer, like engine.io-client's
-/// `Socket` events.
+/// What the engine delivers from the server to the upper layer, like
+/// engine.io-client's `Socket` events.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Event {
+pub enum ServerMessage {
     /// The server accepted the handshake, like the `"open"` event. Always the
-    /// first event of a session, and sent once.
+    /// first item of a session, and sent once.
     Open(Handshake),
-    /// A message from the server, like the `"message"` event.
-    Message(Message),
+    /// A UTF-8 text payload, like the `"message"` event.
+    Text(ByteString),
+    /// A raw binary payload, like the `"message"` event.
+    Binary(Bytes),
 }
 
 /// A wire-level frame exchanged with the transport layer.

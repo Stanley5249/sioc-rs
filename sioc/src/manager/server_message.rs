@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 use bytestring::ByteString;
-use eioc::prelude::{Event, Message};
+use eioc::prelude::ServerMessage;
 use tokio::sync::mpsc;
 
 use crate::error::{ManagerError, PacketError};
@@ -20,11 +20,11 @@ pub enum ServerEvent {
 }
 
 /// Delivers server packets to the namespace receivers until the engine closes
-/// `event_rx`.
+/// `server_message_rx`.
 ///
 /// Waiting on a full receiver holds up only this direction. After an error,
 /// drops `server_event_tx`, which tells the client-packet loop to close the
-/// engine, and discards engine events until the engine hangs up, so the
+/// engine, and discards server messages until the engine hangs up, so the
 /// engine never sees a failed send.
 ///
 /// # Errors
@@ -32,41 +32,41 @@ pub enum ServerEvent {
 /// Returns an error if the server breaks the protocol, or if the client-packet
 /// loop stopped while a namespace was still connecting.
 pub async fn server_messages_to_packets(
-    mut event_rx: mpsc::Receiver<Event>,
+    mut server_message_rx: mpsc::Receiver<ServerMessage>,
     routes: &Routes,
     server_event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<(), ManagerError> {
-    let result = deliver_server_messages(&mut event_rx, routes, &server_event_tx).await;
+    let result = deliver_server_messages(&mut server_message_rx, routes, &server_event_tx).await;
 
     drop(server_event_tx);
 
-    while event_rx.recv().await.is_some() {}
+    while server_message_rx.recv().await.is_some() {}
 
-    tracing::debug!("event channel closed");
+    tracing::debug!("server message channel closed");
 
     result
 }
 
-/// Delivers server packets until the engine closes `event_rx` or the server
-/// breaks the protocol.
+/// Delivers server packets until the engine closes `server_message_rx` or the
+/// server breaks the protocol.
 async fn deliver_server_messages(
-    event_rx: &mut mpsc::Receiver<Event>,
+    server_message_rx: &mut mpsc::Receiver<ServerMessage>,
     routes: &Routes,
     server_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<(), ManagerError> {
     let mut reconstructor = None;
 
-    while let Some(event) = event_rx.recv().await {
-        match event {
-            Event::Open(handshake) => {
+    while let Some(server_message) = server_message_rx.recv().await {
+        match server_message {
+            ServerMessage::Open(handshake) => {
                 tracing::debug!(sid = %handshake.sid, "engine opened");
 
                 send_server_event(server_event_tx, ServerEvent::Opened)?;
             }
-            Event::Message(Message::Text(text)) => {
+            ServerMessage::Text(text) => {
                 route_text(text, routes, server_event_tx, &mut reconstructor).await?;
             }
-            Event::Message(Message::Binary(attachment)) => {
+            ServerMessage::Binary(attachment) => {
                 route_binary(attachment, routes, &mut reconstructor).await?;
             }
         }
