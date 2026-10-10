@@ -15,7 +15,7 @@ It adds _namespaces_ for multiple channels over a single connection, _events_ as
 - Derive macros for events and acks.
 - Reconnection like the JavaScript client: after a dropped connection, the client backs off, opens a new Engine.IO session, and connects every open namespace again.
 - Event handling lives in match arms, no callbacks with boxed futures.
-- State lives in the enclosing scope, no Arc or Mutex.
+- Application state lives in the enclosing scope.
 - Zero-copy packet parsing via [`bytestring`](https://docs.rs/bytestring) and [`bytes`](https://docs.rs/bytes).
 
 ## License
