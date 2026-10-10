@@ -173,7 +173,7 @@ while let Some(event) = rx.listen::<ChatEvent>().await? {
 
 ### Reconnection
 
-When the connection drops, the client reconnects with the same backoff as the JavaScript client and connects every open namespace again. Each reconnection shows up as another `ServerPacket::Connect` on the receiver. Events emitted meanwhile wait until the server confirms the namespace, and acks of events that already went out fail. Pass a `ReconnectionConfig` to tune it, or `None` to end the client instead.
+When the connection drops, the client reconnects with the same backoff as the JavaScript client and connects every open namespace again. Each reconnection shows up as another `ServerPacket::Connect` on the receiver. Events emitted meanwhile wait until the server confirms the namespace, and acks of events that already went out fail. Pass a `ReconnectionConfig` to tune it, or `None` to turn it off.
 
 ```rust
 let client = ClientBuilder::new(url)
