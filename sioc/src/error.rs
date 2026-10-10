@@ -59,6 +59,13 @@ pub enum Error {
 /// [`ClientBuilder::open`](crate::client::ClientBuilder::open).
 #[derive(Debug, Error, Diagnostic)]
 pub enum ClientBuilderError {
+    /// A bounded channel requires a positive capacity.
+    #[error("channel capacity for {channel} must be positive")]
+    #[diagnostic(code(sioc::builder::zero_capacity))]
+    ZeroCapacity {
+        /// The channel configuration field with a zero capacity.
+        channel: &'static str,
+    },
     /// URL construction failed.
     #[error("invalid URL")]
     #[diagnostic(code(sioc::builder::url))]
@@ -82,6 +89,14 @@ pub enum ClientError {
 /// Error returned by [`SocketSender`](crate::client::SocketSender) operations.
 #[derive(Debug, Error, Diagnostic)]
 pub enum SocketError {
+    /// A binary packet has zero attachments or exceeds
+    /// [`MAX_ATTACHMENTS`](crate::binary::MAX_ATTACHMENTS).
+    #[error("invalid attachment count: {count}")]
+    #[diagnostic(code(sioc::socket::attachment_count))]
+    AttachmentCount {
+        /// The number of attachments supplied.
+        count: usize,
+    },
     /// A namespace with this name is already open on the client.
     #[error("namespace conflict: `{ns}`")]
     #[diagnostic(code(sioc::socket::namespace_conflict))]
@@ -179,6 +194,15 @@ pub enum AckIdError {
 /// binary policy.
 #[derive(Debug, Error, Diagnostic)]
 pub enum AttachmentsError {
+    /// A placeholder references an attachment outside the supplied list.
+    #[error("attachment slot {slot} is outside {count} attachments")]
+    #[diagnostic(code(sioc::attachments::invalid_slot))]
+    InvalidSlot {
+        /// The requested zero-based slot.
+        slot: usize,
+        /// The number of supplied attachments.
+        count: usize,
+    },
     /// Type declares `HasBinary` but no attachments were in the packet.
     #[error("attachments were missing")]
     #[diagnostic(
@@ -205,6 +229,19 @@ pub enum AttachmentsError {
 /// Callers receive this wrapped in [`ManagerError::Packet`].
 #[derive(Debug, Error, Diagnostic)]
 pub enum PacketError {
+    /// A binary packet has zero attachments or exceeds
+    /// [`MAX_ATTACHMENTS`](crate::binary::MAX_ATTACHMENTS).
+    #[error("invalid attachment count: {count}")]
+    #[diagnostic(code(sioc::parse::attachment_count))]
+    AttachmentCount {
+        /// The count declared by the packet.
+        count: usize,
+    },
+
+    /// A binary placeholder has a missing, non-integer, or out-of-range slot.
+    #[error("invalid binary placeholder")]
+    #[diagnostic(code(sioc::parse::invalid_placeholder))]
+    InvalidPlaceholder,
     /// JSON payload in the packet is malformed.
     #[error(transparent)]
     #[diagnostic(code(sioc::parse::json))]

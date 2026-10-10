@@ -18,7 +18,7 @@ pub mod prelude {
     pub use sioc_macros::{AckType, DeserializePayload, EventRouter, EventType, SerializePayload};
 
     pub use crate::ack::{Ack, AckHandle, AckType};
-    pub use crate::binary::{AttachmentsBuilder, Placeholder};
+    pub use crate::binary::{AttachmentsBuilder, MAX_ATTACHMENTS, Placeholder};
     pub use crate::client::{
         Acknowledge, ChannelConfig, Client, ClientBuilder, Emit, ReconnectionConfig,
         SocketReceiver, SocketSender,

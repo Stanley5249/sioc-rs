@@ -11,6 +11,13 @@ use bytes::Bytes;
 use serde::ser::{SerializeStruct, Serializer};
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::error::AttachmentsError;
+
+/// Maximum attachments in a binary packet, matching the JavaScript parser's
+/// default. The limit bounds reconstruction state independently of channel
+/// capacities.
+pub const MAX_ATTACHMENTS: usize = 10;
+
 /// A binary attachment placeholder serialised as
 /// `{"_placeholder": true, "num": <index>}`.
 ///
@@ -28,6 +35,20 @@ impl Placeholder {
     #[must_use]
     pub fn slot(self) -> usize {
         self.slot
+    }
+
+    /// Returns the attachment referenced by this placeholder.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the placeholder is outside `attachments`.
+    pub fn get(self, attachments: &[Bytes]) -> Result<&Bytes, AttachmentsError> {
+        attachments
+            .get(self.slot)
+            .ok_or(AttachmentsError::InvalidSlot {
+                slot: self.slot,
+                count: attachments.len(),
+            })
     }
 }
 
@@ -129,6 +150,23 @@ mod tests {
         let json = r#"{"_placeholder":false,"num":0}"#;
         let result: Result<Placeholder, _> = serde_json::from_str(json);
         result.unwrap_err();
+    }
+
+    #[test]
+    fn checked_attachment_access_rejects_invalid_slots() {
+        let attachments = [Bytes::from_static(b"data")];
+        assert_eq!(
+            Placeholder { slot: 0 }.get(&attachments).unwrap(),
+            &attachments[0]
+        );
+        assert!(matches!(
+            Placeholder { slot: 1 }.get(&attachments),
+            Err(AttachmentsError::InvalidSlot { slot: 1, count: 1 })
+        ));
+        assert!(matches!(
+            Placeholder { slot: 0 }.get(&[]),
+            Err(AttachmentsError::InvalidSlot { slot: 0, count: 0 })
+        ));
     }
 
     #[test]

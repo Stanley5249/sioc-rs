@@ -3,7 +3,8 @@
 use bytes::Bytes;
 use bytestring::ByteString;
 use eioc::prelude::ServerMessage;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 use crate::error::{ManagerError, PacketError};
 use crate::manager::routes::Routes;
@@ -119,7 +120,7 @@ async fn route_text(
         Packet::Disconnect => {
             tracing::debug!(%ns, "server closed");
 
-            send_server_packet(routes.close(&ns), &ns, ServerPacket::Disconnect).await;
+            send_terminal_packet(routes.close(&ns), &ns, ServerPacket::Disconnect);
         }
         Packet::Event { payload, id } => {
             let event = DynEvent::new(payload, id);
@@ -135,16 +136,49 @@ async fn route_text(
             tracing::debug!(%ns, %error, "namespace connection refused");
 
             // The server refused the namespace, so it closes like a DISCONNECT.
-            send_server_packet(routes.close(&ns), &ns, ServerPacket::ConnectError(error)).await;
+            send_terminal_packet(routes.close(&ns), &ns, ServerPacket::ConnectError(error));
         }
         Packet::BinaryEvent { payload, id, count } => {
+            validate_placeholders(&payload, count)?;
             *reconstructor = Some(Ns(ns, BinaryPacket::event(payload, id, count)));
         }
         Packet::BinaryAck { payload, id, count } => {
+            validate_placeholders(&payload, count)?;
             *reconstructor = Some(Ns(ns, BinaryPacket::ack(payload, id, count)));
         }
     }
 
+    Ok(())
+}
+
+/// Validate before retaining attachment frames, so invalid references cannot
+/// reach application indexing code or hold reconstruction open.
+fn validate_placeholders(payload: &str, count: usize) -> Result<(), PacketError> {
+    let value: serde_json::Value = serde_json::from_str(payload)?;
+    validate_placeholder_value(&value, count)
+}
+
+fn validate_placeholder_value(value: &serde_json::Value, count: usize) -> Result<(), PacketError> {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                validate_placeholder_value(value, count)?;
+            }
+        }
+        serde_json::Value::Object(values) => {
+            if values.get("_placeholder") == Some(&serde_json::Value::Bool(true)) {
+                let slot = values.get("num").and_then(serde_json::Value::as_u64);
+                if slot.is_none_or(|slot| slot >= count as u64) {
+                    return Err(PacketError::InvalidPlaceholder);
+                }
+            } else {
+                for value in values.values() {
+                    validate_placeholder_value(value, count)?;
+                }
+            }
+        }
+        _ => {}
+    }
     Ok(())
 }
 
@@ -201,17 +235,39 @@ async fn route_binary(
 /// and the caller may drop a receiver it no longer reads, so both are
 /// discarded.
 async fn send_server_packet(
-    server_packet_tx: Option<mpsc::Sender<ServerPacket>>,
+    server_packet_tx: Option<(mpsc::Sender<ServerPacket>, CancellationToken)>,
     ns: &ByteString,
     server_packet: ServerPacket,
 ) {
-    let Some(server_packet_tx) = server_packet_tx else {
+    let Some((server_packet_tx, closed)) = server_packet_tx else {
         tracing::debug!(%ns, "discarded server packet for a closed namespace");
         return;
     };
 
-    if server_packet_tx.send(server_packet).await.is_err() {
-        tracing::debug!(%ns, "discarded server packet for a dropped receiver");
+    // Cancellation discards the packet that has not entered the queue.
+    // Buffered packets remain available to the receiver.
+    tokio::select! {
+        biased;
+        () = closed.cancelled() => {
+            tracing::debug!(%ns, "discarded server packet for a closed namespace");
+        }
+        result = server_packet_tx.send(server_packet) => {
+            if result.is_err() {
+                tracing::debug!(%ns, "discarded server packet for a dropped receiver");
+            }
+        }
+    }
+}
+
+/// One terminal packet per route needs one slot, independent of the data
+/// queue, so closing a namespace never waits for its consumer.
+fn send_terminal_packet(
+    terminal_packet_tx: Option<oneshot::Sender<ServerPacket>>,
+    ns: &ByteString,
+    packet: ServerPacket,
+) {
+    if terminal_packet_tx.is_some_and(|tx| tx.send(packet).is_err()) {
+        tracing::debug!(%ns, "discarded terminal packet for a dropped receiver");
     }
 }
 

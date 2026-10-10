@@ -6,6 +6,7 @@ use crate::attrs::SiocInput;
 
 struct ExpandData {
     enum_ident: syn::Ident,
+    generics: syn::Generics,
     helper_ident: syn::Ident,
     visitor_ident: syn::Ident,
     variants: Vec<(syn::Ident, syn::Type)>,
@@ -44,6 +45,7 @@ fn parse_expand_data(input: SiocInput) -> darling::Result<ExpandData> {
 
     Ok(ExpandData {
         enum_ident,
+        generics: input.generics,
         helper_ident,
         visitor_ident,
         variants,
@@ -54,10 +56,19 @@ pub fn expand(input: &syn::DeriveInput) -> darling::Result<TokenStream> {
     let input = SiocInput::from_derive_input(input)?;
     let ExpandData {
         enum_ident,
+        generics,
         helper_ident,
         visitor_ident,
         variants,
     } = parse_expand_data(input)?;
+
+    let lifetime = crate::attrs::fresh_lifetime(&generics);
+    let deserializer = crate::attrs::fresh_type_ident(&generics, "__SiocDeserializer");
+    let sequence = crate::attrs::fresh_type_ident(&generics, "__SiocSequence");
+    let mut de_generics = generics.clone();
+    de_generics.params.insert(0, syn::parse_quote!(#lifetime));
+    let (de_impl_generics, _, _) = de_generics.split_for_impl();
+    let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
 
     let helper_variants = variants.iter().map(|(vi, ty)| {
         quote! { #vi(<#ty as ::sioc::prelude::EventHandler>::Payload) }
@@ -65,7 +76,7 @@ pub fn expand(input: &syn::DeriveInput) -> darling::Result<TokenStream> {
 
     let visit_arms = variants.iter().map(|(vi, ty)| {
         quote! {
-            <#ty as ::sioc::prelude::EventHandler>::Payload::NAME => Self::Value::#vi(
+            __sioc_name if __sioc_name == <#ty as ::sioc::prelude::EventHandler>::Payload::NAME => Self::Value::#vi(
                 <#ty as ::sioc::prelude::EventHandler>::Payload::deserialize_payload(&mut seq)?,
             ),
         }
@@ -94,46 +105,50 @@ pub fn expand(input: &syn::DeriveInput) -> darling::Result<TokenStream> {
     });
 
     Ok(quote! {
-        enum #helper_ident {
+        enum #helper_ident #generics #where_clause {
             #(#helper_variants),*
         }
 
-        impl<'de> ::serde::Deserialize<'de> for #helper_ident {
-            fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        impl #de_impl_generics ::serde::Deserialize<#lifetime> for #helper_ident #type_generics #where_clause {
+            fn deserialize<#deserializer>(deserializer: #deserializer) -> ::std::result::Result<Self, #deserializer::Error>
             where
-                D: ::serde::Deserializer<'de>,
+                #deserializer: ::serde::Deserializer<#lifetime>,
             {
-                deserializer.deserialize_seq(#visitor_ident)
+                deserializer.deserialize_seq(#visitor_ident {
+                    marker: ::std::marker::PhantomData::<Self>,
+                })
             }
         }
 
-        struct #visitor_ident;
+        struct #visitor_ident #generics #where_clause {
+            marker: ::std::marker::PhantomData<#helper_ident #type_generics>,
+        }
 
-        impl<'de> ::serde::de::Visitor<'de> for #visitor_ident {
-            type Value = #helper_ident;
+        impl #de_impl_generics ::serde::de::Visitor<#lifetime> for #visitor_ident #type_generics #where_clause {
+            type Value = #helper_ident #type_generics;
 
             fn expecting(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
                 f.write_str("a Socket.IO event payload")
             }
 
-            fn visit_seq<V>(self, mut seq: V) -> ::std::result::Result<Self::Value, V::Error>
+            fn visit_seq<#sequence>(self, mut seq: #sequence) -> ::std::result::Result<Self::Value, #sequence::Error>
             where
-                V: ::serde::de::SeqAccess<'de>,
+                #sequence: ::serde::de::SeqAccess<#lifetime>,
             {
-                let name: &str = seq
+                let name: ::std::string::String = seq
                     .next_element()?
                     .ok_or_else(|| ::serde::de::Error::invalid_length(0, &"event name"))?;
 
-                Ok(match name {
+                Ok(match name.as_str() {
                     #(#visit_arms)*
                     _ => {
-                        return Err(::serde::de::Error::unknown_variant(name, &[#(#all_names),*]));
+                        return Err(::serde::de::Error::unknown_variant(&name, &[#(#all_names),*]));
                     }
                 })
             }
         }
 
-        impl ::sioc::prelude::EventRouter for #enum_ident {
+        impl #impl_generics ::sioc::prelude::EventRouter for #enum_ident #type_generics #where_clause {
             fn name(&self) -> &'static str {
                 match self {
                     #(#name_arms)*
@@ -141,11 +156,11 @@ pub fn expand(input: &syn::DeriveInput) -> darling::Result<TokenStream> {
             }
         }
 
-        impl ::std::convert::TryFrom<::sioc::prelude::DynEvent> for #enum_ident {
+        impl #impl_generics ::std::convert::TryFrom<::sioc::prelude::DynEvent> for #enum_ident #type_generics #where_clause {
             type Error = ::sioc::error::EventError;
 
             fn try_from(event: ::sioc::prelude::DynEvent) -> ::std::result::Result<Self, Self::Error> {
-                let helper = ::sioc::payload::from_json::<#helper_ident>(&event.payload)?;
+                let helper = ::sioc::payload::from_json::<#helper_ident #type_generics>(&event.payload)?;
 
                 Ok(match helper {
                     #(#from_event_arms)*

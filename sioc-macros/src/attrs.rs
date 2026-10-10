@@ -28,9 +28,7 @@ pub struct SiocField {
     /// Collect remaining sequence elements into this field via
     /// `#[sioc(flatten)]`.
     ///
-    /// Recommended on the last field. Placing it earlier means fields after it
-    /// cannot be deserialized since the flatten field consumes all remaining
-    /// sequence elements.
+    /// Must be the last field because it consumes the remaining sequence.
     pub flatten: darling::util::Flag,
 }
 
@@ -48,8 +46,64 @@ pub struct AckMeta {
     pub binary: darling::util::Flag,
 }
 
+/// Validates the shared serialization and deserialization flatten contract.
+pub fn validate_flatten(fields: &darling::ast::Fields<SiocField>) -> darling::Result<()> {
+    for (index, field) in fields.iter().enumerate() {
+        if field.flatten.is_present() && index + 1 != fields.len() {
+            return Err(
+                darling::Error::custom("flatten must be the last field").with_span(&field.ty)
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Chooses a generated type name outside the caller's generic parameters.
+pub fn fresh_type_ident(generics: &syn::Generics, base: &str) -> syn::Ident {
+    let mut name = base.to_owned();
+    while generics.params.iter().any(|param| match param {
+        syn::GenericParam::Type(param) => param.ident == name,
+        syn::GenericParam::Const(param) => param.ident == name,
+        syn::GenericParam::Lifetime(_) => false,
+    }) {
+        name.push('_');
+    }
+    syn::Ident::new(&name, proc_macro2::Span::call_site())
+}
+
+/// Chooses a generated lifetime outside the caller's lifetime parameters.
+pub fn fresh_lifetime(generics: &syn::Generics) -> syn::Lifetime {
+    let mut name = "__sioc_de".to_owned();
+    while generics
+        .lifetimes()
+        .any(|param| param.lifetime.ident == name)
+    {
+        name.push('_');
+    }
+    syn::Lifetime::new(&format!("'{name}"), proc_macro2::Span::call_site())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn payload_derives_reject_flatten_before_the_last_field() {
+        for source in [
+            "struct Input { #[sioc(flatten)] rest: Vec<u32>, tail: u32 }",
+            "struct Input(#[sioc(flatten)] Vec<u32>, u32);",
+            "struct Input { #[sioc(flatten)] a: Vec<u32>, #[sioc(flatten)] b: Vec<u32> }",
+        ] {
+            let input: syn::DeriveInput = syn::parse_str(source).unwrap();
+            assert!(
+                crate::serialize_payload::expand(&input).is_err(),
+                "{source}"
+            );
+            assert!(
+                crate::deserialize_payload::expand(&input).is_err(),
+                "{source}"
+            );
+        }
+    }
+
     #[test]
     fn all_derives_reject_invalid_attributes() {
         for source in [

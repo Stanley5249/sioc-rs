@@ -170,7 +170,10 @@ where
     /// Returns a future that resolves to [`AckError::Timeout`] if the server
     /// does not respond within `duration`.
     ///
-    /// Mirrors [`tokio::time::timeout`].
+    /// Limits the wait, like [`tokio::time::timeout`]. Timing out drops this
+    /// handle; an event already queued or sent remains in flight. The manager
+    /// reclaims cancelled ack registrations when registering another ack or
+    /// closing the namespace.
     ///
     /// # Errors
     ///
@@ -195,7 +198,8 @@ where
     /// Returns a future that resolves to [`AckError::Timeout`] if the server
     /// does not respond by `deadline`.
     ///
-    /// Mirrors [`tokio::time::timeout_at`].
+    /// Limits the wait, like [`tokio::time::timeout_at`], with the same
+    /// cancellation behavior as [`timeout`](Self::timeout).
     ///
     /// # Errors
     ///

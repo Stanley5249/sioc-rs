@@ -38,6 +38,17 @@ struct Payload<T: serde::Serialize + serde::de::DeserializeOwned> {
     value: T,
 }
 
+#[derive(Debug, PartialEq, EventType, SerializePayload, DeserializePayload)]
+struct InternalNames {
+    __seq: u32,
+    value: u32,
+}
+
+#[test]
+fn payload_field_names_do_not_shadow_generated_locals() {
+    roundtrip(&InternalNames { __seq: 1, value: 2 });
+}
+
 /// Binary event: carries binary attachments.
 #[derive(Debug, PartialEq, EventType, SerializePayload, DeserializePayload)]
 #[sioc(event(binary))]

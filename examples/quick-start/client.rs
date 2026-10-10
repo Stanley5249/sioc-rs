@@ -139,7 +139,7 @@ async fn run() -> Result<()> {
                 attachments,
                 ..
             }) => {
-                let bytes = &attachments[data.slot()];
+                let bytes = data.get(&attachments)?;
                 println!("client <- image     {name} ({} bytes)", bytes.len());
             }
         }

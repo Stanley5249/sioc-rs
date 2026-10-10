@@ -435,15 +435,13 @@ impl TryFrom<ByteString> for Ns<Packet> {
                 Ns(ns, Packet::ConnectError(payload))
             }
             '5' => {
-                let (count, bytes) = split_attachments(bytes)?;
-                let count = count.ok_or(PacketError::MissingAttachmentCount)?;
+                let (count, bytes) = split_binary_attachments(bytes)?;
                 let (ns, bytes) = split_namespace(bytes)?;
                 let (id, payload) = split_id(bytes)?;
                 Ns(ns, Packet::BinaryEvent { payload, id, count })
             }
             '6' => {
-                let (count, bytes) = split_attachments(bytes)?;
-                let count = count.ok_or(PacketError::MissingAttachmentCount)?;
+                let (count, bytes) = split_binary_attachments(bytes)?;
                 let (ns, bytes) = split_namespace(bytes)?;
                 let (id, payload) = split_id(bytes)?;
                 let id = id.ok_or(PacketError::MissingAckId)?;
@@ -454,6 +452,15 @@ impl TryFrom<ByteString> for Ns<Packet> {
 
         Ok(packet)
     }
+}
+
+fn split_binary_attachments(bytes: ByteString) -> Result<(usize, ByteString), PacketError> {
+    let (count, bytes) = split_attachments(bytes)?;
+    let count = count.ok_or(PacketError::MissingAttachmentCount)?;
+    if !(1..=crate::binary::MAX_ATTACHMENTS).contains(&count) {
+        return Err(PacketError::AttachmentCount { count });
+    }
+    Ok((count, bytes))
 }
 
 const U64_MAX_LEN: usize = 20; // max decimal digits in a u64
@@ -642,6 +649,22 @@ mod tests {
         let (count, rest) = split_attachments(bss("2-rest")).unwrap();
         assert_eq!(count, Some(2));
         assert_eq!(&*rest, "rest");
+    }
+
+    #[test]
+    fn binary_packets_reject_attachment_counts_outside_the_limit() {
+        for payload in [r#"50-["x"]"#, "60-1[]", r#"511-["x"]"#, "611-1[]"] {
+            assert!(
+                matches!(
+                    Ns::<Packet>::try_from(bss(payload)),
+                    Err(PacketError::AttachmentCount { .. })
+                ),
+                "{payload}"
+            );
+        }
+        for payload in [r#"510-["x"]"#, "610-1[]"] {
+            Ns::<Packet>::try_from(bss(payload)).unwrap();
+        }
     }
 
     #[test]

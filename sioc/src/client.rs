@@ -1,19 +1,20 @@
 //! Socket.IO client and namespace handles.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytestring::ByteString;
 use eioc::connector::WebSocketConnector;
 use eioc::transport::TransportStrategy;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard};
 use url::Url;
 
 use crate::ack::AckType;
 use crate::error::{ClientBuilderError, ClientError, ManagerError, PayloadError, SocketError};
 use crate::manager::backoff::Backoff;
-use crate::manager::connect_request::ConnectRequest;
+use crate::manager::connect_request::{ConnectHandles, ConnectRequest};
 use crate::marker::{AckId, AckMarker, BinaryMarker};
 use crate::packet::{ClientPacket, DynEvent, ServerPacket};
 
@@ -64,10 +65,10 @@ pub struct ChannelConfig {
     /// Transport channel: encoded frames to send to the transport.
     pub transport: usize,
     /// Manager inboxes: messages from the engine, new namespaces, and each
-    /// namespace's client packets.
+    /// namespace's client packets and buffered outgoing events.
     pub manager: usize,
     /// Per-namespace inbox: server packets delivered to each
-    /// [`SocketReceiver`].
+    /// [`SocketReceiver`], plus one separate slot for the terminal packet.
     pub socket: usize,
 }
 
@@ -237,7 +238,8 @@ where
         self
     }
 
-    /// Override the channel buffer capacities (default: 32 for all channels).
+    /// Override the positive channel buffer capacities (default: 32 for all
+    /// channels).
     ///
     /// Accepts `()` for defaults, a `usize` for uniform sizing, or a
     /// [`ChannelConfig`] for per-channel control.
@@ -277,13 +279,24 @@ where
     ///
     /// # Errors
     ///
-    /// Returns an error if the URL is invalid.
+    /// Returns an error if the URL is invalid or any channel capacity is zero.
     ///
     /// # Panics
     ///
     /// Panics when called outside a Tokio runtime.
     #[must_use = "call join() to observe the background task result"]
     pub fn open(self) -> Result<Client, ClientBuilderError> {
+        for (channel, capacity) in [
+            ("engine", self.channels.engine),
+            ("transport", self.channels.transport),
+            ("manager", self.channels.manager),
+            ("socket", self.channels.socket),
+        ] {
+            if capacity == 0 {
+                return Err(ClientBuilderError::ZeroCapacity { channel });
+            }
+        }
+
         let http_client = self.http_client.unwrap_or_default();
         let websocket_connector = self.websocket_connector;
         let transport_strategy = self.transport_strategy;
@@ -297,7 +310,12 @@ where
                 config.attempts,
             )
         });
-        let url = self.url.join(&self.path)?;
+        let mut url = self.url.join(&self.path)?;
+        // The endpoint path replaces the URL path, while auth and other
+        // connection query parameters belong to every transport attempt.
+        if self.url.query().is_some() {
+            url.query_pairs_mut().extend_pairs(self.url.query_pairs());
+        }
 
         let (connect_request_tx, connect_request_rx) = mpsc::channel(channels.manager);
 
@@ -386,14 +404,9 @@ impl Client {
             .await
             .map_err(|_| SocketError::Closed)?;
 
-        handles.reply_rx.await.map_err(|_| SocketError::Closed)??;
-
-        Ok((
-            SocketSender::new(handles.client_packet_tx, handles.closed),
-            SocketReceiver {
-                server_packet_rx: handles.server_packet_rx,
-            },
-        ))
+        let (tx, rx, reply_rx) = handles.into_socket();
+        reply_rx.await.map_err(|_| SocketError::Closed)??;
+        Ok((tx, rx))
     }
 
     /// Drops the client handle and waits for the client to end.
@@ -415,6 +428,26 @@ impl Client {
     }
 }
 
+impl ConnectHandles {
+    /// Converts the manager's channel ends into the public namespace handles.
+    pub fn into_socket(
+        self,
+    ) -> (
+        SocketSender,
+        SocketReceiver,
+        oneshot::Receiver<Result<(), SocketError>>,
+    ) {
+        (
+            SocketSender::new(self.client_packet_tx, self.closed),
+            SocketReceiver {
+                server_packet_rx: self.server_packet_rx,
+                terminal_packet_rx: Some(self.terminal_packet_rx),
+            },
+            self.reply_rx,
+        )
+    }
+}
+
 /// Sender for a Socket.IO namespace.
 ///
 /// Clone it to emit from several tasks: clones share the namespace.
@@ -425,6 +458,8 @@ pub struct SocketSender {
     /// Carries packets to the manager task, which encodes and sends them.
     client_packet_tx: mpsc::Sender<ClientPacket>,
     closed: CancellationToken,
+    // Last-handle drop also wakes a namespace whose send buffer is full.
+    _closed: Arc<DropGuard>,
 }
 
 impl SocketSender {
@@ -433,6 +468,7 @@ impl SocketSender {
     pub fn new(client_packet_tx: mpsc::Sender<ClientPacket>, closed: CancellationToken) -> Self {
         Self {
             client_packet_tx,
+            _closed: Arc::new(closed.clone().drop_guard()),
             closed,
         }
     }
@@ -447,6 +483,19 @@ impl SocketSender {
         if self.closed.is_cancelled() {
             return Err(SocketError::Closed);
         }
+
+        let attachments = match &packet {
+            ClientPacket::Event { attachments, .. } | ClientPacket::Ack { attachments, .. } => {
+                attachments
+            }
+        };
+        if let Some(attachments) = attachments {
+            let count = attachments.len();
+            if !(1..=crate::binary::MAX_ATTACHMENTS).contains(&count) {
+                return Err(SocketError::AttachmentCount { count });
+            }
+        }
+
         self.client_packet_tx
             .send(packet)
             .await
@@ -459,7 +508,9 @@ impl SocketSender {
     /// depending on the ack policy.
     ///
     /// The event waits until the server confirms the namespace, also after a
-    /// reconnection. The [`AckHandle`](crate::ack::AckHandle) fails if the
+    /// reconnection. The outgoing inbox and pre-connect buffer are each bounded
+    /// by [`ChannelConfig::manager`], so emitting awaits space when both fill.
+    /// The [`AckHandle`](crate::ack::AckHandle) fails if the
     /// Engine.IO session drops after the event went out, like
     /// socket.io-client's `Socket._clearAcks`.
     ///
@@ -542,17 +593,60 @@ impl SocketSender {
 #[derive(Debug)]
 pub struct SocketReceiver {
     server_packet_rx: mpsc::Receiver<ServerPacket>,
+    terminal_packet_rx: Option<oneshot::Receiver<ServerPacket>>,
 }
 
 impl SocketReceiver {
+    /// Receives the next server packet, then the server's terminal packet
+    /// after queued packets drain. Repeated calls after the end return `None`.
+    ///
+    /// Cancel safe: both receivers retain their item until their await
+    /// completes, and the terminal receiver is removed only after completion.
+    pub async fn recv(&mut self) -> Option<ServerPacket> {
+        if let Some(packet) = self.server_packet_rx.recv().await {
+            return Some(packet);
+        }
+        let packet = self.terminal_packet_rx.as_mut()?.await.ok();
+        self.terminal_packet_rx = None;
+        packet
+    }
+
+    /// Receives the next packet without waiting, with the same ordering as
+    /// [`recv`](Self::recv).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Empty` while waiting for a packet, or `Disconnected` after
+    /// the namespace has ended and its queued packets were consumed.
+    pub fn try_recv(&mut self) -> Result<ServerPacket, mpsc::error::TryRecvError> {
+        match self.server_packet_rx.try_recv() {
+            Ok(packet) => return Ok(packet),
+            Err(mpsc::error::TryRecvError::Empty) => return Err(mpsc::error::TryRecvError::Empty),
+            Err(mpsc::error::TryRecvError::Disconnected) => {}
+        }
+        let Some(rx) = &mut self.terminal_packet_rx else {
+            return Err(mpsc::error::TryRecvError::Disconnected);
+        };
+        match rx.try_recv() {
+            Ok(packet) => {
+                self.terminal_packet_rx = None;
+                Ok(packet)
+            }
+            Err(oneshot::error::TryRecvError::Empty) => Err(mpsc::error::TryRecvError::Empty),
+            Err(oneshot::error::TryRecvError::Closed) => {
+                self.terminal_packet_rx = None;
+                Err(mpsc::error::TryRecvError::Disconnected)
+            }
+        }
+    }
+
     /// Returns the next application event. [`ServerPacket::Connect`],
     /// [`ServerPacket::Disconnect`], and [`ServerPacket::ConnectError`] are
     /// skipped. Returns `None` once the namespace closes, by either side,
     /// or the client ends.
     ///
-    /// Cancel safe: the only suspend point is `recv`; skipped protocol packets
-    /// have no suspend point after consumption, so no events are lost on
-    /// cancellation.
+    /// Cancel safe: [`recv`](Self::recv) retains pending packets, and skipped
+    /// protocol packets have no suspend point after consumption.
     ///
     /// # Errors
     ///
@@ -562,26 +656,12 @@ impl SocketReceiver {
         E: TryFrom<DynEvent>,
     {
         loop {
-            match self.server_packet_rx.recv().await {
+            match self.recv().await {
                 None => return Ok(None),
                 Some(ServerPacket::Event(e)) => return E::try_from(e).map(Some),
                 Some(_) => {}
             }
         }
-    }
-}
-
-impl std::ops::Deref for SocketReceiver {
-    type Target = mpsc::Receiver<ServerPacket>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.server_packet_rx
-    }
-}
-
-impl std::ops::DerefMut for SocketReceiver {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.server_packet_rx
     }
 }
 
@@ -635,6 +715,70 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn builder_preserves_connection_query_parameters() {
+        let (url_tx, mut url_rx) = mpsc::channel(1);
+        let client = ClientBuilder::new(
+            Url::parse("https://localhost/base?token=hello%20world&tag=a&tag=b").unwrap(),
+        )
+        .path("/custom/")
+        .transport(TransportStrategy::WebSocket)
+        .websocket_connector(move |url: Url| {
+            let url_tx = url_tx.clone();
+            async move {
+                url_tx.send(url).await.unwrap();
+                Err(std::io::Error::from(ErrorKind::ConnectionRefused).into())
+            }
+        })
+        .open()
+        .unwrap();
+        let url = url_rx.recv().await.unwrap();
+        assert_eq!(url.scheme(), "wss");
+        assert_eq!(url.path(), "/custom/");
+        let query: Vec<_> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        assert_eq!(
+            query,
+            [
+                ("token".into(), "hello world".into()),
+                ("tag".into(), "a".into()),
+                ("tag".into(), "b".into()),
+                ("EIO".into(), "4".into()),
+                ("transport".into(), "websocket".into()),
+            ]
+        );
+        client.join().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn builder_rejects_zero_channel_capacities() {
+        for config in [
+            ChannelConfig {
+                engine: 0,
+                ..ChannelConfig::default()
+            },
+            ChannelConfig {
+                transport: 0,
+                ..ChannelConfig::default()
+            },
+            ChannelConfig {
+                manager: 0,
+                ..ChannelConfig::default()
+            },
+            ChannelConfig {
+                socket: 0,
+                ..ChannelConfig::default()
+            },
+        ] {
+            ClientBuilder::new(Url::parse("http://localhost/").unwrap())
+                .channels(config)
+                .open()
+                .unwrap_err();
+        }
+    }
+
     #[test]
     fn channel_config_default_is_32() {
         let c = ChannelConfig::default();
@@ -664,6 +808,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(8);
         let mut receiver = SocketReceiver {
             server_packet_rx: rx,
+            terminal_packet_rx: None,
         };
         tx.send(ServerPacket::Connect(Connect {
             sid: ByteString::default(),
@@ -690,6 +835,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<ServerPacket>(4);
         let mut receiver = SocketReceiver {
             server_packet_rx: rx,
+            terminal_packet_rx: None,
         };
         drop(tx);
         assert!(receiver.listen::<Pass>().await.unwrap().is_none());
@@ -857,6 +1003,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_invalid_binary_attachment_counts_before_enqueueing() {
+        let (sender, mut rx) = socket_sender();
+        for count in [0, 11] {
+            for is_ack in [false, true] {
+                let attachments = Some(vec![bytes::Bytes::new(); count]);
+                let packet = if is_ack {
+                    ClientPacket::Ack {
+                        payload: "[]".into(),
+                        id: 0,
+                        attachments,
+                    }
+                } else {
+                    ClientPacket::Event {
+                        payload: r#"["x"]"#.into(),
+                        ack_tx: None,
+                        attachments,
+                    }
+                };
+                assert!(
+                    matches!(sender.send(packet).await, Err(SocketError::AttachmentCount { count: actual }) if actual == count),
+                    "{count}, ack={is_ack}"
+                );
+                assert!(matches!(
+                    rx.try_recv(),
+                    Err(mpsc::error::TryRecvError::Empty)
+                ));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn emit_sends_event_packet() {
         let (sender, mut rx) = socket_sender();
         sender.emit(TestEmit).await.unwrap();
@@ -884,12 +1061,53 @@ mod tests {
         assert_eq!(id, 5);
     }
 
-    #[test]
-    fn socket_receiver_deref_gives_inner_receiver() {
-        let (_tx, rx) = mpsc::channel::<ServerPacket>(4);
-        let receiver = SocketReceiver {
+    #[tokio::test]
+    async fn cancelling_terminal_receive_preserves_the_packet() {
+        use futures_util::FutureExt;
+
+        let (tx, rx) = mpsc::channel(1);
+        let (terminal_tx, terminal_rx) = oneshot::channel();
+        let mut receiver = SocketReceiver {
             server_packet_rx: rx,
+            terminal_packet_rx: Some(terminal_rx),
         };
-        let _ = &*receiver;
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        drop(tx);
+        assert!(receiver.recv().now_or_never().is_none());
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        terminal_tx.send(ServerPacket::Disconnect).unwrap();
+        assert!(matches!(receiver.try_recv(), Ok(ServerPacket::Disconnect)));
+        assert!(receiver.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn terminal_packet_follows_buffered_packets_and_receiver_stays_ended() {
+        let (tx, rx) = mpsc::channel(1);
+        let (terminal_tx, terminal_rx) = oneshot::channel();
+        let mut receiver = SocketReceiver {
+            server_packet_rx: rx,
+            terminal_packet_rx: Some(terminal_rx),
+        };
+        tx.send(ServerPacket::Event(DynEvent::new(r#"["last"]"#, None)))
+            .await
+            .unwrap();
+        terminal_tx.send(ServerPacket::Disconnect).unwrap();
+        drop(tx);
+        assert!(matches!(receiver.try_recv(), Ok(ServerPacket::Event(_))));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(ServerPacket::Disconnect)
+        ));
+        assert!(receiver.recv().await.is_none());
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        ));
     }
 }

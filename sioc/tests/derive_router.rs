@@ -25,6 +25,48 @@ enum Router {
     Upload(Event<Upload>),
 }
 
+#[derive(Debug, EventType, DeserializePayload)]
+struct GenericPayload<S: serde::de::DeserializeOwned>(S);
+
+#[derive(Debug, EventRouter)]
+enum GenericRouter<S>
+where
+    S: serde::de::DeserializeOwned,
+{
+    Payload(Event<GenericPayload<S>>),
+}
+
+#[derive(Debug, EventRouter)]
+enum EventTypeRouter<E>
+where
+    E: EventType + DeserializePayload,
+{
+    Event(Event<E>),
+}
+
+#[test]
+fn dispatches_routers_parameterized_by_event_type() {
+    let event =
+        EventTypeRouter::<Message>::try_from(DynEvent::new(r#"["custom:message",7]"#, None))
+            .unwrap();
+    let EventTypeRouter::Event(Event {
+        payload: Message(value),
+        ..
+    }) = event;
+    assert_eq!(value, 7);
+}
+
+#[test]
+fn dispatches_generic_routers_with_explicit_bounds() {
+    let event =
+        GenericRouter::<u32>::try_from(DynEvent::new(r#"["generic_payload",42]"#, None)).unwrap();
+    let GenericRouter::Payload(Event {
+        payload: GenericPayload(value),
+        ..
+    }) = event;
+    assert_eq!(value, 42);
+}
+
 #[test]
 fn dispatches_each_variant_and_reports_wire_name() {
     let ping = Router::try_from(DynEvent::new(r#"["ping"]"#, None)).unwrap();
@@ -66,6 +108,7 @@ fn rejects_invalid_event_payloads() {
         r#"["custom:message","invalid"]"#,
         "true",
         "[",
+        r#"["ping"] trailing"#,
     ] {
         assert!(
             matches!(
@@ -75,6 +118,12 @@ fn rejects_invalid_event_payloads() {
             "expected payload error for {payload}",
         );
     }
+}
+
+#[test]
+fn dispatches_escaped_event_names() {
+    let event = Router::try_from(DynEvent::new(r#"["p\u0069ng"]"#, None)).unwrap();
+    assert!(matches!(event, Router::Ping(_)));
 }
 
 #[test]

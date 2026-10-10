@@ -123,7 +123,7 @@ while let Some(event) = rx.listen::<ChatEvent>().await? {
 
 ### Binary
 
-JSON cannot represent binary data directly, so Socket.IO sends it as _binary attachments_, separate frames that accompany the JSON packet. The Socket.IO JS library finds and replaces binary objects automatically at runtime. `sioc` requires you to register binary data via an `AttachmentsBuilder` closure and embed the returned `Placeholder` in your struct. On the receiving side, use `data.slot()` to index into `attachments`.
+JSON cannot represent binary data directly, so Socket.IO sends it as _binary attachments_, separate frames that accompany the JSON packet. The Socket.IO JS library finds and replaces binary objects automatically at runtime. `sioc` requires you to register binary data via an `AttachmentsBuilder` closure and embed the returned `Placeholder` in your struct. On the receiving side, use `data.get(&attachments)` for checked access. Binary packets carry between one and `MAX_ATTACHMENTS` attachments, matching the JavaScript parser's default limit.
 
 One type can derive both `SerializePayload` and `DeserializePayload` when the event flows both ways.
 
@@ -164,7 +164,7 @@ while let Some(event) = rx.listen::<ChatEvent>().await? {
             attachments, // Vec<Bytes>
             ..
         }) => {
-            let bytes = &attachments[data.slot()];
+            let bytes = data.get(&attachments)?;
             println!("image {name}: {} bytes", bytes.len());
         }
     }
@@ -173,7 +173,9 @@ while let Some(event) = rx.listen::<ChatEvent>().await? {
 
 ### Reconnection
 
-When the connection drops, the client reconnects with the same backoff as the JavaScript client and connects every open namespace again. Each reconnection shows up as another `ServerPacket::Connect` on the receiver. Events emitted meanwhile wait until the server confirms the namespace, and acks of events that already went out fail. Pass a `ReconnectionConfig` to tune it, or `None` to turn it off.
+When the connection drops, the client reconnects with the same backoff as the JavaScript client and connects every open namespace again. Each reconnection shows up as another `ServerPacket::Connect` on the receiver. Events emitted meanwhile wait until the server confirms the namespace, and acks of events that already went out fail.
+
+Pass a `ReconnectionConfig` to tune it, or `None` to close the namespaces instead. When reconnection gives up, the namespaces close too, and the client stays usable for the next `connect`. Configure each attempt's handshake deadline with `timeout`.
 
 ```rust
 let client = ClientBuilder::new(url)
@@ -183,6 +185,10 @@ let client = ClientBuilder::new(url)
     }))
     .open()?;
 ```
+
+### Namespaces share one connection
+
+Every namespace of a client shares one connection, as in the JavaScript client, so a receiver that stops reading also holds up the other namespaces of that client. Open a separate `Client` for a namespace that must stay independent, like `multiplex: false` in the JavaScript client.
 
 ## Status
 
