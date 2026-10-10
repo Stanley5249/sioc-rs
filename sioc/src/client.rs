@@ -237,7 +237,8 @@ where
         self
     }
 
-    /// Override the channel buffer capacities (default: 32 for all channels).
+    /// Override the positive channel buffer capacities (default: 32 for all
+    /// channels).
     ///
     /// Accepts `()` for defaults, a `usize` for uniform sizing, or a
     /// [`ChannelConfig`] for per-channel control.
@@ -277,13 +278,24 @@ where
     ///
     /// # Errors
     ///
-    /// Returns an error if the URL is invalid.
+    /// Returns an error if the URL is invalid or any channel capacity is zero.
     ///
     /// # Panics
     ///
     /// Panics when called outside a Tokio runtime.
     #[must_use = "call join() to observe the background task result"]
     pub fn open(self) -> Result<Client, ClientBuilderError> {
+        for (channel, capacity) in [
+            ("engine", self.channels.engine),
+            ("transport", self.channels.transport),
+            ("manager", self.channels.manager),
+            ("socket", self.channels.socket),
+        ] {
+            if capacity == 0 {
+                return Err(ClientBuilderError::ZeroCapacity { channel });
+            }
+        }
+
         let http_client = self.http_client.unwrap_or_default();
         let websocket_connector = self.websocket_connector;
         let transport_strategy = self.transport_strategy;
@@ -297,7 +309,12 @@ where
                 config.attempts,
             )
         });
-        let url = self.url.join(&self.path)?;
+        let mut url = self.url.join(&self.path)?;
+        // The endpoint path replaces the URL path, while auth and other
+        // connection query parameters belong to every transport attempt.
+        if self.url.query().is_some() {
+            url.query_pairs_mut().extend_pairs(self.url.query_pairs());
+        }
 
         let (connect_request_tx, connect_request_rx) = mpsc::channel(channels.manager);
 
@@ -645,6 +662,70 @@ mod tests {
     impl From<DynEvent> for Pass {
         fn from(e: DynEvent) -> Self {
             Self(e)
+        }
+    }
+
+    #[tokio::test]
+    async fn builder_preserves_connection_query_parameters() {
+        let (url_tx, mut url_rx) = mpsc::channel(1);
+        let client = ClientBuilder::new(
+            Url::parse("https://localhost/base?token=hello%20world&tag=a&tag=b").unwrap(),
+        )
+        .path("/custom/")
+        .transport(TransportStrategy::WebSocket)
+        .websocket_connector(move |url: Url| {
+            let url_tx = url_tx.clone();
+            async move {
+                url_tx.send(url).await.unwrap();
+                Err(std::io::Error::from(ErrorKind::ConnectionRefused).into())
+            }
+        })
+        .open()
+        .unwrap();
+        let url = url_rx.recv().await.unwrap();
+        assert_eq!(url.scheme(), "wss");
+        assert_eq!(url.path(), "/custom/");
+        let query: Vec<_> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        assert_eq!(
+            query,
+            [
+                ("token".into(), "hello world".into()),
+                ("tag".into(), "a".into()),
+                ("tag".into(), "b".into()),
+                ("EIO".into(), "4".into()),
+                ("transport".into(), "websocket".into()),
+            ]
+        );
+        client.join().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn builder_rejects_zero_channel_capacities() {
+        for config in [
+            ChannelConfig {
+                engine: 0,
+                ..ChannelConfig::default()
+            },
+            ChannelConfig {
+                transport: 0,
+                ..ChannelConfig::default()
+            },
+            ChannelConfig {
+                manager: 0,
+                ..ChannelConfig::default()
+            },
+            ChannelConfig {
+                socket: 0,
+                ..ChannelConfig::default()
+            },
+        ] {
+            ClientBuilder::new(Url::parse("http://localhost/").unwrap())
+                .channels(config)
+                .open()
+                .unwrap_err();
         }
     }
 

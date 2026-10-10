@@ -59,6 +59,13 @@ pub enum Error {
 /// [`ClientBuilder::open`](crate::client::ClientBuilder::open).
 #[derive(Debug, Error, Diagnostic)]
 pub enum ClientBuilderError {
+    /// A bounded channel requires a positive capacity.
+    #[error("channel capacity for {channel} must be positive")]
+    #[diagnostic(code(sioc::builder::zero_capacity))]
+    ZeroCapacity {
+        /// The channel configuration field with a zero capacity.
+        channel: &'static str,
+    },
     /// URL construction failed.
     #[error("invalid URL")]
     #[diagnostic(code(sioc::builder::url))]
