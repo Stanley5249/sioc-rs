@@ -947,6 +947,23 @@ async fn engine_close_ends_receivers_and_pending_acks() {
 }
 
 #[tokio::test]
+async fn internal_send_failure_releases_a_full_retained_receiver() {
+    let mut manager = TestManager::spawn().await;
+    let (tx, _rx) = manager.open_with("/", ByteString::new(), 1).await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    tx.send(event(r#"["ready"]"#, None)).await.unwrap();
+    assert_eq!(&*manager.recv_client_text().await, r#"2["ready"]"#);
+    manager.send_server_message(r#"2["blocked"]"#).await;
+    manager.session().client_message_rx.close();
+    tx.send(event(r#"["fails"]"#, None)).await.unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(1), manager.finish())
+        .await
+        .expect("internal failure must release blocked delivery")
+        .unwrap_err();
+    assert!(matches!(error, ManagerError::ClientMessage(_)));
+}
+
+#[tokio::test]
 async fn local_disconnect_finishes_with_a_full_retained_receiver() {
     let mut manager = TestManager::spawn().await;
     let (tx, mut rx) = manager.open_with("/", ByteString::new(), 1).await;

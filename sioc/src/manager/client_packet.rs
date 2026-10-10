@@ -180,7 +180,6 @@ async fn send_client_packets(
     let mut client_packets = FuturesUnordered::new();
     let mut reopens = VecDeque::new();
     let mut client_open = true;
-    let mut result = Ok(());
 
     // One ack id counter per name, kept after the namespace closes, so a late
     // ack for a closed namespace never answers an event of the same name
@@ -188,8 +187,13 @@ async fn send_client_packets(
     // `Manager.nsps` keeps for each name, which it never prunes.
     let mut next_ack_ids = HashMap::<ByteString, u64>::new();
 
+    let mut state = ReadyState::Closed;
+
+    // Keep all fallible driving inside this block, so every error follows the
+    // same namespace cancellation and engine half-close path below.
+    let result = async {
     // Open the first engine at once, like socket.io-client's `Manager`.
-    let mut state = start_engine(&open_request_tx, channels, routes, &namespaces, 0).await?;
+    state = start_engine(&open_request_tx, channels, routes, &namespaces, 0).await?;
 
     while client_open || !namespaces.is_empty() || !reopens.is_empty() {
         // Every handler sends only to the open engine, so waiting there holds
@@ -294,10 +298,7 @@ async fn send_client_packets(
 
                     match close_engine(engine_result, &mut namespaces, routes, backoff.as_mut(), reconnect) {
                         ControlFlow::Continue(next) => state = next,
-                        ControlFlow::Break(error) => {
-                            result = Err(error);
-                            break;
-                        }
+                        ControlFlow::Break(error) => return Err(error),
                     }
 
                     // A namespace opened while the client closed the engine, so
@@ -317,6 +318,9 @@ async fn send_client_packets(
             }
         }
     }
+
+    Ok(())
+    }.await;
 
     tracing::debug!("client ended");
 
