@@ -239,7 +239,9 @@ async fn closes_when_client_handle_drops_with_no_namespace() {
 #[tokio::test]
 async fn stays_open_after_last_namespace_while_client_handle_lives() {
     let mut manager = TestManager::spawn().await;
-    let (client_packet_tx, _server_packet_rx) = manager.open("/").await;
+    let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    server_packet_rx.recv().await.unwrap();
     client_packet_tx.disconnect();
     assert_eq!(&*manager.recv_client_text().await, "1");
     assert_quiet(&mut manager.session().client_message_rx).await;
@@ -264,7 +266,9 @@ async fn stays_open_after_last_namespace_while_client_handle_lives() {
 #[tokio::test]
 async fn closes_after_client_handle_and_last_namespace_drop() {
     let mut manager = TestManager::spawn().await;
-    let (client_packet_tx, _server_packet_rx) = manager.open("/").await;
+    let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    server_packet_rx.recv().await.unwrap();
     let TestManager {
         connect_request_tx,
         session,
@@ -288,7 +292,9 @@ async fn closes_after_client_handle_and_last_namespace_drop() {
 #[tokio::test]
 async fn dropping_handles_disconnects_only_that_namespace() {
     let mut manager = TestManager::spawn().await;
-    let (client_packet_tx, _server_packet_rx) = manager.open("/").await;
+    let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    server_packet_rx.recv().await.unwrap();
     let (_other_tx, _other_rx) = manager.open("/other").await;
     drop(client_packet_tx);
     assert_eq!(&*manager.recv_client_text().await, "1");
@@ -411,24 +417,68 @@ async fn binary_event_sends_attachments() {
     manager.finish().await.unwrap();
 }
 
+fn ack(id: u64) -> ClientPacket {
+    ClientPacket::Ack {
+        payload: ByteString::from_static("[true]"),
+        id,
+        attachments: None,
+    }
+}
+
 #[tokio::test]
-async fn ack_is_not_buffered() {
+async fn ack_waits_for_nothing_once_confirmed() {
+    let mut manager = TestManager::spawn().await;
+    let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
+    client_packet_tx
+        .send(event(r#"["held"]"#, None))
+        .await
+        .unwrap();
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    server_packet_rx.recv().await.unwrap();
+    assert_eq!(&*manager.recv_client_text().await, r#"2["held"]"#);
+    client_packet_tx.send(ack(42)).await.unwrap();
+    assert_eq!(&*manager.recv_client_text().await, "342[true]");
+    manager.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn ack_before_server_connect_is_discarded() {
+    let mut manager = TestManager::spawn().await;
+    let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
+    client_packet_tx.send(ack(42)).await.unwrap();
+    assert_quiet(&mut manager.session().client_message_rx).await;
+
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    server_packet_rx.recv().await.unwrap();
+    client_packet_tx.send(ack(43)).await.unwrap();
+    assert_eq!(&*manager.recv_client_text().await, "343[true]");
+    manager.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn disconnect_before_server_connect_sends_nothing() {
     let mut manager = TestManager::spawn().await;
     let (client_packet_tx, _server_packet_rx) = manager.open("/").await;
-    let client_packet = ClientPacket::Ack {
-        payload: ByteString::from_static("[true]"),
-        id: 42,
-        attachments: None,
-    };
-    client_packet_tx.send(client_packet).await.unwrap();
-    assert_eq!(&*manager.recv_client_text().await, "342[true]");
+    let (_other_tx, mut other_rx) = manager.open("/other").await;
+    client_packet_tx.disconnect();
+    assert_quiet(&mut manager.session().client_message_rx).await;
+
+    // A late CONNECT for the closed namespace is discarded.
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    manager.send_server_message(r#"0/other,{"sid":"o"}"#).await;
+    assert!(matches!(
+        other_rx.recv().await,
+        Some(ServerPacket::Connect(_))
+    ));
     manager.finish().await.unwrap();
 }
 
 #[tokio::test]
 async fn binary_ack_sends_attachments() {
     let mut manager = TestManager::spawn().await;
-    let (client_packet_tx, _server_packet_rx) = manager.open("/").await;
+    let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    server_packet_rx.recv().await.unwrap();
     let client_packet = ClientPacket::Ack {
         payload: ByteString::from_static("[true]"),
         id: 7,
@@ -875,6 +925,9 @@ async fn no_reconnection_without_namespaces_until_one_opens() {
     manager.session = manager.session_rx.recv().await;
     assert_eq!(&*manager.recv_client_text().await, "0");
     handles.reply_rx.await.unwrap().unwrap();
+    let mut server_packet_rx = handles.server_packet_rx;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    server_packet_rx.recv().await.unwrap();
 
     drop(handles.client_packet_tx);
     assert_eq!(&*manager.recv_client_text().await, "1");

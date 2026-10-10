@@ -421,20 +421,22 @@ async fn start_engine(
 
 /// Closes one namespace after its client packets end.
 ///
-/// Only a namespace the client closed still has its route, and only an open
-/// engine has seen its CONNECT.
+/// Only a namespace the client closed still has its route. Sends DISCONNECT
+/// only if the server confirmed the namespace to the open engine, like
+/// socket.io-client's `Socket.disconnect`, because the server closes the whole
+/// connection on any other packet for a namespace it has not joined.
 async fn close_namespace(
     ns: &ByteString,
     routes: &Routes,
     engine: Option<&OpenHandles>,
 ) -> Result<(), ManagerError> {
-    if !routes.close_client(ns) {
+    let Some(connected) = routes.close_client(ns) else {
         return Ok(());
-    }
+    };
 
     tracing::debug!(%ns, "client closed");
 
-    if let Some(engine) = engine {
+    if let Some(engine) = engine.filter(|_| connected) {
         send_wire_packet(&engine.client_message_tx, ns, Packet::Disconnect, None).await?;
     }
 
@@ -463,8 +465,8 @@ async fn flush_send_buffer(
 /// namespace to the open engine.
 ///
 /// Discards packets the handles sent before the server closed the namespace,
-/// because the server no longer accepts them, and acks while no engine is
-/// open, because there is no channel to send them on.
+/// because the server no longer accepts them, and acks until the server
+/// confirms the namespace to the open engine.
 async fn send_client_packet(
     namespace: &mut Namespace,
     routes: &Routes,
@@ -518,8 +520,10 @@ async fn send_client_packet(
             id,
             attachments,
         } => {
-            let Some(engine) = engine else {
-                tracing::debug!(%ns, id, "discarded ack while no engine is open");
+            // The event came from an earlier engine, and its id means nothing
+            // to the server now.
+            let Some(engine) = engine.filter(|_| routes.is_connected(ns)) else {
+                tracing::debug!(%ns, id, "discarded ack for an unconfirmed namespace");
                 return Ok(());
             };
 

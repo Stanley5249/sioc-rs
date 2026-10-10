@@ -70,10 +70,11 @@ impl Routes {
         Some(route.server_packet_tx)
     }
 
-    /// Closes a namespace for the client, returning `false` if the server
-    /// closed it first.
-    pub fn close_client(&self, ns: &str) -> bool {
-        self.lock().remove(ns).is_some()
+    /// Closes a namespace for the client, returning whether the server
+    /// confirmed it to the current engine, or `None` if the server closed it
+    /// first.
+    pub fn close_client(&self, ns: &str) -> Option<bool> {
+        self.lock().remove(ns).map(|route| route.connected)
     }
 
     /// Returns whether the namespace is open.
