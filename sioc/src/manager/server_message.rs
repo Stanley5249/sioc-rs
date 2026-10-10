@@ -10,11 +10,11 @@ use crate::manager::routes::Routes;
 use crate::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Packet, ServerPacket};
 
 /// Delivers server packets to the namespace receivers until the engine closes
-/// `server_message_rx`, and sets `answered` once a server message arrives.
+/// `server_message_rx`.
 ///
 /// Waiting on a full receiver holds up only this direction. After an error,
-/// drops `connected_generation_tx`, which tells the client-packet loop to
-/// close the session, and discards server messages until the engine hangs up,
+/// drops `connected_ns_tx`, which tells the client-packet loop to
+/// close the engine, and discards server messages until the engine hangs up,
 /// so the engine never sees a failed send.
 ///
 /// # Errors
@@ -24,18 +24,11 @@ use crate::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Packet, ServerP
 pub async fn server_messages_to_packets(
     mut server_message_rx: mpsc::Receiver<Message>,
     routes: &Routes,
-    connected_generation_tx: mpsc::UnboundedSender<u64>,
-    answered: &mut bool,
+    connected_ns_tx: mpsc::UnboundedSender<ByteString>,
 ) -> Result<(), ManagerError> {
-    let result = deliver_server_messages(
-        &mut server_message_rx,
-        routes,
-        &connected_generation_tx,
-        answered,
-    )
-    .await;
+    let result = deliver_server_messages(&mut server_message_rx, routes, &connected_ns_tx).await;
 
-    drop(connected_generation_tx);
+    drop(connected_ns_tx);
 
     while server_message_rx.recv().await.is_some() {}
 
@@ -49,19 +42,14 @@ pub async fn server_messages_to_packets(
 async fn deliver_server_messages(
     server_message_rx: &mut mpsc::Receiver<Message>,
     routes: &Routes,
-    connected_generation_tx: &mpsc::UnboundedSender<u64>,
-    answered: &mut bool,
+    connected_ns_tx: &mpsc::UnboundedSender<ByteString>,
 ) -> Result<(), ManagerError> {
     let mut reconstructor = None;
 
     while let Some(message) = server_message_rx.recv().await {
-        if !std::mem::replace(answered, true) {
-            tracing::info!("session answered");
-        }
-
         match message {
             Message::Text(text) => {
-                route_text(text, routes, connected_generation_tx, &mut reconstructor).await?;
+                route_text(text, routes, connected_ns_tx, &mut reconstructor).await?;
             }
             Message::Binary(attachment) => {
                 route_binary(attachment, routes, &mut reconstructor).await?;
@@ -75,7 +63,7 @@ async fn deliver_server_messages(
 async fn route_text(
     text: ByteString,
     routes: &Routes,
-    connected_generation_tx: &mpsc::UnboundedSender<u64>,
+    connected_ns_tx: &mpsc::UnboundedSender<ByteString>,
     reconstructor: &mut Option<Ns<BinaryPacket>>,
 ) -> Result<(), ManagerError> {
     if reconstructor.is_some() {
@@ -92,9 +80,9 @@ async fn route_text(
 
             tracing::debug!(%ns, sid = %connect.sid, "connected");
 
-            if let Some(generation) = routes.mark_connected(&ns) {
-                connected_generation_tx
-                    .send(generation)
+            if routes.mark_connected(&ns) {
+                connected_ns_tx
+                    .send(ns.clone())
                     .map_err(|_| ManagerError::NamespaceStatus)?;
             }
             send_server_packet(

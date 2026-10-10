@@ -7,11 +7,10 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::client::SocketSender;
+use crate::client::{ChannelConfig, SocketSender};
 use crate::error::{ManagerError, SocketError};
 use crate::manager::backoff::Backoff;
 use crate::manager::connect_request::ConnectRequest;
-use crate::manager::supervisor::Supervisor;
 use crate::packet::{ClientPacket, DynAck, ServerPacket};
 
 const CONNECT_RESPONSE: &str = "0{\"sid\":\"test\"}";
@@ -50,7 +49,7 @@ impl TestSession {
 struct TestManager {
     connect_request_tx: mpsc::Sender<ConnectRequest>,
     session: Option<TestSession>,
-    /// Receives each session the supervisor opens after the first.
+    /// Receives each session the manager opens after the first.
     session_rx: mpsc::Receiver<TestSession>,
     task: JoinHandle<Result<(), ManagerError>>,
 }
@@ -106,13 +105,12 @@ impl TestManager {
                 result_rx.await.unwrap_or(Ok(()))
             }
         };
-        let supervisor = Supervisor {
-            server_message_capacity: 32,
-            client_message_capacity: 32,
-            backoff,
+        let task = tokio::spawn(crate::manager::client_packet::client_packets_to_messages(
+            connect_request_rx,
             connect_engine,
-        };
-        let task = tokio::spawn(crate::manager::session::run(connect_request_rx, supervisor));
+            ChannelConfig::from(32),
+            backoff,
+        ));
         let session = session_rx.recv().await;
         Self {
             connect_request_tx,
@@ -847,7 +845,7 @@ async fn no_reconnection_without_namespaces_until_one_opens() {
 }
 
 #[tokio::test]
-async fn answered_session_restarts_the_attempt_count() {
+async fn confirmed_namespace_restarts_the_attempt_count() {
     let backoff = Backoff::new(Duration::ZERO, Duration::ZERO, 0.0, Some(1));
     let mut manager = TestManager::spawn_with(Some(backoff)).await;
     let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
@@ -858,7 +856,8 @@ async fn answered_session_restarts_the_attempt_count() {
         assert_eq!(&*manager.recv_client_text().await, "0");
     }
 
-    // The open session is never answered, so it used up the one attempt.
+    // The open engine never confirms the namespace, so it used up the one
+    // attempt.
     manager.session.take().unwrap().end().await;
     assert!(server_packet_rx.recv().await.is_none());
 

@@ -14,7 +14,6 @@ use crate::ack::AckType;
 use crate::error::{ClientBuilderError, ClientError, ManagerError, PayloadError, SocketError};
 use crate::manager::backoff::Backoff;
 use crate::manager::connect_request::ConnectRequest;
-use crate::manager::supervisor::Supervisor;
 use crate::marker::{AckId, AckMarker, BinaryMarker};
 use crate::packet::{ClientPacket, DynEvent, ServerPacket};
 
@@ -104,8 +103,8 @@ impl From<usize> for ChannelConfig {
 ///
 /// After an Engine.IO session drops while namespaces are open, attempt `n`
 /// waits `delay * 2^n`, moved up or down by a random share of up to
-/// `randomization_factor` of itself, and capped at `delay_max`. A session the
-/// server answers restarts the count.
+/// `randomization_factor` of itself, and capped at `delay_max`. The count
+/// restarts once the server confirms a namespace.
 ///
 /// Pass it to [`ClientBuilder::reconnection`].
 #[derive(Clone, Copy, Debug)]
@@ -253,8 +252,8 @@ where
 
     /// Connects to the Engine.IO server and returns a [`Client`].
     ///
-    /// Spawns the manager task, which opens one Engine.IO session after
-    /// another while namespaces are open, so a dropped connection reconnects.
+    /// Spawns the manager task, which opens a new engine after the backoff
+    /// delay when a connection drops while namespaces are open.
     ///
     /// # Errors
     ///
@@ -281,7 +280,7 @@ where
 
         let (connect_request_tx, connect_request_rx) = mpsc::channel(channels.manager);
 
-        // Each session opens a new engine with its own connector.
+        // Each engine gets its own connector.
         let connect_engine = move |server_message_tx, client_message_rx| {
             eioc::engine::session::connect(
                 url.clone(),
@@ -295,14 +294,12 @@ where
             )
         };
 
-        let supervisor = Supervisor {
-            server_message_capacity: channels.manager,
-            client_message_capacity: channels.engine,
-            backoff,
+        let task = tokio::spawn(crate::manager::client_packet::client_packets_to_messages(
+            connect_request_rx,
             connect_engine,
-        };
-
-        let task = tokio::spawn(crate::manager::session::run(connect_request_rx, supervisor));
+            channels,
+            backoff,
+        ));
 
         Ok(Client {
             connect_request_tx,

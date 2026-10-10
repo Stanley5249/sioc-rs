@@ -22,13 +22,11 @@ pub struct Routes(Mutex<HashMap<ByteString, Route>>);
 /// Dropping it closes the namespace: the receiver ends, the pending acks fail,
 /// and the senders close.
 struct Route {
-    /// Tells a reopened namespace apart from the one before it.
-    generation: u64,
     server_packet_tx: mpsc::Sender<ServerPacket>,
     /// Acks of events sent or waiting in the send buffer, which the server may
     /// answer.
     ack_txs: HashMap<u64, oneshot::Sender<DynAck>>,
-    /// Whether the server confirmed the namespace in the current session.
+    /// Whether the server confirmed the namespace to the current engine.
     connected: bool,
     _closed: DropGuard,
 }
@@ -44,7 +42,6 @@ impl Routes {
     pub fn insert(
         &self,
         ns: ByteString,
-        generation: u64,
         server_packet_tx: mpsc::Sender<ServerPacket>,
         closed: CancellationToken,
     ) -> bool {
@@ -55,7 +52,6 @@ impl Routes {
         }
 
         let route = Route {
-            generation,
             server_packet_tx,
             ack_txs: HashMap::new(),
             connected: false,
@@ -74,36 +70,28 @@ impl Routes {
         Some(route.server_packet_tx)
     }
 
-    /// Closes one generation of a namespace for the client, returning `false`
-    /// if the server closed it first.
-    pub fn close_generation(&self, ns: &str, generation: u64) -> bool {
-        let mut routes = self.lock();
-
-        if routes
-            .get(ns)
-            .is_none_or(|route| route.generation != generation)
-        {
-            return false;
-        }
-
-        routes.remove(ns);
-
-        true
+    /// Closes a namespace for the client, returning `false` if the server
+    /// closed it first.
+    pub fn close_client(&self, ns: &str) -> bool {
+        self.lock().remove(ns).is_some()
     }
 
-    /// Returns whether this generation of the namespace is still open.
-    pub fn is_open(&self, ns: &str, generation: u64) -> bool {
+    /// Returns whether the namespace is open.
+    pub fn is_open(&self, ns: &str) -> bool {
+        self.lock().contains_key(ns)
+    }
+
+    /// Returns whether the server confirmed the namespace to the current
+    /// engine.
+    pub fn is_connected(&self, ns: &str) -> bool {
+        self.lock().get(ns).is_some_and(|route| route.connected)
+    }
+
+    /// Marks a route connected, returning `true` only the first time.
+    pub fn mark_connected(&self, ns: &str) -> bool {
         self.lock()
-            .get(ns)
-            .is_some_and(|route| route.generation == generation)
-    }
-
-    /// Marks a route connected, returning its generation only the first time.
-    pub fn mark_connected(&self, ns: &str) -> Option<u64> {
-        let mut routes = self.lock();
-        let route = routes.get_mut(ns)?;
-
-        (!std::mem::replace(&mut route.connected, true)).then_some(route.generation)
+            .get_mut(ns)
+            .is_some_and(|route| !std::mem::replace(&mut route.connected, true))
     }
 
     /// Returns the sender to the namespace's receiver, if the namespace is
@@ -116,18 +104,8 @@ impl Routes {
 
     /// Registers an ack receiver. Without an open route it is dropped, which
     /// fails the [`AckHandle`](crate::ack::AckHandle).
-    pub fn register_ack(
-        &self,
-        ns: &str,
-        generation: u64,
-        id: u64,
-        ack_tx: oneshot::Sender<DynAck>,
-    ) {
-        if let Some(route) = self
-            .lock()
-            .get_mut(ns)
-            .filter(|route| route.generation == generation)
-        {
+    pub fn register_ack(&self, ns: &str, id: u64, ack_tx: oneshot::Sender<DynAck>) {
+        if let Some(route) = self.lock().get_mut(ns) {
             route.ack_txs.insert(id, ack_tx);
         }
     }
@@ -144,13 +122,13 @@ impl Routes {
     }
 
     /// Marks every namespace unconfirmed and fails the acks of sent events,
-    /// for when an Engine.IO session ends but the namespaces stay open, like
+    /// for when an engine closes but the namespaces stay open, like
     /// socket.io-client's `Socket._clearAcks`.
     ///
     /// A connected route flushed its send buffer, so all its acks belong to
-    /// sent events. An unconnected route sent nothing since the last session
-    /// ended, so all its acks belong to buffered events and keep waiting.
-    pub fn end_session(&self) {
+    /// sent events. An unconnected route sent nothing since the last engine
+    /// closed, so all its acks belong to buffered events and keep waiting.
+    pub fn clear_acks(&self) {
         for route in self.lock().values_mut() {
             if route.connected {
                 route.ack_txs.clear();
