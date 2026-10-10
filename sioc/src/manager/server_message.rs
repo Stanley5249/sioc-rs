@@ -7,24 +7,15 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{ManagerError, PacketError};
+use crate::manager::open_request::EngineEvent;
 use crate::manager::routes::Routes;
 use crate::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Packet, ServerPacket};
-
-/// What the server-message loop tells the client-packet loop.
-#[derive(Debug)]
-pub enum ServerEvent {
-    /// The server accepted the Engine.IO handshake, like engine.io-client's
-    /// `"open"` event.
-    Opened,
-    /// The server confirmed this namespace.
-    Connected(ByteString),
-}
 
 /// Delivers server packets to the namespace receivers until the engine closes
 /// `server_message_rx`.
 ///
 /// Waiting on a full receiver holds up only this direction. After an error,
-/// drops `server_event_tx`, which tells the client-packet loop to close the
+/// drops `engine_event_tx`, which tells the client-packet loop to close the
 /// engine, and discards server messages until the engine hangs up, so the
 /// engine never sees a failed send.
 ///
@@ -35,11 +26,11 @@ pub enum ServerEvent {
 pub async fn server_messages_to_packets(
     mut server_message_rx: mpsc::Receiver<ServerMessage>,
     routes: &Routes,
-    server_event_tx: mpsc::UnboundedSender<ServerEvent>,
+    engine_event_tx: mpsc::UnboundedSender<EngineEvent>,
 ) -> Result<(), ManagerError> {
-    let result = deliver_server_messages(&mut server_message_rx, routes, &server_event_tx).await;
+    let result = deliver_server_messages(&mut server_message_rx, routes, &engine_event_tx).await;
 
-    drop(server_event_tx);
+    drop(engine_event_tx);
 
     while server_message_rx.recv().await.is_some() {}
 
@@ -53,7 +44,7 @@ pub async fn server_messages_to_packets(
 async fn deliver_server_messages(
     server_message_rx: &mut mpsc::Receiver<ServerMessage>,
     routes: &Routes,
-    server_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    engine_event_tx: &mpsc::UnboundedSender<EngineEvent>,
 ) -> Result<(), ManagerError> {
     let mut reconstructor = None;
 
@@ -62,10 +53,10 @@ async fn deliver_server_messages(
             ServerMessage::Open(handshake) => {
                 tracing::debug!(sid = %handshake.sid, "engine opened");
 
-                send_server_event(server_event_tx, ServerEvent::Opened)?;
+                send_engine_event(engine_event_tx, EngineEvent::Open)?;
             }
             ServerMessage::Text(text) => {
-                route_text(text, routes, server_event_tx, &mut reconstructor).await?;
+                route_text(text, routes, engine_event_tx, &mut reconstructor).await?;
             }
             ServerMessage::Binary(attachment) => {
                 route_binary(attachment, routes, &mut reconstructor).await?;
@@ -78,19 +69,19 @@ async fn deliver_server_messages(
 
 /// Tells the client-packet loop about the engine, which it reads until the
 /// channel ends.
-fn send_server_event(
-    server_event_tx: &mpsc::UnboundedSender<ServerEvent>,
-    server_event: ServerEvent,
+fn send_engine_event(
+    engine_event_tx: &mpsc::UnboundedSender<EngineEvent>,
+    engine_event: EngineEvent,
 ) -> Result<(), ManagerError> {
-    server_event_tx
-        .send(server_event)
-        .map_err(|_| ManagerError::ServerEvent)
+    engine_event_tx
+        .send(engine_event)
+        .map_err(|_| ManagerError::EngineEvent)
 }
 
 async fn route_text(
     text: ByteString,
     routes: &Routes,
-    server_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    engine_event_tx: &mpsc::UnboundedSender<EngineEvent>,
     reconstructor: &mut Option<Ns<BinaryPacket>>,
 ) -> Result<(), ManagerError> {
     if reconstructor.is_some() {
@@ -108,7 +99,7 @@ async fn route_text(
             tracing::debug!(%ns, sid = %connect.sid, "connected");
 
             if routes.mark_connected(&ns) {
-                send_server_event(server_event_tx, ServerEvent::Connected(ns.clone()))?;
+                send_engine_event(engine_event_tx, EngineEvent::Connect(ns.clone()))?;
             }
             send_server_packet(
                 routes.server_packet_tx(&ns),

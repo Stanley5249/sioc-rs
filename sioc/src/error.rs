@@ -345,9 +345,9 @@ pub enum ManagerError {
 
     /// Telling the client-packet loop that the engine opened or the server
     /// confirmed a namespace failed because the channel is closed.
-    #[error("server event channel closed")]
-    #[diagnostic(code(sioc::manager::server_event), help("library bug, please report"))]
-    ServerEvent,
+    #[error("engine event channel closed")]
+    #[diagnostic(code(sioc::manager::engine_event), help("library bug, please report"))]
+    EngineEvent,
 }
 
 impl ManagerError {
@@ -361,7 +361,7 @@ impl ManagerError {
         match self {
             Self::Engine(error) => error.is_internal(),
             Self::Packet(_) | Self::UnexpectedText(_) | Self::UnexpectedBinary(_) => false,
-            Self::ClientMessage(_) | Self::ServerEvent => true,
+            Self::ClientMessage(_) | Self::EngineEvent => true,
         }
     }
 }
@@ -392,7 +392,7 @@ mod tests {
                 EngineError::ClientFrame(mpsc::error::SendError(Bytes::new().into())).into(),
             ),
             ManagerError::ClientMessage(mpsc::error::SendError(Message::Text(ByteString::new()))),
-            ManagerError::ServerEvent,
+            ManagerError::EngineEvent,
         ];
         for error in errors {
             assert!(error.is_internal(), "{error:?}");

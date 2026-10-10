@@ -1,10 +1,32 @@
 //! A request to run one engine, and the handles the client-packet loop keeps.
 
+use bytestring::ByteString;
 use eioc::prelude::Message;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::error::ManagerError;
-use crate::manager::server_message::ServerEvent;
+
+/// What the client-packet loop hears about its engine, like the events
+/// socket.io-client's `Manager` subscribes to. These are the manager's own
+/// notifications, not Socket.IO events.
+///
+/// The engine channel carries only `Open` and `Connect`;
+/// [`ReadyState::next_event`](crate::manager::engine::ReadyState::next_event)
+/// adds `Close` and `Reconnect`.
+#[derive(Debug)]
+pub enum EngineEvent {
+    /// The server accepted the Engine.IO handshake, like engine.io-client's
+    /// `"open"` event.
+    Open,
+    /// The server confirmed this namespace, like socket.io-client's
+    /// `"connect"` event.
+    Connect(ByteString),
+    /// The engine finished, like engine.io-client's `"close"` event.
+    Close(Result<(), ManagerError>),
+    /// The backoff delay is over, like the timer that calls socket.io-client's
+    /// `Manager.reconnect`.
+    Reconnect,
+}
 
 /// An engine for [`run_engines`](crate::manager::engine::run_engines) to run,
 /// like socket.io-client's `Manager.open`.
@@ -16,7 +38,7 @@ pub struct OpenRequest {
     pub client_message_rx: mpsc::Receiver<Message>,
     /// Tells the client-packet loop that the engine opened and which
     /// namespaces the server confirmed.
-    pub server_event_tx: mpsc::UnboundedSender<ServerEvent>,
+    pub engine_event_tx: mpsc::UnboundedSender<EngineEvent>,
     /// Reports the engine's result once it finishes.
     pub engine_result_tx: oneshot::Sender<Result<(), ManagerError>>,
 }
@@ -28,7 +50,7 @@ pub struct OpenHandles {
     pub client_message_tx: mpsc::Sender<Message>,
     /// Reports that the engine opened and which namespaces the server
     /// confirmed, and ends once the engine stops delivering server messages.
-    pub server_event_rx: mpsc::UnboundedReceiver<ServerEvent>,
+    pub engine_event_rx: mpsc::UnboundedReceiver<EngineEvent>,
     /// Receives the engine's result.
     pub engine_result_rx: oneshot::Receiver<Result<(), ManagerError>>,
 }
@@ -43,21 +65,21 @@ impl OpenRequest {
         // waits on the client's sending direction, which waits on the engine,
         // which waits on server packet delivery. Its length stays below the
         // number of namespaces opened in this engine, because each one travels
-        // at most once per route, plus one `Opened`, so the server cannot grow
+        // at most once per route, plus one `Open`, so the server cannot grow
         // it.
-        let (server_event_tx, server_event_rx) = mpsc::unbounded_channel();
+        let (engine_event_tx, engine_event_rx) = mpsc::unbounded_channel();
 
         let (engine_result_tx, engine_result_rx) = oneshot::channel();
 
         let request = Self {
             attempt,
             client_message_rx,
-            server_event_tx,
+            engine_event_tx,
             engine_result_tx,
         };
         let handles = OpenHandles {
             client_message_tx,
-            server_event_rx,
+            engine_event_rx,
             engine_result_rx,
         };
 

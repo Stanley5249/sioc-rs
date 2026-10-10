@@ -8,7 +8,6 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use bytestring::ByteString;
 use eioc::prelude::{Message, ServerMessage};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Sleep;
@@ -16,9 +15,8 @@ use tracing::Instrument;
 
 use crate::config::ChannelConfig;
 use crate::error::ManagerError;
-use crate::manager::open_request::{OpenHandles, OpenRequest};
+use crate::manager::open_request::{EngineEvent, OpenHandles, OpenRequest};
 use crate::manager::routes::Routes;
-use crate::manager::server_message::ServerEvent;
 
 /// Runs each requested engine beside the server-message loop, one at a time,
 /// until the client-packet loop drops its sender.
@@ -38,7 +36,7 @@ pub async fn run_engines<F, Fut>(
         let OpenRequest {
             attempt,
             client_message_rx,
-            server_event_tx,
+            engine_event_tx,
             engine_result_tx,
         } = request;
 
@@ -51,7 +49,7 @@ pub async fn run_engines<F, Fut>(
                 crate::manager::server_message::server_messages_to_packets(
                     server_message_rx,
                     routes,
-                    server_event_tx,
+                    engine_event_tx,
                 ),
                 engine,
             );
@@ -83,7 +81,7 @@ pub enum ReadyState {
     Closing {
         /// Read until it ends, so the server-message loop never sends into a
         /// closed channel.
-        server_event_rx: mpsc::UnboundedReceiver<ServerEvent>,
+        engine_event_rx: mpsc::UnboundedReceiver<EngineEvent>,
         engine_result_rx: oneshot::Receiver<Result<(), ManagerError>>,
         /// Whether the next engine waits for the backoff delay. The client
         /// closes the engine without it, like socket.io-client's
@@ -92,22 +90,6 @@ pub enum ReadyState {
     },
     /// Waiting out the backoff delay before the next engine.
     Reconnecting(Pin<Box<Sleep>>),
-}
-
-/// What the current [`ReadyState`] reports.
-#[derive(Debug)]
-pub enum EngineEvent {
-    /// The server accepted the Engine.IO handshake, like socket.io-client's
-    /// `Manager.onopen`.
-    Opened,
-    /// The server confirmed this namespace.
-    Connected(ByteString),
-    /// The engine stopped delivering server messages.
-    ServerEnded,
-    /// The engine finished, like socket.io-client's `Manager.onclose`.
-    Closed(Result<(), ManagerError>),
-    /// The backoff delay is over.
-    ReconnectDue,
 }
 
 impl ReadyState {
@@ -121,7 +103,7 @@ impl ReadyState {
         *self = match std::mem::replace(self, Self::Closed) {
             Self::Open(OpenHandles {
                 client_message_tx,
-                server_event_rx,
+                engine_event_rx,
                 engine_result_rx,
             }) => {
                 drop(client_message_tx);
@@ -129,7 +111,7 @@ impl ReadyState {
                 tracing::debug!(reconnect, "engine closing");
 
                 Self::Closing {
-                    server_event_rx,
+                    engine_event_rx,
                     engine_result_rx,
                     reconnect,
                 }
@@ -164,35 +146,43 @@ impl ReadyState {
     /// Waits for the next event of the current state. `Closed` never reports
     /// one.
     ///
+    /// Closes the open engine once it stops delivering server messages, then
+    /// waits for its result.
+    ///
     /// Cancel safe: it awaits only `recv`, a oneshot receiver, or a pinned
-    /// `Sleep`. The caller leaves `Closing` once it reports `Closed`, so the
-    /// finished receiver is never polled again.
+    /// `Sleep`, and closing has no suspend point. The caller leaves `Closing`
+    /// once it reports `Close`, so the finished receiver is never polled
+    /// again.
     pub async fn next_event(&mut self) -> EngineEvent {
-        match self {
-            Self::Open(engine) => match engine.server_event_rx.recv().await {
-                Some(ServerEvent::Opened) => EngineEvent::Opened,
-                Some(ServerEvent::Connected(ns)) => EngineEvent::Connected(ns),
-                None => EngineEvent::ServerEnded,
-            },
-            Self::Closing {
-                server_event_rx,
-                engine_result_rx,
-                ..
-            } => {
-                // No engine takes the buffered events any more.
-                while server_event_rx.recv().await.is_some() {}
+        loop {
+            match self {
+                Self::Open(engine) => {
+                    if let Some(event) = engine.engine_event_rx.recv().await {
+                        return event;
+                    }
 
-                let engine_result = engine_result_rx
-                    .await
-                    .expect("run_engines reports every engine's result");
+                    self.close(true);
+                }
+                Self::Closing {
+                    engine_event_rx,
+                    engine_result_rx,
+                    ..
+                } => {
+                    // No engine takes the buffered events any more.
+                    while engine_event_rx.recv().await.is_some() {}
 
-                EngineEvent::Closed(engine_result)
+                    let engine_result = engine_result_rx
+                        .await
+                        .expect("run_engines reports every engine's result");
+
+                    return EngineEvent::Close(engine_result);
+                }
+                Self::Reconnecting(delay) => {
+                    delay.await;
+                    return EngineEvent::Reconnect;
+                }
+                Self::Closed => std::future::pending().await,
             }
-            Self::Reconnecting(delay) => {
-                delay.await;
-                EngineEvent::ReconnectDue
-            }
-            Self::Closed => std::future::pending().await,
         }
     }
 }

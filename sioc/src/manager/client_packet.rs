@@ -16,8 +16,8 @@ use crate::config::ChannelConfig;
 use crate::error::ManagerError;
 use crate::manager::backoff::Backoff;
 use crate::manager::connect_request::ConnectRequest;
-use crate::manager::engine::{EngineEvent, ReadyState};
-use crate::manager::open_request::{OpenHandles, OpenRequest};
+use crate::manager::engine::ReadyState;
+use crate::manager::open_request::{EngineEvent, OpenHandles, OpenRequest};
 use crate::manager::routes::Routes;
 use crate::packet::{ClientPacket, Packet};
 
@@ -276,9 +276,9 @@ async fn send_client_packets(
             event = state.next_event() => match event {
                 // The handshake succeeded, so the next drop starts counting
                 // attempts again, like socket.io-client's `Manager.onreconnect`.
-                EngineEvent::Opened => reset_backoff(&mut backoff),
+                EngineEvent::Open => reset_backoff(&mut backoff),
 
-                EngineEvent::Connected(ns) => {
+                EngineEvent::Connect(ns) => {
                     // A late report can find the name closed and reopened, with
                     // the new route not confirmed yet, so check the route.
                     let namespace = namespaces.get_mut(&ns).filter(|_| routes.is_connected(&ns));
@@ -288,9 +288,7 @@ async fn send_client_packets(
                     }
                 }
 
-                EngineEvent::ServerEnded => state.close(true),
-
-                EngineEvent::Closed(engine_result) => {
+                EngineEvent::Close(engine_result) => {
                     // The finished receiver must never be polled again.
                     let ReadyState::Closing { reconnect, .. } = std::mem::replace(&mut state, ReadyState::Closed) else {
                         unreachable!("only a closing engine reports its result");
@@ -311,7 +309,7 @@ async fn send_client_packets(
                     }
                 }
 
-                EngineEvent::ReconnectDue => {
+                EngineEvent::Reconnect => {
                     let attempt = backoff.as_ref().map_or(0, Backoff::attempts);
                     state = start_engine(&open_request_tx, channels, routes, &namespaces, attempt).await?;
                 }
@@ -331,7 +329,7 @@ async fn send_client_packets(
     state.close(false);
 
     if let ReadyState::Closing { .. } = state {
-        let EngineEvent::Closed(engine_result) = state.next_event().await else {
+        let EngineEvent::Close(engine_result) = state.next_event().await else {
             unreachable!("a closing engine reports only its result");
         };
 
