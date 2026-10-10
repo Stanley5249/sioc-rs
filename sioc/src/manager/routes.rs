@@ -103,16 +103,22 @@ impl Routes {
             .map(|route| route.server_packet_tx.clone())
     }
 
-    /// Registers an ack receiver. Without an open route it is dropped, which
-    /// fails the [`AckHandle`](crate::ack::AckHandle).
+    /// Registers a pending ack sender. Without an open route it is dropped,
+    /// which fails the [`AckHandle`](crate::ack::AckHandle).
     pub fn register_ack(&self, ns: &str, id: u64, ack_tx: oneshot::Sender<DynAck>) {
         if let Some(route) = self.lock().get_mut(ns) {
-            route.ack_txs.insert(id, ack_tx);
+            // Dropping or timing out a handle closes its receiver. Reclaim
+            // those registrations before adding work, so repeated unanswered
+            // requests retain only live waiters and the newest batch.
+            route.ack_txs.retain(|_, sender| !sender.is_closed());
+            if !ack_tx.is_closed() {
+                route.ack_txs.insert(id, ack_tx);
+            }
         }
     }
 
-    /// Removes the ack receiver for `id`, so each ack is delivered at most
-    /// once.
+    /// Removes the pending ack sender for `id`, so each ack is delivered at
+    /// most once.
     pub fn take_ack(&self, ns: &str, id: u64) -> Option<oneshot::Sender<DynAck>> {
         self.lock().get_mut(ns)?.ack_txs.remove(&id)
     }
@@ -142,5 +148,32 @@ impl Routes {
     /// Closes every namespace, for when the client ends.
     pub fn clear(&self) {
         self.lock().clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registering_acks_reclaims_cancelled_waiters() {
+        let routes = Routes::default();
+        let (server_packet_tx, _server_packet_rx) = mpsc::channel(1);
+        assert!(routes.insert("/".into(), server_packet_tx, CancellationToken::new()));
+
+        let (live_tx, live_rx) = oneshot::channel();
+        routes.register_ack("/", 0, live_tx);
+        for id in 1..=100 {
+            let (ack_tx, ack_rx) = oneshot::channel();
+            routes.register_ack("/", id, ack_tx);
+            drop(ack_rx);
+        }
+        assert_eq!(routes.lock()["/"].ack_txs.len(), 2);
+        routes
+            .take_ack("/", 0)
+            .unwrap()
+            .send(DynAck::new("[]"))
+            .unwrap();
+        assert_eq!(&*live_rx.blocking_recv().unwrap().payload, "[]");
     }
 }
