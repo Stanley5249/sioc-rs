@@ -15,6 +15,6 @@ pub const ENGINE_IO_VERSION: &str = "4";
 /// Convenience re-exports for common usage.
 pub mod prelude {
     pub use crate::connector::{WebSocketConnector, WebSocketStream};
-    pub use crate::packet::{Frame, Handshake, Message, Packet};
+    pub use crate::packet::{Event, Frame, Handshake, Message, Packet};
     pub use crate::transport::TransportStrategy;
 }

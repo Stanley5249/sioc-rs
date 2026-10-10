@@ -304,14 +304,11 @@ pub enum ManagerError {
     )]
     UnexpectedBinary(Bytes),
 
-    /// Telling the client-packet loop that the server confirmed a namespace
-    /// failed because the channel is closed.
-    #[error("namespace status channel closed")]
-    #[diagnostic(
-        code(sioc::manager::namespace_status),
-        help("library bug, please report")
-    )]
-    NamespaceStatus,
+    /// Telling the client-packet loop that the engine opened or the server
+    /// confirmed a namespace failed because the channel is closed.
+    #[error("server event channel closed")]
+    #[diagnostic(code(sioc::manager::server_event), help("library bug, please report"))]
+    ServerEvent,
 }
 
 impl ManagerError {
@@ -325,7 +322,7 @@ impl ManagerError {
         match self {
             Self::Engine(error) => error.is_internal(),
             Self::Packet(_) | Self::UnexpectedText(_) | Self::UnexpectedBinary(_) => false,
-            Self::ClientMessage(_) | Self::NamespaceStatus => true,
+            Self::ClientMessage(_) | Self::ServerEvent => true,
         }
     }
 }
@@ -356,7 +353,7 @@ mod tests {
                 EngineError::ClientFrame(mpsc::error::SendError(Bytes::new().into())).into(),
             ),
             ManagerError::ClientMessage(mpsc::error::SendError(Message::Text(ByteString::new()))),
-            ManagerError::NamespaceStatus,
+            ManagerError::ServerEvent,
         ];
         for error in errors {
             assert!(error.is_internal(), "{error:?}");

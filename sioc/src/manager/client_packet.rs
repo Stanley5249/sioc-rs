@@ -6,7 +6,7 @@ use std::ops::ControlFlow;
 
 use bytes::Bytes;
 use bytestring::ByteString;
-use eioc::prelude::Message;
+use eioc::prelude::{Event, Message};
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use tokio::sync::mpsc;
@@ -99,7 +99,7 @@ pub async fn client_packets_to_messages<F, Fut>(
     backoff: Option<Backoff>,
 ) -> Result<(), ManagerError>
 where
-    F: FnMut(mpsc::Sender<Message>, mpsc::Receiver<Message>) -> Fut,
+    F: FnMut(mpsc::Sender<Event>, mpsc::Receiver<Message>) -> Fut,
     Fut: Future<Output = Result<(), eioc::error::Error>>,
 {
     let routes = Routes::default();
@@ -238,11 +238,11 @@ async fn send_client_packets(
             }
 
             event = state.next_event() => match event {
-                EngineEvent::Connected(ns) => {
-                    // The server answered, so the next drop starts counting
-                    // attempts again, like socket.io-client's `Manager.onreconnect`.
-                    reset_backoff(&mut backoff);
+                // The handshake succeeded, so the next drop starts counting
+                // attempts again, like socket.io-client's `Manager.onreconnect`.
+                EngineEvent::Opened => reset_backoff(&mut backoff),
 
+                EngineEvent::Connected(ns) => {
                     // A late report can find the name closed and reopened, with
                     // the new route not confirmed yet, so check the route.
                     let namespace = namespaces.get_mut(&ns).filter(|_| routes.is_connected(&ns));

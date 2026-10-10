@@ -2,56 +2,71 @@
 
 use bytes::Bytes;
 use bytestring::ByteString;
-use eioc::prelude::Message;
+use eioc::prelude::{Event, Message};
 use tokio::sync::mpsc;
 
 use crate::error::{ManagerError, PacketError};
 use crate::manager::routes::Routes;
 use crate::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Packet, ServerPacket};
 
+/// What the server-message loop tells the client-packet loop.
+#[derive(Debug)]
+pub enum ServerEvent {
+    /// The server accepted the Engine.IO handshake, like engine.io-client's
+    /// `"open"` event.
+    Opened,
+    /// The server confirmed this namespace.
+    Connected(ByteString),
+}
+
 /// Delivers server packets to the namespace receivers until the engine closes
-/// `server_message_rx`.
+/// `event_rx`.
 ///
 /// Waiting on a full receiver holds up only this direction. After an error,
-/// drops `connected_ns_tx`, which tells the client-packet loop to
-/// close the engine, and discards server messages until the engine hangs up,
-/// so the engine never sees a failed send.
+/// drops `server_event_tx`, which tells the client-packet loop to close the
+/// engine, and discards engine events until the engine hangs up, so the
+/// engine never sees a failed send.
 ///
 /// # Errors
 ///
 /// Returns an error if the server breaks the protocol, or if the client-packet
 /// loop stopped while a namespace was still connecting.
 pub async fn server_messages_to_packets(
-    mut server_message_rx: mpsc::Receiver<Message>,
+    mut event_rx: mpsc::Receiver<Event>,
     routes: &Routes,
-    connected_ns_tx: mpsc::UnboundedSender<ByteString>,
+    server_event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<(), ManagerError> {
-    let result = deliver_server_messages(&mut server_message_rx, routes, &connected_ns_tx).await;
+    let result = deliver_server_messages(&mut event_rx, routes, &server_event_tx).await;
 
-    drop(connected_ns_tx);
+    drop(server_event_tx);
 
-    while server_message_rx.recv().await.is_some() {}
+    while event_rx.recv().await.is_some() {}
 
-    tracing::debug!("server message channel closed");
+    tracing::debug!("event channel closed");
 
     result
 }
 
-/// Delivers server packets until the engine closes `server_message_rx` or the
-/// server breaks the protocol.
+/// Delivers server packets until the engine closes `event_rx` or the server
+/// breaks the protocol.
 async fn deliver_server_messages(
-    server_message_rx: &mut mpsc::Receiver<Message>,
+    event_rx: &mut mpsc::Receiver<Event>,
     routes: &Routes,
-    connected_ns_tx: &mpsc::UnboundedSender<ByteString>,
+    server_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<(), ManagerError> {
     let mut reconstructor = None;
 
-    while let Some(message) = server_message_rx.recv().await {
-        match message {
-            Message::Text(text) => {
-                route_text(text, routes, connected_ns_tx, &mut reconstructor).await?;
+    while let Some(event) = event_rx.recv().await {
+        match event {
+            Event::Open(handshake) => {
+                tracing::debug!(sid = %handshake.sid, "engine opened");
+
+                send_server_event(server_event_tx, ServerEvent::Opened)?;
             }
-            Message::Binary(attachment) => {
+            Event::Message(Message::Text(text)) => {
+                route_text(text, routes, server_event_tx, &mut reconstructor).await?;
+            }
+            Event::Message(Message::Binary(attachment)) => {
                 route_binary(attachment, routes, &mut reconstructor).await?;
             }
         }
@@ -60,10 +75,21 @@ async fn deliver_server_messages(
     Ok(())
 }
 
+/// Tells the client-packet loop about the engine, which it reads until the
+/// channel ends.
+fn send_server_event(
+    server_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    server_event: ServerEvent,
+) -> Result<(), ManagerError> {
+    server_event_tx
+        .send(server_event)
+        .map_err(|_| ManagerError::ServerEvent)
+}
+
 async fn route_text(
     text: ByteString,
     routes: &Routes,
-    connected_ns_tx: &mpsc::UnboundedSender<ByteString>,
+    server_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     reconstructor: &mut Option<Ns<BinaryPacket>>,
 ) -> Result<(), ManagerError> {
     if reconstructor.is_some() {
@@ -81,9 +107,7 @@ async fn route_text(
             tracing::debug!(%ns, sid = %connect.sid, "connected");
 
             if routes.mark_connected(&ns) {
-                connected_ns_tx
-                    .send(ns.clone())
-                    .map_err(|_| ManagerError::NamespaceStatus)?;
+                send_server_event(server_event_tx, ServerEvent::Connected(ns.clone()))?;
             }
             send_server_packet(
                 routes.server_packet_tx(&ns),

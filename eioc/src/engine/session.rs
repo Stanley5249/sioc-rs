@@ -6,16 +6,17 @@ use url::Url;
 
 use crate::connector::WebSocketConnector;
 use crate::error::Error;
-use crate::packet::Message;
+use crate::packet::{Event, Message};
 use crate::transport::TransportStrategy;
 
 /// Drives the engine protocol and transport concurrently until the session
 /// ends.
 ///
-/// `server_message_tx` receives what the server sends, and `client_message_rx`
-/// carries what the client sends. Dropping the sender of `client_message_rx`
-/// closes the session, and the engine drops `server_message_tx` once the
-/// session has ended, whichever side closed it.
+/// `event_tx` receives [`Event::Open`] once the server accepts the handshake,
+/// then what the server sends, and `client_message_rx` carries what the client
+/// sends. Dropping the sender of `client_message_rx` closes the session, and
+/// the engine drops `event_tx` once the session has ended, whichever side
+/// closed it.
 ///
 /// Returns once the session has ended and the sender of `client_message_rx` is
 /// dropped, even after an error, so sends to `client_message_rx` never fail.
@@ -32,7 +33,7 @@ pub async fn connect<C>(
     http_client: reqwest::Client,
     websocket_connector: C,
     strategy: TransportStrategy,
-    server_message_tx: mpsc::Sender<Message>,
+    event_tx: mpsc::Sender<Event>,
     mut client_message_rx: mpsc::Receiver<Message>,
     server_frame_capacity: usize,
     client_frame_capacity: usize,
@@ -48,7 +49,7 @@ where
 
     let protocol_future = crate::engine::protocol::run_protocol(
         server_frame_rx,
-        server_message_tx,
+        event_tx,
         &mut client_message_rx,
         client_frame_tx,
         handshake_rx,
@@ -71,8 +72,8 @@ where
         transport_future.map_err(Error::Transport),
     );
 
-    // The protocol dropped `server_message_tx`, which tells the upper layer to
-    // close the session. Accept its messages until then, so it never sees a
+    // The protocol dropped `event_tx`, which tells the upper layer to close the
+    // session. Accept its messages until then, so it never sees a
     // failed send.
     crate::engine::protocol::drain(&mut client_message_rx).await;
 

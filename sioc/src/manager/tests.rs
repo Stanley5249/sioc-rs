@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use bytestring::ByteString;
-use eioc::prelude::Message;
+use eioc::prelude::{Event, Handshake, Message};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -17,7 +17,7 @@ const CONNECT_RESPONSE: &str = "0{\"sid\":\"test\"}";
 
 /// The engine end of one session, which a test plays.
 struct TestSession {
-    server_message_tx: mpsc::Sender<Message>,
+    event_tx: mpsc::Sender<Event>,
     client_message_rx: mpsc::Receiver<Message>,
     /// Finishes the engine; dropping it finishes the engine without an error.
     result_tx: oneshot::Sender<Result<(), eioc::error::Error>>,
@@ -30,11 +30,11 @@ impl TestSession {
     /// Returns the client messages that were still queued.
     async fn end(self) -> Vec<Message> {
         let Self {
-            server_message_tx,
+            event_tx,
             mut client_message_rx,
             result_tx,
         } = self;
-        drop(server_message_tx);
+        drop(event_tx);
         let mut messages = Vec::new();
         while let Some(message) = client_message_rx.recv().await {
             messages.push(message);
@@ -89,12 +89,12 @@ impl TestManager {
     async fn spawn_with(backoff: Option<Backoff>) -> Self {
         let (connect_request_tx, connect_request_rx) = mpsc::channel(32);
         let (session_tx, mut session_rx) = mpsc::channel(1);
-        let connect_engine = move |server_message_tx, client_message_rx| {
+        let connect_engine = move |event_tx, client_message_rx| {
             let session_tx = session_tx.clone();
             async move {
                 let (result_tx, result_rx) = oneshot::channel();
                 let session = TestSession {
-                    server_message_tx,
+                    event_tx,
                     client_message_rx,
                     result_tx,
                 };
@@ -160,18 +160,36 @@ impl TestManager {
         (client_packet_tx, handles.server_packet_rx)
     }
 
-    async fn send_server_message(&mut self, text: &'static str) {
+    /// Reports a successful handshake, as the engine does first.
+    async fn send_open(&mut self) {
+        let handshake = Handshake {
+            sid: "engine".into(),
+            upgrades: Vec::new(),
+            ping_interval: 25_000,
+            ping_timeout: 20_000,
+            max_payload: 1_000_000,
+        };
         self.session()
-            .server_message_tx
-            .send(Message::Text(ByteString::from_static(text)))
+            .event_tx
+            .send(Event::Open(handshake))
+            .await
+            .unwrap();
+    }
+
+    async fn send_server_message(&mut self, text: &'static str) {
+        let message = Message::Text(ByteString::from_static(text));
+        self.session()
+            .event_tx
+            .send(Event::Message(message))
             .await
             .unwrap();
     }
 
     async fn send_server_binary(&mut self, bytes: &'static [u8]) {
+        let message = Message::Binary(Bytes::from_static(bytes));
         self.session()
-            .server_message_tx
-            .send(Message::Binary(Bytes::from_static(bytes)))
+            .event_tx
+            .send(Event::Message(message))
             .await
             .unwrap();
     }
@@ -692,7 +710,7 @@ async fn closed_engine_channel_is_error() {
         task,
     } = TestManager::spawn().await;
     let TestSession {
-        server_message_tx,
+        event_tx,
         client_message_rx,
         result_tx,
     } = session.unwrap();
@@ -702,7 +720,7 @@ async fn closed_engine_channel_is_error() {
     // The failed CONNECT drops the reply.
     handles.reply_rx.await.unwrap_err();
 
-    drop(server_message_tx);
+    drop(event_tx);
     drop(result_tx);
     assert!(matches!(
         task.await.unwrap(),
@@ -720,19 +738,20 @@ async fn assert_protocol_error_reconnects(breach: &[Message]) {
     server_packet_rx.recv().await.unwrap();
 
     let TestSession {
-        server_message_tx,
+        event_tx,
         mut client_message_rx,
         result_tx,
     } = manager.session.take().unwrap();
     for message in breach {
-        server_message_tx.send(message.clone()).await.unwrap();
+        event_tx
+            .send(Event::Message(message.clone()))
+            .await
+            .unwrap();
     }
     assert!(client_message_rx.recv().await.is_none());
-    server_message_tx
-        .send(Message::Text(ByteString::from_static(r#"2["late"]"#)))
-        .await
-        .unwrap();
-    drop(server_message_tx);
+    let late = Message::Text(ByteString::from_static(r#"2["late"]"#));
+    event_tx.send(Event::Message(late)).await.unwrap();
+    drop(event_tx);
     result_tx.send(Ok(())).unwrap();
 
     manager.session = manager.session_rx.recv().await;
@@ -946,19 +965,21 @@ async fn no_reconnection_without_namespaces_until_one_opens() {
 }
 
 #[tokio::test]
-async fn confirmed_namespace_restarts_the_attempt_count() {
+async fn opened_engine_restarts_the_attempt_count() {
     let backoff = Backoff::new(Duration::ZERO, Duration::ZERO, 0.0, Some(1));
     let mut manager = TestManager::spawn_with(Some(backoff)).await;
     let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
     for _ in 0..3 {
-        manager.send_server_message(CONNECT_RESPONSE).await;
-        server_packet_rx.recv().await.unwrap();
+        manager.send_open().await;
         manager.reconnect().await;
         assert_eq!(&*manager.recv_client_text().await, "0");
     }
 
-    // The open engine never confirms the namespace, so it used up the one
-    // attempt.
+    // The last engine never opened, so it used up the one attempt. A
+    // confirmed namespace does not count, like socket.io-client, whose
+    // `Manager.onopen` follows the handshake.
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    server_packet_rx.recv().await.unwrap();
     manager.session.take().unwrap().end().await;
     assert!(server_packet_rx.recv().await.is_none());
 

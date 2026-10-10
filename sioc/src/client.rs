@@ -104,7 +104,8 @@ impl From<usize> for ChannelConfig {
 /// After an Engine.IO session drops while namespaces are open, attempt `n`
 /// waits `delay * 2^n`, moved up or down by a random share of up to
 /// `randomization_factor` of itself, and capped at `delay_max`. The count
-/// restarts once the server confirms a namespace.
+/// restarts once an Engine.IO handshake succeeds, like socket.io-client, so it
+/// counts only failed connection attempts in a row.
 ///
 /// Pass it to [`ClientBuilder::reconnection`].
 #[derive(Clone, Copy, Debug)]
@@ -281,13 +282,13 @@ where
         let (connect_request_tx, connect_request_rx) = mpsc::channel(channels.manager);
 
         // Each engine gets its own connector.
-        let connect_engine = move |server_message_tx, client_message_rx| {
+        let connect_engine = move |event_tx, client_message_rx| {
             eioc::engine::session::connect(
                 url.clone(),
                 http_client.clone(),
                 websocket_connector.clone(),
                 transport_strategy,
-                server_message_tx,
+                event_tx,
                 client_message_rx,
                 channels.engine,
                 channels.transport,

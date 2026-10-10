@@ -9,7 +9,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use bytestring::ByteString;
-use eioc::prelude::Message;
+use eioc::prelude::{Event, Message};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Sleep;
 use tracing::Instrument;
@@ -18,6 +18,7 @@ use crate::client::ChannelConfig;
 use crate::error::ManagerError;
 use crate::manager::open_request::{OpenHandles, OpenRequest};
 use crate::manager::routes::Routes;
+use crate::manager::server_message::ServerEvent;
 
 /// Runs each requested engine beside the server-message loop, one at a time,
 /// until the client-packet loop drops its sender.
@@ -30,27 +31,27 @@ pub async fn run_engines<F, Fut>(
     mut connect_engine: F,
     channels: ChannelConfig,
 ) where
-    F: FnMut(mpsc::Sender<Message>, mpsc::Receiver<Message>) -> Fut,
+    F: FnMut(mpsc::Sender<Event>, mpsc::Receiver<Message>) -> Fut,
     Fut: Future<Output = Result<(), eioc::error::Error>>,
 {
     while let Some(request) = open_request_rx.recv().await {
         let OpenRequest {
             attempt,
             client_message_rx,
-            connected_ns_tx,
+            server_event_tx,
             engine_result_tx,
         } = request;
 
-        let (server_message_tx, server_message_rx) = mpsc::channel(channels.manager);
+        let (event_tx, event_rx) = mpsc::channel(channels.manager);
 
-        let engine = connect_engine(server_message_tx, client_message_rx);
+        let engine = connect_engine(event_tx, client_message_rx);
 
         let engine_result = async {
             let (server_result, engine_result) = tokio::join!(
                 crate::manager::server_message::server_messages_to_packets(
-                    server_message_rx,
+                    event_rx,
                     routes,
-                    connected_ns_tx,
+                    server_event_tx,
                 ),
                 engine,
             );
@@ -82,7 +83,7 @@ pub enum ReadyState {
     Closing {
         /// Read until it ends, so the server-message loop never sends into a
         /// closed channel.
-        connected_ns_rx: mpsc::UnboundedReceiver<ByteString>,
+        server_event_rx: mpsc::UnboundedReceiver<ServerEvent>,
         engine_result_rx: oneshot::Receiver<Result<(), ManagerError>>,
     },
     /// Waiting out the backoff delay before the next engine.
@@ -92,6 +93,9 @@ pub enum ReadyState {
 /// What the current [`ReadyState`] reports.
 #[derive(Debug)]
 pub enum EngineEvent {
+    /// The server accepted the Engine.IO handshake, like socket.io-client's
+    /// `Manager.onopen`.
+    Opened,
     /// The server confirmed this namespace.
     Connected(ByteString),
     /// The engine stopped delivering server messages.
@@ -112,7 +116,7 @@ impl ReadyState {
         *self = match std::mem::replace(self, Self::Closed) {
             Self::Open(OpenHandles {
                 client_message_tx,
-                connected_ns_rx,
+                server_event_rx,
                 engine_result_rx,
             }) => {
                 drop(client_message_tx);
@@ -120,7 +124,7 @@ impl ReadyState {
                 tracing::debug!("engine closing");
 
                 Self::Closing {
-                    connected_ns_rx,
+                    server_event_rx,
                     engine_result_rx,
                 }
             }
@@ -145,16 +149,17 @@ impl ReadyState {
     /// finished receiver is never polled again.
     pub async fn next_event(&mut self) -> EngineEvent {
         match self {
-            Self::Open(engine) => match engine.connected_ns_rx.recv().await {
-                Some(ns) => EngineEvent::Connected(ns),
+            Self::Open(engine) => match engine.server_event_rx.recv().await {
+                Some(ServerEvent::Opened) => EngineEvent::Opened,
+                Some(ServerEvent::Connected(ns)) => EngineEvent::Connected(ns),
                 None => EngineEvent::ServerEnded,
             },
             Self::Closing {
-                connected_ns_rx,
+                server_event_rx,
                 engine_result_rx,
             } => {
                 // No engine takes the buffered events any more.
-                while connected_ns_rx.recv().await.is_some() {}
+                while server_event_rx.recv().await.is_some() {}
 
                 let engine_result = engine_result_rx
                     .await

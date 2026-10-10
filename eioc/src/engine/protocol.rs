@@ -7,12 +7,12 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::engine::heartbeat::Heartbeat;
 use crate::error::EngineError;
-use crate::packet::{Frame, Handshake, Message, Packet};
+use crate::packet::{Event, Frame, Handshake, Message, Packet};
 
 #[tracing::instrument(skip_all)]
 pub async fn run_protocol(
     server_frame_rx: mpsc::Receiver<Frame>,
-    server_message_tx: mpsc::Sender<Message>,
+    event_tx: mpsc::Sender<Event>,
     client_message_rx: &mut mpsc::Receiver<Message>,
     client_frame_tx: mpsc::Sender<Frame>,
     handshake_rx: oneshot::Receiver<Handshake>,
@@ -20,31 +20,30 @@ pub async fn run_protocol(
     let handshake = handshake_rx.await?;
     tracing::debug!(sid = %handshake.sid, "received handshake");
 
+    let ping_window = handshake.ping_window();
+
+    event_tx.send(Event::Open(handshake)).await?;
+
     let (pong_tx, pong_rx) = mpsc::channel(1);
 
     // Each direction runs on its own, so a slow consumer on one side never
     // stalls the other.
     tokio::try_join!(
-        server_frames_to_messages(
-            server_frame_rx,
-            server_message_tx,
-            pong_tx,
-            handshake.ping_window()
-        ),
+        server_frames_to_events(server_frame_rx, event_tx, pong_tx, ping_window),
         client_messages_to_frames(client_message_rx, pong_rx, client_frame_tx),
     )?;
 
     Ok(())
 }
 
-/// Forwards server frames as messages until the transport finishes.
+/// Forwards server frames as message events until the transport finishes.
 ///
 /// The transport ends `server_frame_rx` at the server's `Close` packet too, so
 /// the channel's end is the one end of the session, whichever side closed.
-/// Returning drops `server_message_tx`, which ends the message stream.
-pub async fn server_frames_to_messages(
+/// Returning drops `event_tx`, which ends the event stream.
+pub async fn server_frames_to_events(
     mut server_frame_rx: mpsc::Receiver<Frame>,
-    server_message_tx: mpsc::Sender<Message>,
+    event_tx: mpsc::Sender<Event>,
     pong_tx: mpsc::Sender<Frame>,
     ping_window: Duration,
 ) -> Result<(), EngineError> {
@@ -64,7 +63,9 @@ pub async fn server_frames_to_messages(
                         heartbeat.reset();
                     }
                     Packet::Message(payload) => {
-                        server_message_tx.send(Message::Text(payload)).await?;
+                        event_tx
+                            .send(Event::Message(Message::Text(payload)))
+                            .await?;
                     }
                     Packet::Noop => {}
 
@@ -76,7 +77,9 @@ pub async fn server_frames_to_messages(
             Frame::Binary(payload) => {
                 tracing::trace!(bytes = payload.len(), "received binary frame");
 
-                server_message_tx.send(Message::Binary(payload)).await?;
+                event_tx
+                    .send(Event::Message(Message::Binary(payload)))
+                    .await?;
             }
         }
     }
