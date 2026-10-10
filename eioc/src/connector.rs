@@ -38,5 +38,6 @@ impl WebSocketConnector for () {
     }
 }
 
-/// An open WebSocket connection that carries Engine.IO [`Frame`]s.
+/// An open WebSocket connection that carries Engine.IO
+/// [`Frame`](crate::packet::Frame)s.
 pub type WebSocketStream = tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>;
