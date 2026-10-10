@@ -34,7 +34,6 @@ struct Namespace {
     /// in `send_buffer` until then.
     connected: bool,
     send_buffer: Vec<Message>,
-    next_ack_id: u64,
     /// A request to open the same name again, held until this entry ends.
     reopen: Option<ConnectRequest>,
 }
@@ -152,6 +151,12 @@ async fn send_client_packets(
     let mut client_open = true;
     let mut result = Ok(());
 
+    // One counter for every namespace that never restarts, so a late ack for
+    // a closed namespace never answers an event of the same name reopened,
+    // like socket.io-client's `Socket.ids` on the `Socket` that `Manager`
+    // reuses for each name.
+    let mut next_ack_id = 0;
+
     // Open the first engine at once, like socket.io-client's `Manager`.
     let mut state = start_engine(&open_request_tx, channels, routes, &namespaces, 0).await?;
 
@@ -182,7 +187,6 @@ async fn send_client_packets(
                     auth: payload.clone(),
                     connected: false,
                     send_buffer: Vec::new(),
-                    next_ack_id: 0,
                     reopen: None,
                 };
 
@@ -224,7 +228,7 @@ async fn send_client_packets(
                     .get_mut(&ns)
                     .expect("a namespace lives until its client packets end");
 
-                send_client_packet(namespace, routes, engine, client_packet).await?;
+                send_client_packet(namespace, routes, engine, &mut next_ack_id, client_packet).await?;
                 client_packets.push(recv_client_packet(ns, client_packet_rx, closed));
             }
 
@@ -465,6 +469,7 @@ async fn send_client_packet(
     namespace: &mut Namespace,
     routes: &Routes,
     engine: Option<&OpenHandles>,
+    next_ack_id: &mut u64,
     client_packet: ClientPacket,
 ) -> Result<(), ManagerError> {
     let ns = &namespace.ns;
@@ -482,8 +487,8 @@ async fn send_client_packet(
         } => {
             // Register before sending, so the server's answer always finds it.
             let id = ack_tx.map(|ack_tx| {
-                let id = namespace.next_ack_id;
-                namespace.next_ack_id += 1;
+                let id = *next_ack_id;
+                *next_ack_id += 1;
                 routes.register_ack(ns, id, ack_tx);
                 id
             });
@@ -573,7 +578,6 @@ mod tests {
             auth: ByteString::new(),
             connected: false,
             send_buffer: Vec::new(),
-            next_ack_id: 0,
             reopen: None,
         }
     }

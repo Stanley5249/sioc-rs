@@ -536,6 +536,43 @@ async fn reopened_namespace_ignores_old_handles() {
 }
 
 #[tokio::test]
+async fn late_ack_never_resolves_a_reopened_namespace() {
+    let mut manager = TestManager::spawn().await;
+    let (old_tx, mut old_rx) = manager.open("/").await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    old_rx.recv().await.unwrap();
+    let (old_ack_tx, _old_ack_rx) = oneshot::channel();
+    old_tx
+        .send(event(r#"["old"]"#, Some(old_ack_tx)))
+        .await
+        .unwrap();
+    assert_eq!(&*manager.recv_client_text().await, r#"20["old"]"#);
+    old_tx.disconnect();
+    assert_eq!(&*manager.recv_client_text().await, "1");
+
+    let (new_tx, mut new_rx) = manager.open("/").await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    new_rx.recv().await.unwrap();
+    let (new_ack_tx, mut new_ack_rx) = oneshot::channel();
+    new_tx
+        .send(event(r#"["new"]"#, Some(new_ack_tx)))
+        .await
+        .unwrap();
+    assert_eq!(&*manager.recv_client_text().await, r#"21["new"]"#);
+
+    // The server answers the old event after the reopen, as socket.io's
+    // `Socket.ack` allows.
+    manager.send_server_message(r#"30["late"]"#).await;
+    manager.send_server_message(r#"2["sync"]"#).await;
+    new_rx.recv().await.unwrap();
+    assert!(matches!(
+        new_ack_rx.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    manager.finish().await.unwrap();
+}
+
+#[tokio::test]
 async fn duplicate_namespace_is_conflict() {
     let mut manager = TestManager::spawn().await;
     let (_client_packet_tx, _server_packet_rx) = manager.open("/").await;
