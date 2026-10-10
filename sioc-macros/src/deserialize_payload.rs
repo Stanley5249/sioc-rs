@@ -17,15 +17,18 @@ pub fn expand(input: &syn::DeriveInput) -> darling::Result<TokenStream> {
         }
     };
 
+    crate::attrs::validate_flatten(&fields)?;
+    let lifetime = crate::attrs::fresh_lifetime(&input.generics);
+    let sequence = crate::attrs::fresh_type_ident(&input.generics, "__SiocSequence");
     let (impl_generics, type_generics, where_clause) = input.generics.split_for_impl();
     let ident = &input.ident;
     let body = generate_body(&fields, input.strict.is_present());
 
     Ok(quote! {
         impl #impl_generics ::sioc::prelude::DeserializePayload for #ident #type_generics #where_clause {
-            fn deserialize_payload<'de, S>(__seq: &mut S) -> ::std::result::Result<Self, S::Error>
+            fn deserialize_payload<#lifetime, #sequence>(__seq: &mut #sequence) -> ::std::result::Result<Self, #sequence::Error>
             where
-                S: ::serde::de::SeqAccess<'de>,
+                #sequence: ::serde::de::SeqAccess<#lifetime>,
             {
                 #body
             }
@@ -33,13 +36,9 @@ pub fn expand(input: &syn::DeriveInput) -> darling::Result<TokenStream> {
     })
 }
 
-fn var_for_field(f: &SiocField, pos: usize) -> TokenStream {
-    if let Some(name) = &f.ident {
-        quote! { #name }
-    } else {
-        let v = format_ident!("__field_{pos}");
-        quote! { #v }
-    }
+fn var_for_field(pos: usize) -> TokenStream {
+    let var = format_ident!("__sioc_field_{pos}");
+    quote! { #var }
 }
 
 fn generate_body(fields: &darling::ast::Fields<SiocField>, strict: bool) -> TokenStream {
@@ -48,7 +47,7 @@ fn generate_body(fields: &darling::ast::Fields<SiocField>, strict: bool) -> Toke
     let vars: Vec<_> = fields
         .iter()
         .enumerate()
-        .map(|(pos, f)| var_for_field(f, pos))
+        .map(|(pos, _)| var_for_field(pos))
         .collect();
 
     let decls = fields.iter().zip(vars.iter()).enumerate().map(|(i, (field, var))| {
@@ -89,8 +88,12 @@ fn generate_body(fields: &darling::ast::Fields<SiocField>, strict: bool) -> Toke
         }
     };
 
+    let named_fields = fields.iter().zip(&vars).map(|(field, var)| {
+        let name = &field.ident;
+        quote! { #name: #var }
+    });
     let construct = match fields.style {
-        darling::ast::Style::Struct => quote! { Self { #(#vars),* } },
+        darling::ast::Style::Struct => quote! { Self { #(#named_fields),* } },
         darling::ast::Style::Tuple => quote! { Self(#(#vars),*) },
         darling::ast::Style::Unit => quote! { Self },
     };
