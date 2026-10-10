@@ -447,6 +447,19 @@ impl SocketSender {
         if self.closed.is_cancelled() {
             return Err(SocketError::Closed);
         }
+
+        let attachments = match &packet {
+            ClientPacket::Event { attachments, .. } | ClientPacket::Ack { attachments, .. } => {
+                attachments
+            }
+        };
+        if let Some(attachments) = attachments {
+            let count = attachments.len();
+            if !(1..=crate::binary::MAX_ATTACHMENTS).contains(&count) {
+                return Err(SocketError::AttachmentCount { count });
+            }
+        }
+
         self.client_packet_tx
             .send(packet)
             .await
@@ -854,6 +867,37 @@ mod tests {
         let closed = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
         assert!(matches!(closed, Ok(None)), "the attempt never timed out");
         client.join().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_binary_attachment_counts_before_enqueueing() {
+        let (sender, mut rx) = socket_sender();
+        for count in [0, 11] {
+            for is_ack in [false, true] {
+                let attachments = Some(vec![bytes::Bytes::new(); count]);
+                let packet = if is_ack {
+                    ClientPacket::Ack {
+                        payload: "[]".into(),
+                        id: 0,
+                        attachments,
+                    }
+                } else {
+                    ClientPacket::Event {
+                        payload: r#"["x"]"#.into(),
+                        ack_tx: None,
+                        attachments,
+                    }
+                };
+                assert!(
+                    matches!(sender.send(packet).await, Err(SocketError::AttachmentCount { count: actual }) if actual == count),
+                    "{count}, ack={is_ack}"
+                );
+                assert!(matches!(
+                    rx.try_recv(),
+                    Err(mpsc::error::TryRecvError::Empty)
+                ));
+            }
+        }
     }
 
     #[tokio::test]

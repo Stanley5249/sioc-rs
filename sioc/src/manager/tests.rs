@@ -828,6 +828,19 @@ async fn assert_protocol_error_reconnects(breach: &[Message]) {
 }
 
 #[tokio::test]
+async fn invalid_binary_placeholders_reconnect() {
+    for payload in [
+        r#"51-["x",{"_placeholder":true,"num":1}]"#,
+        r#"51-["x",{"nested":[{"_placeholder":true,"num":-1}]}]"#,
+        r#"51-["x",{"_placeholder":true,"num":0.5}]"#,
+        r#"51-["x",{"_placeholder":true}]"#,
+        r#"61-0[{"_placeholder":true,"num":1}]"#,
+    ] {
+        assert_protocol_error_reconnects(&[Message::Text(payload.into())]).await;
+    }
+}
+
+#[tokio::test]
 async fn unexpected_binary_reconnects() {
     assert_protocol_error_reconnects(&[Message::Binary(Bytes::from_static(b"\xFF"))]).await;
 }

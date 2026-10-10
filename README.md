@@ -123,7 +123,7 @@ while let Some(event) = rx.listen::<ChatEvent>().await? {
 
 ### Binary
 
-JSON cannot represent binary data directly, so Socket.IO sends it as _binary attachments_, separate frames that accompany the JSON packet. The Socket.IO JS library finds and replaces binary objects automatically at runtime. `sioc` requires you to register binary data via an `AttachmentsBuilder` closure and embed the returned `Placeholder` in your struct. On the receiving side, use `data.slot()` to index into `attachments`.
+JSON cannot represent binary data directly, so Socket.IO sends it as _binary attachments_, separate frames that accompany the JSON packet. The Socket.IO JS library finds and replaces binary objects automatically at runtime. `sioc` requires you to register binary data via an `AttachmentsBuilder` closure and embed the returned `Placeholder` in your struct. On the receiving side, use `data.get(&attachments)` for checked access. Binary packets carry between one and `MAX_ATTACHMENTS` attachments, matching the JavaScript parser's default limit.
 
 One type can derive both `SerializePayload` and `DeserializePayload` when the event flows both ways.
 
@@ -164,7 +164,7 @@ while let Some(event) = rx.listen::<ChatEvent>().await? {
             attachments, // Vec<Bytes>
             ..
         }) => {
-            let bytes = &attachments[data.slot()];
+            let bytes = data.get(&attachments)?;
             println!("image {name}: {} bytes", bytes.len());
         }
     }

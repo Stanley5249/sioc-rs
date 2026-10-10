@@ -138,13 +138,46 @@ async fn route_text(
             send_server_packet(routes.close(&ns), &ns, ServerPacket::ConnectError(error)).await;
         }
         Packet::BinaryEvent { payload, id, count } => {
+            validate_placeholders(&payload, count)?;
             *reconstructor = Some(Ns(ns, BinaryPacket::event(payload, id, count)));
         }
         Packet::BinaryAck { payload, id, count } => {
+            validate_placeholders(&payload, count)?;
             *reconstructor = Some(Ns(ns, BinaryPacket::ack(payload, id, count)));
         }
     }
 
+    Ok(())
+}
+
+/// Validate before retaining attachment frames, so invalid references cannot
+/// reach application indexing code or hold reconstruction open.
+fn validate_placeholders(payload: &str, count: usize) -> Result<(), PacketError> {
+    let value: serde_json::Value = serde_json::from_str(payload)?;
+    validate_placeholder_value(&value, count)
+}
+
+fn validate_placeholder_value(value: &serde_json::Value, count: usize) -> Result<(), PacketError> {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                validate_placeholder_value(value, count)?;
+            }
+        }
+        serde_json::Value::Object(values) => {
+            if values.get("_placeholder") == Some(&serde_json::Value::Bool(true)) {
+                let slot = values.get("num").and_then(serde_json::Value::as_u64);
+                if slot.is_none_or(|slot| slot >= count as u64) {
+                    return Err(PacketError::InvalidPlaceholder);
+                }
+            } else {
+                for value in values.values() {
+                    validate_placeholder_value(value, count)?;
+                }
+            }
+        }
+        _ => {}
+    }
     Ok(())
 }
 
