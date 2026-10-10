@@ -173,7 +173,7 @@ while let Some(event) = rx.listen::<ChatEvent>().await? {
 
 ### Reconnection
 
-When the connection drops, the client reconnects with the same backoff as the JavaScript client and connects every open namespace again. Each reconnection shows up as another `ServerPacket::Connect` on the receiver. Events emitted meanwhile wait until the server confirms the namespace, and acks of events that already went out fail. Pass a `ReconnectionConfig` to tune it, or `None` to end the client instead.
+When the connection drops, the client reconnects with the same backoff as the JavaScript client and connects every open namespace again. Each reconnection shows up as another `ServerPacket::Connect` on the receiver. Events emitted meanwhile wait until the server confirms the namespace, and acks of events that already went out fail. Pass a `ReconnectionConfig` to tune it, or `None` to close the namespaces instead. When reconnection gives up, the namespaces close too, and the client stays usable for the next `connect`. Each attempt waits up to 20 seconds for the handshake; change it with `timeout`.
 
 ```rust
 let client = ClientBuilder::new(url)
@@ -183,6 +183,10 @@ let client = ClientBuilder::new(url)
     }))
     .open()?;
 ```
+
+### Namespaces share one connection
+
+Every namespace of a client shares one connection, as in the JavaScript client, so a receiver that stops reading also holds up the other namespaces of that client. Open a separate `Client` for a namespace that must stay independent, like `multiplex: false` in the JavaScript client.
 
 ## Status
 

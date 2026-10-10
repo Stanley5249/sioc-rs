@@ -246,9 +246,12 @@ where
         self
     }
 
-    /// Override the reconnection settings, or pass `None` to end the client
-    /// when an Engine.IO session drops instead (default:
+    /// Override the reconnection settings, or pass `None` to close every
+    /// namespace when an Engine.IO session drops instead (default:
     /// [`ReconnectionConfig::default`]).
+    ///
+    /// The client stays usable either way: once the namespaces close, the next
+    /// [`Client::connect`] opens a new session.
     pub fn reconnection(mut self, config: Option<ReconnectionConfig>) -> Self {
         self.reconnection = config;
         self
@@ -513,6 +516,11 @@ impl SocketSender {
 /// Read it continuously: bounded queues apply backpressure to the server.
 /// A stalled consumer can delay heartbeat responses until the server times out.
 ///
+/// Every namespace of a [`Client`] shares one connection, as with one
+/// socket.io-client `Manager`, so a stalled receiver also holds up the other
+/// namespaces of that client. Open a separate [`Client`] for a namespace that
+/// must stay independent, like socket.io-client's `multiplex: false`.
+///
 /// # Items and reconnection
 ///
 /// The receiver yields only what the server sends. When the Engine.IO session
@@ -528,8 +536,9 @@ impl SocketSender {
 /// | `DISCONNECT`      | [`ServerPacket::Disconnect`]   | `None`, with no reconnection    |
 ///
 /// `None` ends the receiver after a server `DISCONNECT`, a `CONNECT_ERROR`, a
-/// client disconnect, an internal error, or when reconnection gives up.
-/// [`Client::join`] reports why the client ended.
+/// client disconnect, an internal error, or when reconnection gives up or is
+/// off. The client logs engine errors with `tracing`, and [`Client::join`]
+/// reports internal errors.
 #[derive(Debug)]
 pub struct SocketReceiver {
     server_packet_rx: mpsc::Receiver<ServerPacket>,
