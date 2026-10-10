@@ -66,6 +66,7 @@ fn rejects_invalid_event_payloads() {
         r#"["custom:message","invalid"]"#,
         "true",
         "[",
+        r#"["ping"] trailing"#,
     ] {
         assert!(
             matches!(
@@ -75,6 +76,12 @@ fn rejects_invalid_event_payloads() {
             "expected payload error for {payload}",
         );
     }
+}
+
+#[test]
+fn dispatches_escaped_event_names() {
+    let event = Router::try_from(DynEvent::new(r#"["p\u0069ng"]"#, None)).unwrap();
+    assert!(matches!(event, Router::Ping(_)));
 }
 
 #[test]

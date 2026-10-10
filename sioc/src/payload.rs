@@ -38,10 +38,13 @@ where
     T: serde::Deserialize<'de>,
 {
     let mut de = serde_json::Deserializer::from_str(payload);
-    match serde_path_to_error::deserialize(&mut de) {
-        Ok(payload) => Ok(payload),
-        Err(e) => Err(PayloadError::new::<T>(e)),
-    }
+    let mut track = serde_path_to_error::Track::new();
+    let deserializer = serde_path_to_error::Deserializer::new(&mut de, &mut track);
+    let result = T::deserialize(deserializer).and_then(|value| de.end().map(|()| value));
+
+    result.map_err(|error| {
+        PayloadError::new::<T>(serde_path_to_error::Error::new(track.path(), error))
+    })
 }
 
 /// Serializes an [`EventType`] + [`SerializePayload`] value into its
@@ -187,13 +190,13 @@ where
     where
         V: serde::de::SeqAccess<'de>,
     {
-        let name: &'de str = seq
+        let name: String = seq
             .next_element()?
             .ok_or_else(|| serde::de::Error::invalid_length(0, &E::NAME))?;
 
         if name != E::NAME {
             return Err(serde::de::Error::invalid_value(
-                serde::de::Unexpected::Str(name),
+                serde::de::Unexpected::Str(&name),
                 &E::NAME,
             ));
         }
@@ -366,6 +369,21 @@ mod tests {
     #[test]
     fn event_from_json_empty_array_fails() {
         assert!(event_from_json::<TestEvent>("[]").is_err());
+    }
+
+    #[test]
+    fn rejects_trailing_json_for_values_events_and_acks() {
+        for payload in ["true false", "true trailing", "true]"] {
+            assert!(from_json::<bool>(payload).is_err(), "{payload}");
+        }
+        assert!(event_from_json::<TestEvent>(r#"["test"] []"#).is_err());
+        assert!(ack_from_json::<()>("[] null").is_err());
+        assert!(from_json::<bool>("true \n\t ").unwrap());
+    }
+
+    #[test]
+    fn accepts_escaped_event_names() {
+        event_from_json::<TestEvent>(r#"["t\u0065st"]"#).unwrap();
     }
 
     #[test]

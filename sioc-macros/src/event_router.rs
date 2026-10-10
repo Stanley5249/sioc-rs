@@ -120,14 +120,14 @@ pub fn expand(input: &syn::DeriveInput) -> darling::Result<TokenStream> {
             where
                 V: ::serde::de::SeqAccess<'de>,
             {
-                let name: &str = seq
+                let name: ::std::string::String = seq
                     .next_element()?
                     .ok_or_else(|| ::serde::de::Error::invalid_length(0, &"event name"))?;
 
-                Ok(match name {
+                Ok(match name.as_str() {
                     #(#visit_arms)*
                     _ => {
-                        return Err(::serde::de::Error::unknown_variant(name, &[#(#all_names),*]));
+                        return Err(::serde::de::Error::unknown_variant(&name, &[#(#all_names),*]));
                     }
                 })
             }
