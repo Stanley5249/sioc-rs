@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Sleep;
 use tracing::Instrument;
 
-use crate::client::ChannelConfig;
+use crate::config::ChannelConfig;
 use crate::error::ManagerError;
 use crate::manager::open_request::{OpenHandles, OpenRequest};
 use crate::manager::routes::Routes;

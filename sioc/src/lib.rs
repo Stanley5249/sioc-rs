@@ -3,6 +3,7 @@
 pub mod ack;
 pub mod binary;
 pub mod client;
+pub mod config;
 pub mod error;
 pub mod event;
 // The manager runs inside the task that `ClientBuilder::open` spawns, behind
@@ -19,9 +20,8 @@ pub mod prelude {
 
     pub use crate::ack::{Ack, AckHandle, Acknowledge};
     pub use crate::binary::{AttachmentsBuilder, MAX_ATTACHMENTS, Placeholder};
-    pub use crate::client::{
-        ChannelConfig, Client, ClientBuilder, ReconnectionConfig, SocketReceiver, SocketSender,
-    };
+    pub use crate::client::{Client, ClientBuilder, SocketReceiver, SocketSender};
+    pub use crate::config::{ChannelConfig, ReconnectionConfig};
     pub use crate::event::{Emit, Event, EventHandler, EventRouter};
     pub use crate::marker::{
         AckId, AckMarker, AckType, BinaryMarker, EventType, HasAck, HasBinary, NoAck, NoBinary,

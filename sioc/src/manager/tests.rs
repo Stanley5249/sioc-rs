@@ -7,7 +7,8 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::client::{ChannelConfig, SocketReceiver, SocketSender};
+use crate::client::{SocketReceiver, SocketSender};
+use crate::config::ChannelConfig;
 use crate::error::{ManagerError, SocketError};
 use crate::manager::backoff::Backoff;
 use crate::manager::connect_request::ConnectRequest;

@@ -12,7 +12,7 @@ use futures_util::stream::FuturesUnordered;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::client::ChannelConfig;
+use crate::config::ChannelConfig;
 use crate::error::ManagerError;
 use crate::manager::backoff::Backoff;
 use crate::manager::connect_request::ConnectRequest;
