@@ -31,7 +31,7 @@ use crate::client::Emit;
 use crate::error::{EventError, PayloadError};
 use crate::marker::{AckMarker, BinaryMarker, HasAck, HasBinary, NoAck, NoBinary};
 use crate::packet::{ClientPacket, DynEvent};
-use crate::payload::{DeserializePayload, SerializePayload, event_from_json, event_to_json};
+use crate::payload::{DeserializePayload, SerializePayload};
 
 /// Maps a Rust struct to a Socket.IO event name and compile-time policies.
 ///
@@ -87,7 +87,7 @@ where
     type Error = EventError;
 
     fn try_from(value: DynEvent) -> Result<Self, EventError> {
-        let payload = event_from_json(&value.payload)?;
+        let payload = crate::payload::event_from_json(&value.payload)?;
         let id = E::Ack::parse(value.id)?;
         let attachments = E::Binary::parse(value.attachments)?;
         Ok(Self {
@@ -155,7 +155,7 @@ where
     type Output = ();
 
     fn prepare(self) -> Result<(ClientPacket, ()), PayloadError> {
-        let payload = event_to_json(&self)?;
+        let payload = crate::payload::event_to_json(&self)?;
 
         Ok((
             ClientPacket::Event {
@@ -177,7 +177,7 @@ where
 
     fn prepare(self) -> Result<(ClientPacket, AckHandle<A>), PayloadError> {
         let (ack_tx, ack_rx) = oneshot::channel();
-        let payload = event_to_json(&self)?.into();
+        let payload = crate::payload::event_to_json(&self)?.into();
         Ok((
             ClientPacket::Event {
                 payload,
@@ -198,7 +198,7 @@ where
 
     fn prepare(self) -> Result<(ClientPacket, ()), PayloadError> {
         let mut builder = AttachmentsBuilder::new();
-        let payload = event_to_json(&self(&mut builder))?.into();
+        let payload = crate::payload::event_to_json(&self(&mut builder))?.into();
         Ok((
             ClientPacket::Event {
                 payload,
@@ -221,7 +221,7 @@ where
     fn prepare(self) -> Result<(ClientPacket, AckHandle<A>), PayloadError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         let mut builder = AttachmentsBuilder::new();
-        let payload = event_to_json(&self(&mut builder))?.into();
+        let payload = crate::payload::event_to_json(&self(&mut builder))?.into();
         Ok((
             ClientPacket::Event {
                 payload,

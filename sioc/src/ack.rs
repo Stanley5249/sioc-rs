@@ -30,7 +30,7 @@ use crate::client::Acknowledge;
 use crate::error::{AckError, PayloadError};
 use crate::marker::{BinaryMarker, HasBinary, NoBinary};
 use crate::packet::{ClientPacket, DynAck};
-use crate::payload::{DeserializePayload, SerializePayload, ack_from_json, ack_to_json};
+use crate::payload::{DeserializePayload, SerializePayload};
 
 /// Maps a Rust struct to the Socket.IO ack JSON-array encoding.
 ///
@@ -97,7 +97,7 @@ where
     type Error = AckError;
 
     fn try_from(value: DynAck) -> Result<Self, AckError> {
-        let payload = ack_from_json(&value.payload)?;
+        let payload = crate::payload::ack_from_json(&value.payload)?;
         let attachments = A::Binary::parse(value.attachments)?;
         Ok(Self {
             payload,
@@ -111,7 +111,7 @@ where
     A: AckType<Binary = NoBinary> + SerializePayload,
 {
     fn into_client_packet(self, id: u64) -> Result<ClientPacket, PayloadError> {
-        let payload = ack_to_json(&self)?.into();
+        let payload = crate::payload::ack_to_json(&self)?.into();
         Ok(ClientPacket::Ack {
             payload,
             id,
@@ -127,7 +127,7 @@ where
 {
     fn into_client_packet(self, id: u64) -> Result<ClientPacket, PayloadError> {
         let mut builder = AttachmentsBuilder::new();
-        let payload = ack_to_json(&self(&mut builder))?.into();
+        let payload = crate::payload::ack_to_json(&self(&mut builder))?.into();
         Ok(ClientPacket::Ack {
             payload,
             id,
@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn deserialize_unit_ack() {
-        assert_eq!(ack_from_json::<()>("[]").unwrap(), ());
+        assert_eq!(crate::payload::ack_from_json::<()>("[]").unwrap(), ());
     }
 
     #[test]
