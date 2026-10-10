@@ -85,6 +85,10 @@ pub enum ReadyState {
         /// closed channel.
         server_event_rx: mpsc::UnboundedReceiver<ServerEvent>,
         engine_result_rx: oneshot::Receiver<Result<(), ManagerError>>,
+        /// Whether the next engine waits for the backoff delay. The client
+        /// closes the engine without it, like socket.io-client's
+        /// `skipReconnect`.
+        reconnect: bool,
     },
     /// Waiting out the backoff delay before the next engine.
     Reconnecting(Pin<Box<Sleep>>),
@@ -111,8 +115,9 @@ impl ReadyState {
     /// other state stays as it is.
     ///
     /// Drops `client_message_tx`, which closes the engine, and keeps the other
-    /// ends until the engine finishes.
-    pub fn close(&mut self) {
+    /// ends until the engine finishes. `reconnect` tells whether the next
+    /// engine waits for the backoff delay.
+    pub fn close(&mut self, reconnect: bool) {
         *self = match std::mem::replace(self, Self::Closed) {
             Self::Open(OpenHandles {
                 client_message_tx,
@@ -121,15 +126,30 @@ impl ReadyState {
             }) => {
                 drop(client_message_tx);
 
-                tracing::debug!("engine closing");
+                tracing::debug!(reconnect, "engine closing");
 
                 Self::Closing {
                     server_event_rx,
                     engine_result_rx,
+                    reconnect,
                 }
             }
             other => other,
         };
+    }
+
+    /// Closes the engine and cancels a pending reconnection, like
+    /// socket.io-client's `Manager._destroy` once no namespace is active.
+    pub fn destroy(&mut self) {
+        match self {
+            Self::Open(_) => self.close(false),
+            Self::Reconnecting(_) => {
+                tracing::debug!("stopped reconnecting");
+
+                *self = Self::Closed;
+            }
+            Self::Closed | Self::Closing { .. } => {}
+        }
     }
 
     /// Returns the open engine, if any.
@@ -157,6 +177,7 @@ impl ReadyState {
             Self::Closing {
                 server_event_rx,
                 engine_result_rx,
+                ..
             } => {
                 // No engine takes the buffered events any more.
                 while server_event_rx.recv().await.is_some() {}

@@ -90,8 +90,7 @@ async fn next_connect_request(
 ///
 /// # Errors
 ///
-/// Returns an internal error, which is a library bug, or the last engine's
-/// error when reconnection is off or gives up.
+/// Returns an internal error, which is a library bug.
 pub async fn client_packets_to_messages<F, Fut>(
     connect_request_rx: mpsc::Receiver<ConnectRequest>,
     connect_engine: F,
@@ -129,10 +128,13 @@ where
 /// namespaces are open. Without an open engine, holds events in each
 /// namespace's send buffer and discards acks.
 ///
+/// Closes the engine once no namespace is open, like socket.io-client's
+/// `Manager._destroy`, and opens the next one with the next namespace.
+///
 /// Ends once the client handle and every namespace are gone, so having no
-/// namespace at startup or between namespaces keeps it open, or once
-/// reconnection gives up. Then closes every namespace and waits for the
-/// engine to finish. Dropping `open_request_tx` then ends `run_engines`.
+/// namespace at startup or between namespaces keeps it open. Then closes every
+/// namespace and waits for the engine to finish. Dropping `open_request_tx`
+/// then ends `run_engines`.
 ///
 /// # Panics
 ///
@@ -226,6 +228,10 @@ async fn send_client_packets(
                     close_namespace(&ns, routes, engine).await?;
                     reopens.extend(namespace.reopen);
 
+                    if routes.is_empty() && reopens.is_empty() {
+                        state.destroy();
+                    }
+
                     continue;
                 };
 
@@ -252,18 +258,29 @@ async fn send_client_packets(
                     }
                 }
 
-                EngineEvent::ServerEnded => state.close(),
+                EngineEvent::ServerEnded => state.close(true),
 
                 EngineEvent::Closed(engine_result) => {
                     // The finished receiver must never be polled again.
-                    state = ReadyState::Closed;
+                    let ReadyState::Closing { reconnect, .. } = std::mem::replace(&mut state, ReadyState::Closed) else {
+                        unreachable!("only a closing engine reports its result");
+                    };
 
-                    match close_engine(engine_result, &mut namespaces, routes, backoff.as_mut()) {
+                    match close_engine(engine_result, &mut namespaces, routes, backoff.as_mut(), reconnect) {
                         ControlFlow::Continue(next) => state = next,
-                        ControlFlow::Break(last_result) => {
-                            result = last_result;
+                        ControlFlow::Break(error) => {
+                            result = Err(error);
                             break;
                         }
+                    }
+
+                    // A namespace opened while the client closed the engine, so
+                    // the next one opens at once, like socket.io-client's
+                    // `Socket.connect`, which calls `Manager.open`.
+                    if !reconnect && !routes.is_empty() {
+                        reset_backoff(&mut backoff);
+
+                        state = start_engine(&open_request_tx, channels, routes, &namespaces, 0).await?;
                     }
                 }
 
@@ -281,7 +298,7 @@ async fn send_client_packets(
     routes.clear();
     drop(client_packets);
 
-    state.close();
+    state.close(false);
 
     if let ReadyState::Closing { .. } = state {
         let EngineEvent::Closed(engine_result) = state.next_event().await else {
@@ -325,14 +342,16 @@ fn defer_reopen(
 /// Handles a finished engine: fails the acks of sent events and picks the
 /// next state, like socket.io-client's `Manager.onclose` and `reconnect`.
 ///
-/// Breaks with an internal error at once, and with the engine's result when
-/// reconnection is off or gives up.
+/// Breaks with an internal error. Closes every namespace when reconnection is
+/// off or gives up, but keeps the client, like socket.io-client, whose
+/// `Manager` and `Socket`s outlive `reconnect_failed`.
 fn close_engine(
     engine_result: Result<(), ManagerError>,
     namespaces: &mut HashMap<ByteString, Namespace>,
     routes: &Routes,
     backoff: Option<&mut Backoff>,
-) -> ControlFlow<Result<(), ManagerError>, ReadyState> {
+    reconnect: bool,
+) -> ControlFlow<ManagerError, ReadyState> {
     tracing::debug!("engine closed");
 
     // Like socket.io-client's `Socket.onclose`, which calls `_clearAcks`.
@@ -343,22 +362,24 @@ fn close_engine(
     }
 
     if is_fatal(&engine_result) {
-        return ControlFlow::Break(engine_result);
+        return ControlFlow::Break(engine_result.unwrap_err());
     }
 
     // Like `Manager._destroy`, wait for the next namespace instead.
-    if routes.is_empty() {
+    if !reconnect || routes.is_empty() {
         return ControlFlow::Continue(ReadyState::Closed);
     }
 
     let Some(backoff) = backoff else {
         tracing::warn!("reconnection is off");
-        return ControlFlow::Break(engine_result);
+        routes.clear();
+        return ControlFlow::Continue(ReadyState::Closed);
     };
 
     let Some(delay) = backoff.next_delay() else {
         tracing::warn!(attempts = backoff.attempts(), "gave up reconnecting");
-        return ControlFlow::Break(engine_result);
+        routes.clear();
+        return ControlFlow::Continue(ReadyState::Closed);
     };
 
     tracing::info!(attempt = backoff.attempts(), ?delay, "reconnecting");

@@ -254,31 +254,85 @@ async fn closes_when_client_handle_drops_with_no_namespace() {
     task.await.unwrap().unwrap();
 }
 
+/// Sends a connect request as `Client::connect` does, without reading its
+/// CONNECT packet, and returns the handles once the manager accepted it.
+async fn request_namespace(
+    connect_request_tx: &mpsc::Sender<ConnectRequest>,
+    ns: &str,
+) -> crate::manager::connect_request::ConnectHandles {
+    let (connect_request, mut handles) = ConnectRequest::new(ns.into(), ByteString::new(), 32, 32);
+    connect_request_tx.send(connect_request).await.unwrap();
+    (&mut handles.reply_rx).await.unwrap().unwrap();
+    handles
+}
+
 #[tokio::test]
-async fn stays_open_after_last_namespace_while_client_handle_lives() {
+async fn closes_engine_after_last_namespace_while_client_handle_lives() {
     let mut manager = TestManager::spawn().await;
     let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
     manager.send_server_message(CONNECT_RESPONSE).await;
     server_packet_rx.recv().await.unwrap();
     client_packet_tx.disconnect();
     assert_eq!(&*manager.recv_client_text().await, "1");
-    assert_quiet(&mut manager.session().client_message_rx).await;
-    assert!(matches!(
-        manager.session().client_message_rx.try_recv(),
-        Err(TryRecvError::Empty)
-    ));
+    assert!(manager.session().client_message_rx.recv().await.is_none());
+    manager.session.take().unwrap().end().await;
 
-    let TestManager {
-        connect_request_tx,
-        session,
-        task,
-        ..
-    } = manager;
-    let mut session = session.unwrap();
-    drop(connect_request_tx);
-    assert!(session.client_message_rx.recv().await.is_none());
-    session.end().await;
-    task.await.unwrap().unwrap();
+    // The next namespace opens the next engine.
+    let handles = request_namespace(&manager.connect_request_tx, "/next").await;
+    manager.session = manager.session_rx.recv().await;
+    assert_eq!(&*manager.recv_client_text().await, "0/next,");
+    drop(handles);
+    manager.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn connect_while_closing_opens_the_next_engine_at_once() {
+    let hour = Duration::from_secs(3600);
+    let mut manager = TestManager::spawn_with(Some(Backoff::new(hour, hour, 0.0, None))).await;
+    let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    server_packet_rx.recv().await.unwrap();
+    client_packet_tx.disconnect();
+    assert_eq!(&*manager.recv_client_text().await, "1");
+    assert!(manager.session().client_message_rx.recv().await.is_none());
+
+    // The request arrives before the engine finishes closing, and the next
+    // engine skips the backoff delay.
+    let handles = request_namespace(&manager.connect_request_tx, "/next").await;
+    manager.session.take().unwrap().end().await;
+    manager.session = tokio::time::timeout(Duration::from_secs(5), manager.session_rx.recv())
+        .await
+        .expect("the next engine opens at once");
+    assert_eq!(&*manager.recv_client_text().await, "0/next,");
+    drop(handles);
+    manager.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn reconnection_stops_when_the_last_namespace_closes() {
+    let delay = Duration::from_millis(50);
+    let mut manager = TestManager::spawn_with(Some(Backoff::new(delay, delay, 0.0, None))).await;
+    let (client_packet_tx, _server_packet_rx) = manager.open("/").await;
+    manager.session.take().unwrap().end().await;
+    drop(client_packet_tx);
+
+    let next = tokio::time::timeout(delay * 4, manager.session_rx.recv()).await;
+    assert!(next.is_err(), "unexpected session");
+    manager.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn giving_up_closes_namespaces_and_keeps_the_client() {
+    let mut manager = TestManager::spawn().await;
+    let (_client_packet_tx, mut server_packet_rx) = manager.open("/").await;
+    manager.session.take().unwrap().end().await;
+    assert!(server_packet_rx.recv().await.is_none());
+
+    let handles = request_namespace(&manager.connect_request_tx, "/next").await;
+    manager.session = manager.session_rx.recv().await;
+    assert_eq!(&*manager.recv_client_text().await, "0/next,");
+    drop(handles);
+    manager.finish().await.unwrap();
 }
 
 #[tokio::test]
@@ -532,15 +586,18 @@ async fn server_disconnect_ends_receiver_and_handles() {
         Err(SocketError::Closed)
     ));
 
-    // The server closed the namespace, so dropping the handles sends nothing.
+    // The server closed the namespace, so dropping the handles sends no
+    // DISCONNECT, and with no namespace left the engine closes.
     drop(client_packet_tx);
-    assert_quiet(&mut manager.session().client_message_rx).await;
+    assert!(manager.session().client_message_rx.recv().await.is_none());
     manager.finish().await.unwrap();
 }
 
 #[tokio::test]
 async fn connect_error_closes_namespace() {
     let mut manager = TestManager::spawn().await;
+    // Keeps the engine open.
+    let (_keep_tx, _keep_rx) = manager.open("/keep").await;
     let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
     manager
         .send_server_message(r#"4{"message":"denied"}"#)
@@ -586,6 +643,8 @@ async fn client_close_sends_earlier_packets_first() {
 #[tokio::test]
 async fn reopened_namespace_ignores_old_handles() {
     let mut manager = TestManager::spawn().await;
+    // Keeps the engine open.
+    let (_keep_tx, _keep_rx) = manager.open("/keep").await;
     let (old_tx, mut old_rx) = manager.open("/").await;
     manager.send_server_message(CONNECT_RESPONSE).await;
     old_rx.recv().await.unwrap();
@@ -606,6 +665,8 @@ async fn reopened_namespace_ignores_old_handles() {
 #[tokio::test]
 async fn late_ack_never_resolves_a_reopened_namespace() {
     let mut manager = TestManager::spawn().await;
+    // Keeps the engine open.
+    let (other_tx, mut other_rx) = manager.open("/other").await;
     let (old_tx, mut old_rx) = manager.open("/").await;
     manager.send_server_message(CONNECT_RESPONSE).await;
     old_rx.recv().await.unwrap();
@@ -629,7 +690,6 @@ async fn late_ack_never_resolves_a_reopened_namespace() {
     assert_eq!(&*manager.recv_client_text().await, r#"21["new"]"#);
 
     // Another name counts on its own, from 0.
-    let (other_tx, mut other_rx) = manager.open("/other").await;
     manager.send_server_message(r#"0/other,{"sid":"o"}"#).await;
     other_rx.recv().await.unwrap();
     let (other_ack_tx, _other_ack_rx) = oneshot::channel();

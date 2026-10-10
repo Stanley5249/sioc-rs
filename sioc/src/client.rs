@@ -582,7 +582,6 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use eioc::error::{EngineError, Error as EngineIoError, TransportError, WebSocketError};
     use eioc::transport::TransportStrategy;
     use serde_json::Map;
     use tokio::sync::{Semaphore, mpsc};
@@ -806,22 +805,15 @@ mod tests {
         assert!(rx.recv().await.is_none());
         assert_eq!(attempts.load(Ordering::Relaxed), 3);
 
-        assert!(matches!(
-            client.connect("/chat").await,
-            Err(SocketError::Closed)
-        ));
-        assert!(matches!(
-            client.join().await,
-            Err(ClientError::Manager(ManagerError::Engine(
-                EngineIoError::Transport(TransportError::WebSocket(WebSocketError::Tungstenite(
-                    error
-                )))
-            ))) if error.to_string().contains("connector refused")
-        ));
+        // The client outlives giving up, and the next namespace starts over.
+        let (_chat_tx, mut chat_rx) = client.connect("/chat").await.unwrap();
+        assert!(chat_rx.recv().await.is_none());
+        assert_eq!(attempts.load(Ordering::Relaxed), 6);
+        client.join().await.unwrap();
     }
 
     #[tokio::test]
-    async fn without_reconnection_the_first_failure_ends_the_client() {
+    async fn without_reconnection_the_first_failure_closes_the_namespace() {
         let client = ClientBuilder::new(Url::parse("http://localhost:3000/").unwrap())
             .transport(TransportStrategy::WebSocket)
             .reconnection(None)
@@ -836,7 +828,7 @@ mod tests {
             .await
             .unwrap();
         assert!(rx.recv().await.is_none());
-        client.join().await.unwrap_err();
+        client.join().await.unwrap();
     }
 
     #[tokio::test]
@@ -850,13 +842,9 @@ mod tests {
             .unwrap();
 
         let (_tx, mut rx) = client.connect("/").await.unwrap();
-        assert!(rx.recv().await.is_none());
-        assert!(matches!(
-            client.join().await,
-            Err(ClientError::Manager(ManagerError::Engine(
-                EngineIoError::Engine(EngineError::HandshakeTimeout)
-            )))
-        ));
+        let closed = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+        assert!(matches!(closed, Ok(None)), "the attempt never timed out");
+        client.join().await.unwrap();
     }
 
     #[tokio::test]
