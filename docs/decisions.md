@@ -5,6 +5,7 @@ Mistakes this project already made and approaches the project rejected, each wit
 ## Async and shutdown
 
 - Actor select handlers apply I/O results synchronously and yield only protocol inputs. A separate `Step` enum and interpreter repeated those same outcomes without crossing another wait or defining a separate ownership boundary.
+- After a packet input, the actor hands off the message the core produces on its owned slot. Recomputing the read policy in the actor repeated a protocol decision already made before the packet was dequeued.
 
 - A pending engine output reservation belongs to one actor wait. The engine is the channel's only writer, so restarting a cancelled reservation loses no position to another waiter. Acquired permits stay owned until handoff; storing the pending future separately added a boxed object and cleanup state without another responsibility.
 
@@ -32,7 +33,7 @@ Mistakes this project already made and approaches the project rejected, each wit
 
 - CONNECT is queued when participation activates on a running engine, or when a new engine opens for all active namespaces. A separate `connect_due` flag duplicated those transitions and made engine startup clear an enqueue intention it did not use.
 
-- Namespace cleanup never opens replacement handles. The core finishes old inbox ownership and held delivery before opening the waiting request. Repeated terminal packets keep the old participation draining. Held deliveries own the original receiver and token rather than resolving the namespace name again.
+- Namespace cleanup never opens replacement handles. The core finishes old inbox ownership and held delivery before opening the waiting request. Repeated terminal packets keep the old participation draining. Held deliveries own the original receiver and token rather than resolving the namespace name again. That token gives post-transition cleanup one path to discard a delivery before reopening.
 - Ack waiters live with active participation; only the per-name ack counter outlives it. Keeping waiters beside the persistent name allowed cleanup and new handles to share mutable state.
 
 - A namespace ends through the EOF of its inbox when the last `SocketSender` drops. A disconnect message sent from `Drop` was lost when the inbox was full.

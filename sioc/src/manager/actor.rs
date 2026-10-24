@@ -15,7 +15,6 @@ use crate::error::ManagerError;
 use crate::manager::backoff::Backoff;
 use crate::manager::connect_request::ConnectRequest;
 use crate::manager::engine::{Drain, Engine, EngineStep};
-use crate::manager::namespace::Read;
 use crate::manager::namespace_inputs::NamespaceInputs;
 use crate::manager::state::{ManagerCore, ManagerInput, ManagerOutput};
 
@@ -216,14 +215,13 @@ where
             }), if has_namespace_inputs => match packet {
                 Some(packet) => {
                     let ns = namespace_inputs[index].ns.clone();
-                    let read = core.read(&ns, client_message_permit.is_some());
                     core.handle(ManagerInput::Packet { ns, packet })?;
-                    if read == Read::Send {
+                    if client_message_permit.is_some()
+                        && let Some(message) = core.next_message()
+                    {
                         let permit = client_message_permit.take()
-                            .expect("a sendable packet owns an engine permit");
-                        let header = core.next_message()
-                            .expect("a sendable packet produces its header");
-                        permit.send(header);
+                            .expect("an output message is read only with an owned permit");
+                        permit.send(message);
                     }
                     None
                 }

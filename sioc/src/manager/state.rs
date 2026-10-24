@@ -400,13 +400,6 @@ impl ManagerCore {
     fn disconnect(&mut self, ns: &ByteString) {
         tracing::debug!(%ns, "client closed");
         self.decoder.disconnect(ns);
-        if self
-            .held_packet
-            .as_ref()
-            .is_some_and(|delivery| delivery.ns == ns)
-        {
-            self.held_packet = None;
-        }
         let namespace = self
             .namespaces
             .get_mut(ns)
