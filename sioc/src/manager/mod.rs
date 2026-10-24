@@ -28,6 +28,11 @@
 pub mod backoff;
 pub mod client_packet;
 pub mod connect_request;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the manager actor wires the core in")
+)]
+pub mod core;
 pub mod engine;
 pub mod namespaces;
 pub mod open_request;

@@ -49,8 +49,16 @@ impl Backoff {
     }
 
     /// Counts an attempt and returns its delay, or `None` once the attempts
-    /// ran out.
+    /// ran out, like `Backoff.duration` with the attempt check in
+    /// `Manager.reconnect`.
     pub fn next_delay(&mut self) -> Option<Duration> {
+        self.next_delay_with(&mut fastrand::Rng::new())
+    }
+
+    /// Like [`next_delay`](Self::next_delay), but draws the jitter from `rng`,
+    /// so a caller that owns a seeded generator gets reproducible delays. JS
+    /// has no counterpart, because it calls `Math.random`.
+    pub fn next_delay_with(&mut self, rng: &mut fastrand::Rng) -> Option<Duration> {
         if self.max_attempts.is_some_and(|max| self.attempts >= max) {
             return None;
         }
@@ -61,7 +69,7 @@ impl Backoff {
 
         self.attempts = self.attempts.saturating_add(1);
 
-        let random = fastrand::f64();
+        let random = rng.f64();
         let deviation = (random * self.randomization_factor * millis).floor();
 
         // One random number picks both the deviation and its sign, as in JS.
@@ -135,6 +143,19 @@ mod tests {
 
         backoff.reset();
         assert_eq!(backoff.next_delay(), Some(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn seeded_generators_give_equal_delays() {
+        let delays = |seed| {
+            let mut rng = fastrand::Rng::with_seed(seed);
+            let mut backoff = backoff(0.5, None);
+            (0..4)
+                .map(|_| backoff.next_delay_with(&mut rng))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(delays(7), delays(7));
+        assert_ne!(delays(7), delays(8));
     }
 
     #[test]
