@@ -22,8 +22,8 @@
 
 `sioc` follows socket.io-client and `eioc` follows engine.io-client, at the version the module docs link to.
 
-- Give every type, field, variant, and function a JS counterpart, and name that counterpart in its doc comment.
-- Add an item without a JS counterpart only when the Rust design requires it, such as ownership, channels, or one task per direction. Its doc comment states why JS does without it.
+- Give every type, field, variant, and public function a JS counterpart, and name that counterpart in its doc comment. A private helper needs only a clear name.
+- Add an item without a JS counterpart only when Rust needs what JS gets for free, and name the reason in its doc comment: a channel between tasks (JS calls a method), a bound (JS queues are unbounded), cleanup (JS has GC and a synchronous `close`), or a wait (JS writes at once). An item that fits none of these is a design to remove.
 - Keep each entity's state in one owner. A second map with the same key, or a field that repeats another field, belongs in that owner instead.
 - Name a symbol in three steps: take the JS name, adapt it to Rust conventions, then compare it with similar names in std, the dependencies, the JS libraries, and this codebase, and pick one that stays distinct.
 - Name a module after the concept it holds, as the JS files do, rather than after one of its types.
