@@ -1,10 +1,13 @@
 //! One namespace name and everything the manager keeps for it.
+//!
+//! The state and its transitions stay together so participation ownership,
+//! input handoff and termination can be reviewed against the same resources.
 
 use std::collections::HashMap;
 
 use bytestring::ByteString;
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::SocketError;
@@ -47,6 +50,12 @@ struct Active {
     /// The inbox until ownership transfers to the actor's `SendBuffer`, like
     /// `Socket.sendBuffer`. Only its owner drains it.
     client_packet_rx: Option<mpsc::Receiver<ClientPacket>>,
+    /// The confirmed engine's ACK route, like `Socket.ack`. Rust channel.
+    ack_route_tx: watch::Sender<Option<mpsc::Sender<ClientPacket>>>,
+    /// The reply input until the actor takes ownership. Rust channel.
+    ack_packet_rx: Option<mpsc::Receiver<ClientPacket>>,
+    /// Per-engine reply capacity, matching the event inbox. Rust bound.
+    ack_capacity: usize,
     /// Whether `Socket.connect` still needs to queue its CONNECT.
     connect_due: bool,
     /// The JSON auth payload, sent with the CONNECT of every engine, like
@@ -131,6 +140,7 @@ impl Namespace {
         let ConnectRequest {
             payload,
             client_packet_rx,
+            ack_route_tx,
             closed,
             server_packet_tx,
             terminal_packet_tx,
@@ -143,7 +153,10 @@ impl Namespace {
 
         self.state = NamespaceState::Active(Active {
             acks: HashMap::new(),
+            ack_capacity: client_packet_rx.max_capacity(),
             client_packet_rx: Some(client_packet_rx),
+            ack_route_tx,
+            ack_packet_rx: None,
             connect_due: true,
             auth: payload.clone(),
             server_packet_tx,
@@ -161,6 +174,16 @@ impl Namespace {
             return None;
         };
         Some((active.client_packet_rx.take()?, active.closed.clone()))
+    }
+
+    /// Hands the actor the confirmed engine's reply input. Rust channel:
+    /// `Socket.ack` writes directly in JS, while queued Rust replies need a
+    /// session-local owner that can discard them on engine end.
+    pub fn take_acks(&mut self) -> Option<mpsc::Receiver<ClientPacket>> {
+        let NamespaceState::Active(active) = &mut self.state else {
+            return None;
+        };
+        active.ack_packet_rx.take()
     }
 
     /// Takes the auth payload of a namespace that became active since the
@@ -256,7 +279,12 @@ impl Namespace {
 
     /// Records the server's CONNECT, like `Socket.onconnect`.
     pub fn confirm(&mut self) {
-        if let NamespaceState::Active(active) = &mut self.state {
+        if let NamespaceState::Active(active) = &mut self.state
+            && !active.connected
+        {
+            let (tx, rx) = mpsc::channel(active.ack_capacity);
+            active.ack_route_tx.send_replace(Some(tx));
+            active.ack_packet_rx = Some(rx);
             active.connected = true;
         }
     }
@@ -328,9 +356,17 @@ impl Namespace {
     /// Handles the end of an engine, like `Socket.onclose`: fails the waiters
     /// of events the engine took, which is `_clearAcks`. Packets the engine
     /// never took stay in the channel.
-    pub fn engine_closed(&mut self) {
+    pub fn engine_closed(&mut self, ns: &str) {
+        if matches!(&self.state, NamespaceState::Active(active) if active.closed.is_cancelled()) {
+            // The old engine can no longer flush this participation. Finish
+            // admission before retry decisions; only inbox reclamation remains.
+            self.end(ns, None);
+            return;
+        }
         if let NamespaceState::Active(active) = &mut self.state {
             active.acks.clear();
+            active.ack_route_tx.send_replace(None);
+            active.ack_packet_rx = None;
             active.connected = false;
         }
     }

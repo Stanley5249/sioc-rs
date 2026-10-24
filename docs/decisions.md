@@ -5,6 +5,8 @@ Mistakes this project already made and approaches the project rejected, each wit
 ## Async and shutdown
 
 - One engine owner closes admission, drains the incoming direction and collects the connection result. Normal closure, internal failure and shutdown use this same path. Opening cancellation drops its pending future instead of waiting for a handshake that may have no deadline.
+- Packet selection owns its output permit until the synchronous header handoff. Keeping only a readiness snapshot let concurrent engine polling revoke the permit after the event left its inbox, so engine cleanup discarded a truly unsent event. A close transition reports progress before waiting again, allowing the caller to return or release its owned slot.
+- A local opening cancellation drops the connection future; a peer-side opening failure keeps polling it after closing admission so its original error survives input reclamation.
 - Peer closure processes final control packets while reclaiming the session. An already-held packet keeps its original receiver, while later incoming overflow is discarded during cleanup. Local closure discards unread engine messages. This explicit drain policy prevents application capacity from becoming a cleanup prerequisite.
 
 - A loop never awaits a send while it has other inputs to serve. One loop that served both directions stalled the heartbeat and deadlocked the engine and the manager once both inboxes filled, and the same loop deadlocked a caller that emits while handling events under a server flood.
@@ -34,11 +36,17 @@ Mistakes this project already made and approaches the project rejected, each wit
 
 ## Acks
 
+- Unsent events keep their namespace inbox, while ACK replies use a separate bounded input for the confirmed engine. Engine completion drops that input before reconnection, including blocked submissions that captured its sender. Buffering both kinds in the persistent event inbox silently replayed old replies on the next engine. Each input has the configured manager capacity, and local disconnect drains both before releasing the namespace name.
+- Event and reply inputs alternate their first polling opportunity, so a reply flood cannot starve buffered events. When both inputs end in one poll, that poll reports completion; returning pending after observing both EOFs left no future wake and stalled namespace cleanup.
+- Replies submitted while unconfirmed are discarded, preserving the existing rule. `AckId` stays a wire id without a session tag; session isolation applies to queued submissions through their owned input source rather than changing the public event API.
+
 - Ack ids count per namespace name and never restart. Restarting at 0 on reopen let a late ack for the closed namespace answer an event of the new one.
 - Rejected: a session tag on server ack ids. The tag was added and reverted, because the server draws ids from one counter per namespace that never resets, so the server already ignores a stale id, and the JS client sends acks without a check.
 - Registering an ack reclaims waiters whose handles were dropped or timed out. Without that, unanswered requests accumulated waiters.
 
 ## Reconnection
+
+- Engine loss ends participation whose handles already closed before deciding whether to retry. Scheduling first let an immediate retry win the race against inbox EOF and open an engine that no live namespace needed.
 
 - A jitter outside 0 to 1 counts as none, like JS. A factor above 1 produced negative delays.
 - The attempt count restarts on a successful Engine.IO handshake. Restarting on namespace CONNECT differed from JS `Manager.onreconnect`, which counts only failed connection attempts in a row.

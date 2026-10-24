@@ -42,7 +42,8 @@ pub enum EngineStep {
         message: ServerMessage,
         draining: bool,
     },
-    /// An engine permit or one early server message became ready. Rust wait.
+    /// A permit, early server message or close transition became ready.
+    /// Rust wait: every ownership change wakes the caller before waiting again.
     Progress,
     /// The connection future and its server direction have both finished.
     Closed(Result<(), ManagerError>),
@@ -96,16 +97,18 @@ where
 
     /// Stops outgoing acceptance, like `engine.close`. Opening is cancellable
     /// by dropping its future, even when the handshake has no deadline.
-    pub fn close(&mut self, drain: Drain) {
+    /// Returns whether admission stopped in this transition.
+    pub fn close(&mut self, drain: Drain) -> bool {
         if matches!(drain, Drain::Discard) {
             self.drain = Drain::Discard;
         }
-        self.client_message_tx = None;
+        let changed = self.client_message_tx.take().is_some();
         self.permit = None;
         self.reservation = None;
-        if matches!(self.connection, Connection::Opening(_)) {
+        if matches!(drain, Drain::Discard) && matches!(self.connection, Connection::Opening(_)) {
             self.connection = Connection::Finished(Ok(()));
         }
+        changed
     }
 
     /// Whether one message can be handed to this engine now, like an
@@ -123,13 +126,30 @@ where
         self.permit.take()
     }
 
-    /// Advances the session. Dropping this wait loses no message or permit,
-    /// because the connection, reservation and early message remain owned.
-    pub async fn next(&mut self, receive: bool) -> EngineStep {
-        poll_fn(|cx| self.poll_next(receive, cx)).await
+    /// Returns an unused slot after another input won the wait. Rust wait:
+    /// packet selection owns its slot so engine cleanup cannot revoke it.
+    pub fn return_permit(&mut self, permit: mpsc::OwnedPermit<Message>) {
+        if self.client_message_tx.is_some() {
+            assert!(
+                self.permit.is_none(),
+                "only one output slot is reserved for packet selection"
+            );
+            self.permit = Some(permit);
+        }
     }
 
-    fn poll_next(&mut self, receive: bool, cx: &mut Context<'_>) -> Poll<EngineStep> {
+    /// Advances the session. Dropping this wait loses no message or permit,
+    /// because the connection, reservation and early message remain owned.
+    pub async fn next(&mut self, receive: bool, reserve: bool) -> EngineStep {
+        poll_fn(|cx| self.poll_next(receive, reserve, cx)).await
+    }
+
+    fn poll_next(
+        &mut self,
+        receive: bool,
+        reserve: bool,
+        cx: &mut Context<'_>,
+    ) -> Poll<EngineStep> {
         // Poll first so a connection that closes its server direction and
         // then awaits our hang-up is observed in this same turn.
         let result = match &mut self.connection {
@@ -143,10 +163,12 @@ where
                 result.map_err(ManagerError::from)
             };
             self.connection = Connection::Finished(result);
-            self.close(Drain::Deliver);
+            if self.close(Drain::Deliver) {
+                return Poll::Ready(EngineStep::Progress);
+            }
         }
-        if self.server_message_rx.is_closed() {
-            self.close(Drain::Deliver);
+        if self.server_message_rx.is_closed() && self.close(Drain::Deliver) {
+            return Poll::Ready(EngineStep::Progress);
         }
 
         let draining = self.client_message_tx.is_none();
@@ -193,6 +215,7 @@ where
         }
 
         if let Some(sender) = &self.client_message_tx
+            && reserve
             && self.permit.is_none()
         {
             let reservation = self
@@ -210,5 +233,41 @@ where
             }
         }
         Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tracing::Instrument;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn opening_failure_keeps_its_error_while_the_input_drains() {
+        let (server_tx, server_rx) = mpsc::channel(1);
+        let (client_tx, mut client_rx) = mpsc::channel(1);
+        let future = async move {
+            // An Engine.IO failure ends its server direction, then accepts
+            // client input until the manager observes the half-close.
+            drop(server_tx);
+            while client_rx.recv().await.is_some() {}
+            Err(eioc::error::EngineError::HandshakeTimeout.into())
+        };
+        let mut engine = Engine::new(
+            future.instrument(tracing::Span::none()),
+            client_tx,
+            server_rx,
+        );
+        loop {
+            if let EngineStep::Closed(result) = engine.next(false, false).await {
+                assert!(matches!(
+                    result,
+                    Err(ManagerError::Engine(eioc::error::Error::Engine(
+                        eioc::error::EngineError::HandshakeTimeout
+                    )))
+                ));
+                break;
+            }
+        }
     }
 }

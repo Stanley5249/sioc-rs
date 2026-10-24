@@ -1,7 +1,7 @@
 //! A request to open a namespace, and the handles its caller keeps.
 
 use bytestring::ByteString;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::SocketError;
@@ -18,6 +18,9 @@ pub struct ConnectRequest {
     /// What the namespace's [`SocketSender`](crate::client::SocketSender)
     /// clones send.
     pub client_packet_rx: mpsc::Receiver<ClientPacket>,
+    /// Publishes the confirmed engine's ACK input, like `Socket.ack` writing
+    /// directly to the connected manager. Rust channel.
+    pub ack_route_tx: watch::Sender<Option<mpsc::Sender<ClientPacket>>>,
     /// Cancelled once the namespace closes, by either side.
     pub closed: CancellationToken,
     /// Delivers the server's packets to the namespace's
@@ -35,6 +38,8 @@ pub struct ConnectRequest {
 pub struct ConnectHandles {
     /// Feeds the namespace's [`SocketSender`](crate::client::SocketSender).
     pub client_packet_tx: mpsc::Sender<ClientPacket>,
+    /// The current engine's reply route, absent while unconfirmed.
+    pub ack_route_rx: watch::Receiver<Option<mpsc::Sender<ClientPacket>>>,
     /// The token the namespace's senders share.
     pub closed: CancellationToken,
     /// Feeds the namespace's [`SocketReceiver`](crate::client::SocketReceiver).
@@ -54,6 +59,7 @@ impl ConnectRequest {
         server_packet_capacity: usize,
     ) -> (Self, ConnectHandles) {
         let (client_packet_tx, client_packet_rx) = mpsc::channel(client_packet_capacity);
+        let (ack_route_tx, ack_route_rx) = watch::channel(None);
         let (server_packet_tx, server_packet_rx) = mpsc::channel(server_packet_capacity);
         let (terminal_packet_tx, terminal_packet_rx) = oneshot::channel();
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -63,6 +69,7 @@ impl ConnectRequest {
             ns,
             payload,
             client_packet_rx,
+            ack_route_tx,
             closed: closed.clone(),
             server_packet_tx,
             terminal_packet_tx,
@@ -70,6 +77,7 @@ impl ConnectRequest {
         };
         let handles = ConnectHandles {
             client_packet_tx,
+            ack_route_rx,
             closed,
             server_packet_rx,
             terminal_packet_rx,

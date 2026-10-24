@@ -8,6 +8,7 @@
 //!
 //! ```text
 //!  SocketSender --ClientPacket--> channel (= Socket.sendBuffer) --+
+//!  SocketSender --ACK replies--> current engine's reply input ----+
 //!  Client::connect --ConnectRequest-------------------------------+--> actor
 //!  engine --ServerMessage-----------------------------------------+     |
 //!                                                     ManagerInput |     v
@@ -26,7 +27,16 @@
 //!   held alone, and the actor reads at most one more engine message, to see
 //!   the engine hang up, until it is delivered.
 //! - An ack waiter is registered when its event goes to the engine, so an
-//!   engine's end fails exactly the waiters of events it took.
+//!   engine's end fails exactly the waiters of events it took. Packet selection
+//!   owns the output permit through the synchronous header handoff, so
+//!   concurrent engine polling cannot revoke a slot after an event leaves its
+//!   inbox. Unused selection permits return to the same engine.
+//! - Event inboxes survive engine loss. Each confirmed engine publishes a
+//!   separate bounded ACK reply input. Senders capture that route before
+//!   waiting for capacity, and the actor drops all old reply inputs at engine
+//!   completion before starting a successor. Each input has
+//!   `ChannelConfig::manager` slots. Local namespace cleanup drains both
+//!   directions before releasing the name; server termination discards them.
 //! - An engine closes for the core only after its future finished and its
 //!   server direction ended, and each engine gets new channels.
 //!   [`engine::Engine`] owns that completion and uses one reclamation path.

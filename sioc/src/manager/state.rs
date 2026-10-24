@@ -4,6 +4,9 @@
 //! [`ManagerCore`] never awaits and spawns nothing. It touches the
 //! application's channels only through `try_send`, `oneshot::Sender::send`,
 //! and permits its caller hands in, so plain `#[test]`s drive it.
+//! Engine and namespace transitions remain together because their ordering is
+//! the core's contract; route ownership and wire reconstruction live in
+//! [`super::namespace`] and [`super::decoder`].
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
@@ -77,6 +80,14 @@ pub enum ManagerOutput {
         /// Cancelled once the handles leave or the namespace ends, which turns
         /// [`Read::Wait`] into [`Read::Discard`].
         closed: CancellationToken,
+    },
+    /// Installs one confirmed engine's reply input. Rust channel: JS sends
+    /// ACK replies directly rather than buffering them across connections.
+    ListenAcks {
+        /// The connected namespace, like `Socket.nsp`.
+        ns: ByteString,
+        /// Replies for this engine only, discarded when it ends.
+        ack_packet_rx: mpsc::Receiver<ClientPacket>,
     },
 }
 
@@ -216,12 +227,19 @@ impl ManagerCore {
     pub fn next_output(&mut self) -> Option<ManagerOutput> {
         self.outputs.pop_front().or_else(|| {
             self.namespaces.iter_mut().find_map(|(ns, namespace)| {
-                let (client_packet_rx, closed) = namespace.take_listen()?;
-                Some(ManagerOutput::Listen {
-                    ns: ns.clone(),
-                    client_packet_rx,
-                    closed,
-                })
+                if let Some((client_packet_rx, closed)) = namespace.take_listen() {
+                    return Some(ManagerOutput::Listen {
+                        ns: ns.clone(),
+                        client_packet_rx,
+                        closed,
+                    });
+                }
+                namespace
+                    .take_acks()
+                    .map(|ack_packet_rx| ManagerOutput::ListenAcks {
+                        ns: ns.clone(),
+                        ack_packet_rx,
+                    })
             })
         })
     }
@@ -588,8 +606,8 @@ impl ManagerCore {
         self.ready_state = ReadyState::Closed;
         self.decoder.reset();
         self.write_buffer.clear();
-        for namespace in self.namespaces.values_mut() {
-            namespace.engine_closed();
+        for (ns, namespace) in &mut self.namespaces {
+            namespace.engine_closed(ns);
         }
 
         match result {

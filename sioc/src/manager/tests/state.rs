@@ -179,7 +179,7 @@ fn dropping_the_ack_handle_keeps_the_event() {
 }
 
 #[test]
-fn ack_replies_wait_for_the_next_confirmation() {
+fn a_reply_requires_the_current_engine_confirmation() {
     let mut rig = Rig::reconnecting();
     rig.connect("/", "{}", 32);
     rig.handshake();
@@ -193,7 +193,8 @@ fn ack_replies_wait_for_the_next_confirmation() {
     rig.send("/", ack(6));
     assert_eq!(rig.messages(), ["36[]"]);
 
-    // A reply the engine never took waits for the next confirmation.
+    // A newly submitted reply needs current confirmation. The actor owns
+    // old session inputs, which are tested separately from this send rule.
     rig.step(ManagerInput::Closed(Ok(())));
     assert_eq!(rig.core.read("/", true), Read::Wait);
     rig.step(ManagerInput::Reconnect);
@@ -321,14 +322,17 @@ fn engine_loss_before_a_disconnect_drains_ends_the_namespace_without_reconnectin
     handles.closed.cancel();
 
     let effects = rig.step(ManagerInput::Closed(Ok(())));
-    assert_eq!(effects, [Effect::Schedule(Duration::ZERO)]);
+    assert_eq!(effects, []);
+    // A retry timer winning before inbox EOF must not start an unwanted
+    // successor for participation that has already stopped accepting work.
+    assert_eq!(rig.step(ManagerInput::Reconnect), []);
     // The unsent event keeps its waiter until the handles drain.
     assert_eq!(ack.try_recv().unwrap_err(), TryRecvError::Empty);
 
     assert_eq!(rig.core.read("/", true), Read::Discard);
     assert_eq!(rig.step(packet("/", unsent_packet)), []);
     assert_eq!(ack.try_recv().unwrap_err(), TryRecvError::Closed);
-    assert_eq!(rig.step(disconnect("/")), [Effect::Cancel]);
+    assert_eq!(rig.step(disconnect("/")), []);
     assert!(rig.core.is_idle());
 }
 
