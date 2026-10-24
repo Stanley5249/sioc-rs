@@ -398,9 +398,10 @@ impl SocketSender {
     /// Emits an event; returns `()` or an [`AckHandle`](crate::ack::AckHandle)
     /// depending on the ack policy.
     ///
-    /// The event waits until the server confirms the namespace, also after a
-    /// reconnection. The outgoing inbox and pre-connect buffer are each bounded
-    /// by [`ChannelConfig::manager`], so emitting awaits space when both fill.
+    /// The event waits in the namespace's channel until the server confirms
+    /// the namespace, also after a reconnection. The channel holds
+    /// [`ChannelConfig::manager`] packets, so emitting awaits space when it is
+    /// full.
     /// The [`AckHandle`](crate::ack::AckHandle) fails if the
     /// Engine.IO session drops after the event went out, like
     /// socket.io-client's `Socket._clearAcks`.

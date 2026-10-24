@@ -1,6 +1,6 @@
 # Quick Start
 
-A chat client in Rust that joins a room, talks to a bot, and shares an image. Choose `server.ts` on the reference JavaScript implementation or `server.py` on `python-socketio`; both servers implement the same chat events. The bot stands in for other room members, so one client still sees broadcasts.
+A chat client in Rust that joins a room, talks to a bot, and shares an image. Choose `server.ts` on the reference JavaScript implementation or `server.py` on `python-socketio`. Both servers implement the same chat events. The bot stands in for other room members, so one client still sees broadcasts.
 
 The example covers all five concepts from the main README:
 
@@ -74,4 +74,4 @@ server <- ack       confirm: yes
 2. The client shares `crab.png` as an `Image` event with one binary attachment. The server broadcasts it to the room, so the client receives it back.
 3. The client sends a `Say` message. The server broadcasts it to other members, and the bot replies with a `Message`.
 4. The server sends `Confirm` asking whether to leave the room. The client answers with an `Answer(true)` ack.
-5. TypeScript closes the whole connection; Python disconnects the namespace. The Rust client exits the receive loop and closes the remaining session in both cases.
+5. TypeScript closes the whole connection, and Python disconnects the namespace. The Rust client exits the receive loop and closes the remaining session in both cases.

@@ -1,18 +1,18 @@
 # Decisions
 
-Mistakes this project already made and approaches it rejected, each with the choice that replaced it. Read the section for the area you change before changing it. Rules for writing code live in `AGENTS.md`, and module docs describe how the code works today.
+Mistakes this project already made and approaches the project rejected, each with the choice that replaced the mistake. Read the section for the area you change before changing that area. Rules for writing code live in `AGENTS.md`, and module docs describe how the code works today.
 
 ## Async and shutdown
 
 - A loop never awaits a send while it has other inputs to serve. One loop that served both directions stalled the heartbeat and deadlocked the engine and the manager once both inboxes filled, and it deadlocked a caller that emits while handling events under a server flood.
 - After a failure, the failing side keeps accepting input until the other side hangs up. Stopping at once made the other side fail with a closed-channel error, which replaced the root error.
 - The end of a channel is the only close signal between tasks. Forwarding the Engine.IO `Close` packet as well gave two signals for one state, so every side had to handle both.
-- Every channel the server can fill is bounded, and an unbounded channel needs a bound the library enforces. An unbounded control channel queued a message for every repeated CONNECT or unknown DISCONNECT, so a server could grow it without limit.
+- Channels the server can fill are bounded, as the async design rules in `AGENTS.md` require, because an unbounded control channel queued a message for every repeated CONNECT or unknown DISCONNECT, so a server could grow it without limit.
 - One task owns the manager's state, and a synchronous core decides every transition. Two loops that shared namespace state behind a `Mutex` each saw half of every transition, which needed a three-step confirmation state and an unbounded event channel between them.
 - A namespace's channel is its only send buffer, and the actor reads it only when the packet can go to the engine at once. Reading every packet into a second buffer in the core needed a semaphore to bound it, a disconnecting state to flush it, and per-event ack bookkeeping, and hiding the channel until the buffer had room hid its end, so an unconfirmed namespace never closed.
 - A server packet held for a full receiver never hides the engine's hang-up. The actor kept sending events into a session that only drained, which lost them, and an empty closed server direction blocked the engine's cleanup. The actor now reads one more server message while it holds a packet, and checks the hang-up before each read of a channel.
 - Every sender of a namespace's channel is a `SocketSender`, whose `DropGuard` cancels the token when the last one drops. The actor leaves an unconfirmed channel unread, so a raw sender dropped without the token left the namespace open forever.
-- Rejected: one input channel shared by all sources. It loses per-namespace EOF and backpressure, starves control behind data, and needs a forwarding task for engine messages.
+- Rejected: one input channel shared by all sources. The shared channel loses per-namespace EOF and backpressure, starves control behind data, and needs a forwarding task for engine messages.
 - Rejected: generation counters, incarnation ids, or session tags to tell old work from new. Old work is isolated by ownership and finished cleanup instead.
 
 ## Namespaces
@@ -29,7 +29,7 @@ Mistakes this project already made and approaches it rejected, each with the cho
 ## Acks
 
 - Ack ids count per namespace name and never restart. Restarting at 0 on reopen let a late ack for the closed namespace answer an event of the new one.
-- Rejected: a session tag on server ack ids. It was added and reverted, because the server draws ids from one counter per namespace that never resets, so it already ignores a stale id, and the JS client sends acks without a check.
+- Rejected: a session tag on server ack ids. The tag was added and reverted, because the server draws ids from one counter per namespace that never resets, so it already ignores a stale id, and the JS client sends acks without a check.
 - Registering an ack reclaims waiters whose handles were dropped or timed out. Without that, unanswered requests accumulated waiters.
 
 ## Reconnection
@@ -54,4 +54,4 @@ Mistakes this project already made and approaches it rejected, each with the cho
 
 ## Tests
 
-- Protocol rules are tested on the sans-I/O core by inputs and outputs. Core tests that ran through a rig modeling the actor's channel reads repeated the actor's logic and had to be rewritten whenever the core's boundary changed.
+- Protocol rules are core tests, as the test rules in `AGENTS.md` describe, because core tests that ran through a rig modeling the actor's channel reads repeated the actor's logic and had to be rewritten whenever the core's boundary changed.

@@ -13,9 +13,9 @@
 
 `mpsc` below refers to `tokio::sync::mpsc`.
 
-- Keep each piece of state in one task. A loop that serves several inputs never awaits inside a handler. It waits for each output, such as a channel permit or a timer, as its own `select!` branch beside the inputs, so a full queue holds up only the data that needs it. Prove that every branch future is safe to cancel.
+- Keep each piece of state in one task. A loop that serves several inputs never awaits inside a handler. The loop waits for each output, such as a channel permit or a timer, as its own `select!` branch beside the inputs, so a full queue holds up only the data that needs it. Prove that every branch future is safe to cancel.
 - Run independent I/O directions, such as a transport's read and write halves, in separate loops joined with `tokio::join!` when no state ties them together.
-- Shut down through half-close. A task drops its channel senders with `drop` to initiate shutdown, then waits until `mpsc::Receiver::recv` or `mpsc::UnboundedReceiver::recv` returns `None` for every input channel before finishing. Under this protocol, sends between library tasks succeed; treat any send failure as an error. If delivery fails because the caller dropped a receiver, discard the item.
+- Shut down through half-close. A task drops its channel senders with `drop` to initiate shutdown, then waits until `mpsc::Receiver::recv` or `mpsc::UnboundedReceiver::recv` returns `None` for every input channel before finishing. Under this protocol, sends between library tasks succeed, so treat any send failure as an error. If delivery fails because the caller dropped a receiver, discard the item.
 - Use `mpsc::channel` to give every channel fed by the server a bounded capacity. Use `mpsc::unbounded_channel` only if library state limits the number of queued items. Document that limit in a comment on the channel.
 
 ## JS parity
@@ -34,7 +34,7 @@
 - Re-export the public API through `prelude`. Keep `Result` and `Error` aliases outside `prelude` so they do not shadow the corresponding `std` types.
 - Import types and traits by name, or glob-import a `prelude`. To call a function in another module of the same crate, use its full `crate::` path instead of importing that module.
 - For a module with child files, use `<name>/mod.rs` as the module file. Keep that file limited to documentation and `mod` declarations.
-- Name items after their layer: frame for the transport, message for Engine.IO, and packet for Socket.IO. Engine sessions open and close, namespaces connect and disconnect, and the manager shuts down.
+- Name items after their layer. Use frame for the transport, message for Engine.IO, and packet for Socket.IO. Engine sessions open and close, namespaces connect and disconnect, and the manager shuts down.
 - Name each channel's sender and receiver after the items the channel carries. When two channels carry the same item type, prefix both ends of each channel with `server_` or `client_` to identify the side that produces the items.
 
 ## Tests
@@ -52,7 +52,7 @@ Test each behavior at the layer that decides it:
 ## Keep in sync
 
 - When updating the public API, check the `README.md` examples and the doc tests.
-- Keep `justfile` and `.github/workflows/ci.yml` checks functionally equivalent: synchronize tool versions, workspace and target selection, lockfile enforcement, warning policies, test filters, and coverage options when changing either file. Local recipes use quiet output; CI may invoke tools directly with progress output or CI-specific diagnostic formats.
+- Keep `justfile` and `.github/workflows/ci.yml` checks functionally equivalent: synchronize tool versions, workspace and target selection, lockfile enforcement, warning policies, test filters, and coverage options when changing either file. Local recipes use quiet output, while CI may invoke tools directly with progress output or CI-specific diagnostic formats.
 - When updating a `justfile` recipe, check every reference to that recipe.
 - Keep the rustfmt nightly toolchain version synchronized across `justfile`, `.github/workflows/ci.yml`, and `.zed/settings.json`.
 

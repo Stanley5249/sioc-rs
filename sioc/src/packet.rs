@@ -1,4 +1,4 @@
-//! Socket.IO protocol v5 packet types and wire encoding.
+//! Socket.IO protocol revision 5 packet types and wire encoding.
 
 use bytes::Bytes;
 use bytestring::ByteString;

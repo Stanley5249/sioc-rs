@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/crates/l/sioc.svg)](https://crates.io/crates/sioc)
 [![MSRV](https://img.shields.io/badge/rustc-1.88+-blue.svg)](https://blog.rust-lang.org/2025/06/05/Rust-1.88.0.html)
 
-A type-safe, async [Socket.IO protocol v5](https://socket.io/docs/v4/socket-io-protocol/) client for Rust.
+A type-safe, async client for Rust that speaks [Socket.IO protocol revision 5](https://socket.io/docs/v4/socket-io-protocol/), the protocol of Socket.IO 3.x and 4.x servers.
 
 ## Quick Start
 
@@ -171,30 +171,9 @@ while let Some(event) = rx.listen::<ChatEvent>().await? {
 }
 ```
 
-### Reconnection
-
-When the connection drops, the client reconnects with the same backoff as the JavaScript client and connects every open namespace again. Each reconnection shows up as another `ServerPacket::Connect` on the receiver. Events emitted meanwhile wait until the server confirms the namespace, and acks of events that already went out fail.
-
-Pass a `ReconnectionConfig` to tune it, or `None` to close the namespaces instead. When reconnection gives up, the namespaces close too, and the client stays usable for the next `connect`. Configure each attempt's handshake deadline with `timeout`.
-
-```rust
-let client = ClientBuilder::new(url)
-    .reconnection(Some(ReconnectionConfig {
-        attempts: Some(5),
-        ..ReconnectionConfig::default()
-    }))
-    .open()?;
-```
-
-### Namespaces share one connection
-
-Every namespace of a client shares one connection, as in the JavaScript client, so a receiver that stops reading also holds up the other namespaces of that client. Open a separate `Client` for a namespace that must stay independent, like `multiplex: false` in the JavaScript client. Keep retained receivers draining so incoming messages and heartbeats can progress.
-
-Outgoing packets wait in a bounded channel per namespace until the server confirms the namespace. `ChannelConfig::manager` sets its capacity, so sending waits once it is full.
-
 ## Status
 
-Early development. Expect breaking changes. End-to-end tests run against the reference JavaScript server, and benchmarks are not yet in place.
+Early development. Expect breaking changes. End-to-end tests run against the reference JavaScript server.
 
 ## Comparison
 
