@@ -40,8 +40,14 @@
 ## Tests
 
 - **Unit tests:** Put them at the bottom of the source file.
-- **Component tests:** Put them in the submodule's `tests.rs`.
+- **Component tests:** Put them in the submodule's `tests.rs`, or in a `tests/` directory split by scenario group.
 - **End-to-end and derive macro tests:** Put them in `sioc/tests/`.
+
+Test each behavior at the layer that decides it:
+
+- **Core tests:** Every protocol rule, such as ordering, acks, reconnection, namespace lifecycle, and binary packets, is a plain `#[test]` on the sans-I/O core. It sends inputs and asserts outputs and queries, with builders only and no harness that plays the caller.
+- **Actor and engine task tests:** Cover only what the core cannot see: cancel safety, permits and backpressure, hang-up detection, and cleanup that never waits on the application. Use a small fake peer.
+- **End-to-end tests:** Check the wiring against the reference servers, one scenario per feature.
 
 ## Keep in sync
 
