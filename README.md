@@ -202,6 +202,8 @@ Server and client use fundamentally different architectures, so `socketioxide`'s
 
 ## Development
 
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening an issue or a pull request.
+
 Run `just --list` to browse commands. Unsuffixed aggregate recipes cover Rust; `-all` variants add other languages or end-to-end tests. See [`justfile`](justfile) for recipe details.
 
 ### Required

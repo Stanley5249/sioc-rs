@@ -1,0 +1,7 @@
+# Commits whose breaking change a later commit replaced before 0.6.0, so
+# the release notes list only the net change.
+# A session tag on server ack ids, added and reverted.
+8be39f1
+684bc7b
+# ServerEvent became EngineEvent, which became EngineEnded.
+32642d3
