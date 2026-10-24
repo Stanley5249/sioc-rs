@@ -495,6 +495,21 @@ fn a_namespace_opened_while_the_client_closes_the_engine_opens_the_next_at_once(
 }
 
 #[test]
+fn a_namespace_activated_while_flushing_uses_the_same_engine_once() {
+    let mut rig = Rig::new();
+    let old = rig.connected("/");
+    old.closed.cancel();
+    assert_eq!(rig.step(disconnect("/")), []);
+    // DISCONNECT has not been handed off, so this engine is still flushing.
+    let mut new = rig.connect("/new", "{}", 32);
+    new.reply_rx.try_recv().unwrap().unwrap();
+    assert_eq!(rig.effects(), [listen("/new")]);
+    assert_eq!(rig.messages(), ["1", "0/new,{}"]);
+    assert_eq!(rig.step(ManagerInput::Release), []);
+    assert_eq!(rig.messages(), Vec::<String>::new());
+}
+
+#[test]
 fn the_last_namespace_ending_during_a_wait_cancels_it() {
     let mut rig = Rig::reconnecting();
     let handles = rig.connected("/");

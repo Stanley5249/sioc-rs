@@ -190,11 +190,16 @@ impl ManagerCore {
             ManagerInput::Connect(request) => {
                 let ns = request.ns.clone();
                 tracing::debug!(%ns, "namespace opening");
+                let engine_runs = self.engine_runs();
                 let namespace = self.namespaces.entry(ns.clone()).or_default();
                 if namespace.is_inactive() {
                     self.decoder.disconnect(&ns);
                 }
-                namespace.open(request);
+                if let Some(auth) = namespace.open(request)
+                    && engine_runs
+                {
+                    self.write_buffer.push_back(Write::Connect { ns, auth });
+                }
             }
             ManagerInput::Packet { ns, packet } => self.send(&ns, packet),
             ManagerInput::Disconnect(ns) => self.disconnect(&ns),
@@ -432,10 +437,18 @@ impl ManagerCore {
 
         // Reopening is a core transition after old delivery cleanup, never a
         // side effect of a namespace cleanup helper.
+        let engine_runs = self.engine_runs();
         for (ns, namespace) in &mut self.namespaces {
             if let Some(request) = namespace.take_reopen() {
                 self.decoder.disconnect(ns);
-                namespace.open(request);
+                if let Some(auth) = namespace.open(request)
+                    && engine_runs
+                {
+                    self.write_buffer.push_back(Write::Connect {
+                        ns: ns.clone(),
+                        auth,
+                    });
+                }
             }
         }
 
@@ -447,18 +460,6 @@ impl ManagerCore {
                 }
                 ReadyState::Flushing => self.ready_state = ReadyState::Open,
                 ReadyState::Open | ReadyState::Closing { .. } | ReadyState::Reconnecting => {}
-            }
-        }
-
-        let engine_runs = self.engine_runs();
-        for (ns, namespace) in &mut self.namespaces {
-            if let Some(auth) = namespace.take_connect()
-                && engine_runs
-            {
-                self.write_buffer.push_back(Write::Connect {
-                    ns: ns.clone(),
-                    auth,
-                });
             }
         }
     }
@@ -503,8 +504,7 @@ impl ManagerCore {
         self.ready_state = ReadyState::Open;
         self.outputs.push_back(ManagerOutput::Open);
 
-        for (ns, namespace) in &mut self.namespaces {
-            namespace.take_connect();
+        for (ns, namespace) in &self.namespaces {
             if let Some(auth) = namespace.auth() {
                 self.write_buffer.push_back(Write::Connect {
                     ns: ns.clone(),

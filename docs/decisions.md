@@ -22,6 +22,8 @@ Mistakes this project already made and approaches the project rejected, each wit
 
 ## Namespaces
 
+- CONNECT is queued when participation activates on a running engine, or when a new engine opens for all active namespaces. A separate `connect_due` flag duplicated those transitions and made engine startup clear an enqueue intention it did not use.
+
 - Namespace cleanup never opens replacement handles. The core finishes old inbox ownership and held delivery before opening the waiting request. Repeated terminal packets keep the old participation draining. Held deliveries own the original receiver and token rather than resolving the namespace name again.
 - Ack waiters live with active participation; only the per-name ack counter outlives it. Keeping waiters beside the persistent name allowed cleanup and new handles to share mutable state.
 

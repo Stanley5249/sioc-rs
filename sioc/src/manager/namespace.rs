@@ -56,8 +56,6 @@ struct Active {
     ack_packet_rx: Option<mpsc::Receiver<ClientPacket>>,
     /// Per-engine reply capacity, matching the event inbox. Rust bound.
     ack_capacity: usize,
-    /// Whether `Socket.connect` still needs to queue its CONNECT.
-    connect_due: bool,
     /// The JSON auth payload, sent with the CONNECT of every engine, like
     /// `Socket.auth`.
     auth: ByteString,
@@ -157,7 +155,6 @@ impl Namespace {
             client_packet_rx: Some(client_packet_rx),
             ack_route_tx,
             ack_packet_rx: None,
-            connect_due: true,
             auth: payload.clone(),
             server_packet_tx,
             terminal_packet_tx: Some(terminal_packet_tx),
@@ -184,18 +181,6 @@ impl Namespace {
             return None;
         };
         active.ack_packet_rx.take()
-    }
-
-    /// Takes the auth payload of a namespace that became active since the
-    /// last call, so its CONNECT is queued once, like `Socket.connect`.
-    pub fn take_connect(&mut self) -> Option<ByteString> {
-        let NamespaceState::Active(active) = &mut self.state else {
-            return None;
-        };
-        if !std::mem::take(&mut active.connect_due) {
-            return None;
-        }
-        self.auth().cloned()
     }
 
     /// Returns whether the namespace has live handles that still need an
