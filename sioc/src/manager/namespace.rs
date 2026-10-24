@@ -29,7 +29,7 @@ pub struct Namespace {
     /// Whether the namespace became active and its CONNECT is not queued yet,
     /// like `Socket.connect` waiting for `onopen`.
     connect_due: bool,
-    /// Where the namespace is in its life.
+    /// Where the namespace is in its life, like `Socket.active`.
     state: NamespaceState,
 }
 
@@ -59,9 +59,9 @@ struct Active {
     /// Delivers the one terminal packet even when the receiver is full. Rust
     /// bound: JS listeners never fill.
     terminal_packet_tx: Option<oneshot::Sender<ServerPacket>>,
-    /// Shared with the handles, which cancel it when the last one leaves, and
-    /// cancelled when this value drops. Rust cleanup: JS handles are the
-    /// `Socket`.
+    /// Shared with the handles, which cancel it on `disconnect` or when the
+    /// last one drops, and cancelled when this value drops. Rust cleanup: JS
+    /// handles are the `Socket`.
     closed: CancellationToken,
     /// Whether the server confirmed the namespace to the current engine, like
     /// `Socket.connected`.
@@ -75,7 +75,8 @@ impl Drop for Active {
     }
 }
 
-/// What the actor does with the next packet of a namespace's handles.
+/// What the actor does with the next packet of a namespace's handles. Rust
+/// bound: JS writes every packet at once.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Read {
     /// Read it once an engine permit is held, because it goes out at once.
@@ -138,7 +139,8 @@ impl Namespace {
         Some(payload)
     }
 
-    /// Takes the channel and token of handles that just became active.
+    /// Takes the channel and token of handles that just became active. Rust
+    /// channel: JS handles call the `Socket` directly.
     pub fn take_listen(&mut self) -> Option<(mpsc::Receiver<ClientPacket>, CancellationToken)> {
         let NamespaceState::Active(active) = &self.state else {
             return None;
@@ -162,7 +164,8 @@ impl Namespace {
         matches!(self.state, NamespaceState::Active(_))
     }
 
-    /// Returns whether the namespace has no handles and nothing to drain.
+    /// Returns whether the namespace has no handles and nothing to drain,
+    /// like `!Socket.active`.
     #[must_use]
     pub fn is_inactive(&self) -> bool {
         matches!(self.state, NamespaceState::Inactive)
@@ -179,7 +182,8 @@ impl Namespace {
     }
 
     /// Returns what the actor does with the next packet of the handles, given
-    /// whether the engine can take a packet now.
+    /// whether the engine can take a packet now, like `Socket.emitBuffered`
+    /// running once connected.
     #[must_use]
     pub fn read(&self, engine_ready: bool) -> Read {
         match &self.state {
@@ -255,6 +259,7 @@ impl Namespace {
     }
 
     /// Returns a sender to the receiver, to reserve a slot for a held packet.
+    /// Rust bound: JS listeners never fill.
     #[must_use]
     pub fn server_packet_tx(&self) -> Option<mpsc::Sender<ServerPacket>> {
         match &self.state {
@@ -285,7 +290,7 @@ impl Namespace {
         // A channel the actor never took has no old handles to drain, so the
         // name is free at once.
         if self.client_packet_rx.take().is_some() {
-            self.finish();
+            self.become_inactive();
         } else {
             self.state = NamespaceState::Draining;
         }
@@ -299,7 +304,7 @@ impl Namespace {
         let connected = self.is_connected();
         self.state = NamespaceState::Inactive;
         self.acks.clear();
-        self.finish();
+        self.become_inactive();
         connected
     }
 
@@ -323,7 +328,7 @@ impl Namespace {
     }
 
     /// Leaves for `Inactive`, then opens the waiting request, if any.
-    fn finish(&mut self) {
+    fn become_inactive(&mut self) {
         self.state = NamespaceState::Inactive;
         if let Some(request) = self.reopen.take() {
             self.open(request);

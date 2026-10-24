@@ -23,7 +23,8 @@
 //!   `ChannelConfig::manager`.
 //! - The write buffer holds CONNECT and DISCONNECT packets and the attachments
 //!   of the one packet in flight. A server packet whose receiver is full is
-//!   held alone, and the actor reads no engine message until it is delivered.
+//!   held alone, and the actor reads at most one more engine message, to see
+//!   the engine hang up, until it is delivered.
 //! - An ack waiter is registered when its event goes to the engine, so an
 //!   engine's end fails exactly the waiters of events it took.
 //! - An engine closes for the core only after its future finished and its

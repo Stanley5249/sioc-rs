@@ -176,12 +176,14 @@ fn validate_placeholder_value(value: &serde_json::Value, count: usize) -> Result
 /// `BinaryReconstructor.reconPack`.
 #[derive(Debug)]
 enum BinaryPacket {
+    /// A `BINARY_EVENT`, with its optional ack id.
     Event {
         payload: ByteString,
         id: Option<u64>,
         attachments: Vec<Bytes>,
         count: usize,
     },
+    /// A `BINARY_ACK` answering event `id`.
     Ack {
         payload: ByteString,
         id: u64,

@@ -382,7 +382,7 @@ fn a_namespace_that_ends_before_its_channel_was_listened_to_frees_its_name() {
     // taken the channel when the engine ends.
     let (request, mut handles) = rig.request("/", "{}", 32);
     rig.core.handle(ManagerInput::Connect(request)).unwrap();
-    rig.core.handle(ManagerInput::Close(Ok(()))).unwrap();
+    rig.core.handle(ManagerInput::Closed(Ok(()))).unwrap();
     rig.pump();
 
     assert!(matches!(handles.reply_rx.try_recv(), Ok(Ok(()))));
@@ -558,7 +558,7 @@ fn an_internal_error_is_returned_and_shutdown_leaves_the_core_idle() {
     let mut handles = rig.connected("/");
     let mut unsent = rig.emit_ack("/", "[\"e\"]");
 
-    let result = rig.try_input(ManagerInput::Close(Err(ManagerError::EngineEnded)));
+    let result = rig.try_input(ManagerInput::Closed(Err(ManagerError::EngineEnded)));
     assert!(matches!(result, Err(ManagerError::EngineEnded)));
 
     rig.shutdown();
@@ -596,7 +596,7 @@ fn a_full_receiver_holds_one_packet_until_a_slot_frees() {
         Ok(ServerPacket::Connect(_))
     ));
     let permit = sender.reserve_owned().now_or_never().unwrap();
-    rig.core.deliver(permit);
+    rig.core.deliver_held(permit);
 
     assert!(rig.core.held_sender().is_none());
     assert!(matches!(
@@ -626,9 +626,9 @@ fn the_held_packet_is_discarded_when_its_namespace_ends() {
         Ok(ServerPacket::Connect(_))
     ));
     let permit = sender.reserve_owned().now_or_never().unwrap();
-    rig.core.deliver(permit);
+    rig.core.deliver_held(permit);
     handles.server_packet_rx.try_recv().unwrap_err();
-    rig.core.deliver(Err(SendError(())));
+    rig.core.deliver_held(Err(SendError(())));
 }
 
 #[test]
@@ -734,7 +734,7 @@ fn server_protocol_errors_close_the_engine_without_an_internal_error() {
         assert!(!rig.core.has_message());
 
         // The engine then finishes without an error, and the client reconnects.
-        rig.try_input(ManagerInput::Close(Ok(()))).unwrap();
+        rig.try_input(ManagerInput::Closed(Ok(()))).unwrap();
         assert_eq!(rig.effects(), [Effect::Schedule(Duration::ZERO)]);
     }
 }

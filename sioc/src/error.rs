@@ -313,7 +313,9 @@ pub enum ManagerError {
     #[diagnostic(transparent)]
     Packet(#[from] PacketError),
 
-    /// Received a text frame while a binary reassembly was in progress.
+    /// Received a text frame while a binary reassembly was in progress, which
+    /// socket.io-parser's `Decoder.add` rejects with "got plaintext data when
+    /// reconstructing a packet".
     #[error("unexpected text frame: {0:?}")]
     #[diagnostic(
         code(sioc::manager::unexpected_text),
@@ -323,7 +325,9 @@ pub enum ManagerError {
     )]
     UnexpectedText(ByteString),
 
-    /// Received a binary frame with no pending reassembly.
+    /// Received a binary frame with no pending reassembly, which
+    /// socket.io-parser's `Decoder.add` rejects with "got binary data when not
+    /// reconstructing a packet".
     #[error("unexpected binary frame: {0:?}")]
     #[diagnostic(
         code(sioc::manager::unexpected_binary),

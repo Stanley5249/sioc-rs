@@ -315,7 +315,7 @@ impl Rig {
 
     /// The engine finishes without an error.
     pub fn close(&mut self) {
-        self.input(ManagerInput::Close(Ok(())));
+        self.input(ManagerInput::Closed(Ok(())));
     }
 
     /// Opens `ns`, runs the handshake, sends CONNECT, and has the server

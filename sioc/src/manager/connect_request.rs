@@ -7,7 +7,8 @@ use tokio_util::sync::CancellationToken;
 use crate::error::SocketError;
 use crate::packet::{ClientPacket, ServerPacket};
 
-/// A namespace opened by [`Client::connect`](crate::client::Client::connect).
+/// A namespace opened by [`Client::connect`](crate::client::Client::connect),
+/// like the arguments of `Manager.socket`.
 #[derive(Debug)]
 pub struct ConnectRequest {
     /// The namespace to open, such as `/` or `/chat`.

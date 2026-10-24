@@ -41,10 +41,9 @@ where
     let mut actor = ManagerActor {
         core: ManagerCore::new(backoff, fastrand::Rng::new()),
         connect_request_rx: Some(connect_request_rx),
-        client_packets: Vec::new(),
-        next_client_packets: 0,
+        send_buffers: Vec::new(),
+        next_send_buffer: 0,
         engine: None,
-        engines: 0,
         sleep: None,
         connect_engine,
         channels,
@@ -55,8 +54,8 @@ where
     result
 }
 
-/// The one owner of the manager's I/O. Rust task: the JS `Manager` runs its
-/// handlers on the event loop.
+/// The one owner of the manager's I/O. Rust channel: the JS `Manager` is
+/// called directly, while here every source is a channel this task reads.
 struct ManagerActor<F, Fut> {
     /// The manager's state, like the fields of `Manager`.
     core: ManagerCore,
@@ -65,14 +64,12 @@ struct ManagerActor<F, Fut> {
     connect_request_rx: Option<mpsc::Receiver<ConnectRequest>>,
     /// The channel of every active or draining namespace's handles, like each
     /// `Socket.sendBuffer`.
-    client_packets: Vec<ClientPackets>,
-    /// Where the next read of `client_packets` starts, so namespaces take
-    /// turns. Rust wait: JS writes each packet at once.
-    next_client_packets: usize,
+    send_buffers: Vec<SendBuffer>,
+    /// Where the next read of `send_buffers` starts, so namespaces waiting
+    /// together take turns. Rust wait: JS writes each packet at once.
+    next_send_buffer: usize,
     /// The running engine, like `Manager.engine`.
     engine: Option<Engine<Fut>>,
-    /// How many engines opened, for the `engine` span.
-    engines: u64,
     /// The reconnection delay, like the timer in `Manager.reconnect`.
     sleep: Option<Pin<Box<Sleep>>>,
     /// Starts one engine, like the `Engine` constructor in `Manager.open`.
@@ -83,14 +80,17 @@ struct ManagerActor<F, Fut> {
 
 /// The channel of one namespace's handles, like `Socket.sendBuffer`. Rust
 /// channel: JS handles call the `Socket` directly.
-struct ClientPackets {
+struct SendBuffer {
     /// The namespace the channel belongs to, like `Socket.nsp`.
     ns: ByteString,
+    /// The packets the handles sent and the actor has not read, like the
+    /// entries of `Socket.sendBuffer`.
     client_packet_rx: mpsc::Receiver<ClientPacket>,
-    /// Cancelled once the handles leave or the namespace ends.
+    /// Cancelled once the handles leave or the namespace ends, like
+    /// `Socket.active` turning false. Rust cleanup.
     closed: CancellationToken,
     /// Wakes the actor once `closed` is cancelled, while the core leaves the
-    /// channel unread.
+    /// channel unread. Rust wait.
     closed_wait: Pin<Box<WaitForCancellationFutureOwned>>,
 }
 
@@ -101,7 +101,7 @@ struct ClientPackets {
 /// the actor reports the engine closed only once both have, so no old message
 /// reaches the next engine.
 struct Engine<Fut> {
-    /// The engine itself, until it finishes.
+    /// The engine itself until it finishes, like the `Engine` object.
     future: Option<Pin<Box<Instrumented<Fut>>>>,
     /// What goes to the engine, like `engine.write`. Dropping it closes the
     /// engine, like `engine.close`.
@@ -114,20 +114,29 @@ struct Engine<Fut> {
     /// One server message read while a packet is held, so the engine's
     /// hang-up still shows. Rust bound: JS emits synchronously.
     next_server_message: Option<ServerMessage>,
-    /// The engine's result, kept until the server direction ends too.
+    /// The engine's result, like the reason of its `"close"` event, kept until
+    /// the server direction ends too.
     result: Option<Result<(), ManagerError>>,
 }
 
 /// What one turn of the `select!` saw. Rust wait: each JS source calls its
 /// own handler.
 enum Step {
+    /// Something for the core to handle.
     Input(ManagerInput),
+    /// The client handle dropped.
     ClientClosed,
+    /// The engine has room for one message, or dropped its receiver.
     Permit(Result<mpsc::OwnedPermit<Message>, mpsc::error::SendError<()>>),
+    /// The next packet of a send buffer, by index, or `None` at its end.
     ClientPacket(usize, Option<ClientPacket>),
+    /// The receiver of the held packet has room, or dropped.
     Deliver(Result<mpsc::OwnedPermit<ServerPacket>, mpsc::error::SendError<()>>),
+    /// A server message read while a packet is held.
     NextServerMessage(ServerMessage),
+    /// The engine dropped its server message sender.
     ServerEnded,
+    /// The engine future finished.
     EngineFinished(Result<(), ManagerError>),
     /// Every source is gone. `select!` can see that one turn before `drive`.
     Exhausted,
@@ -146,7 +155,7 @@ where
             self.close_hung_up_engine();
 
             if let Some(result) = self.take_finished_engine() {
-                self.core.handle(ManagerInput::Close(result))?;
+                self.core.handle(ManagerInput::Closed(result))?;
                 continue;
             }
             if self.is_finished() {
@@ -169,7 +178,7 @@ where
 
     fn is_finished(&self) -> bool {
         self.connect_request_rx.is_none()
-            && self.client_packets.is_empty()
+            && self.send_buffers.is_empty()
             && self.engine.is_none()
             && self.core.is_idle()
     }
@@ -193,7 +202,7 @@ where
                     ns,
                     client_packet_rx,
                     closed,
-                } => self.client_packets.push(ClientPackets {
+                } => self.send_buffers.push(SendBuffer {
                     ns,
                     client_packet_rx,
                     closed_wait: Box::pin(closed.clone().cancelled_owned()),
@@ -210,12 +219,11 @@ where
             self.engine.is_none(),
             "the core opens an engine only after the last one closed"
         );
-        self.engines += 1;
 
         let (server_message_tx, server_message_rx) = mpsc::channel(self.channels.manager);
         let (client_message_tx, client_message_rx) = mpsc::channel(self.channels.engine);
         let future = (self.connect_engine)(server_message_tx, client_message_rx)
-            .instrument(tracing::info_span!("engine", number = self.engines));
+            .instrument(tracing::info_span!("engine"));
 
         self.engine = Some(Engine {
             future: Some(Box::pin(future)),
@@ -299,8 +307,8 @@ where
         let Self {
             core,
             connect_request_rx,
-            client_packets,
-            next_client_packets,
+            send_buffers,
+            next_send_buffer,
             engine,
             sleep,
             ..
@@ -334,7 +342,7 @@ where
         let reads_server = server_message_rx.is_some();
         let runs_engine = future.is_some();
         let has_client = connect_request_rx.is_some();
-        let has_handles = !client_packets.is_empty();
+        let has_handles = !send_buffers.is_empty();
         let waits = sleep.is_some();
         let core = &*core;
 
@@ -353,10 +361,12 @@ where
             (index, packet) = poll_fn(|cx| {
                 let hung_up = held_server_rx.is_some_and(mpsc::Receiver::is_closed);
                 let has_permit = has_permit && !hung_up;
-                poll_client_packets(core, client_packets, next_client_packets, has_permit, cx)
+                poll_send_buffers(core, send_buffers, next_send_buffer, has_permit, cx)
             }), if has_handles => Step::ClientPacket(index, packet),
 
-            permit = reserve_held(held_packet_tx), if holds_packet => Step::Deliver(permit),
+            permit = async {
+                held_packet_tx.expect("the guard checked the sender").reserve_owned().await
+            }, if holds_packet => Step::Deliver(permit),
 
             message = async {
                 server_message_rx.expect("the guard checked the receiver").recv().await
@@ -397,11 +407,11 @@ where
                 ManagerInput::Release
             }
             Step::ClientPacket(index, Some(packet)) => ManagerInput::Packet {
-                ns: self.client_packets[index].ns.clone(),
+                ns: self.send_buffers[index].ns.clone(),
                 packet,
             },
             Step::ClientPacket(index, None) => {
-                ManagerInput::Disconnect(self.client_packets.remove(index).ns)
+                ManagerInput::Disconnect(self.send_buffers.remove(index).ns)
             }
             Step::Permit(permit) => {
                 let engine = self.engine.as_mut().expect("a permit belongs to an engine");
@@ -409,7 +419,7 @@ where
                 return Ok(None);
             }
             Step::Deliver(permit) => {
-                self.core.deliver(permit);
+                self.core.deliver_held(permit);
                 return Ok(None);
             }
             Step::NextServerMessage(message) => {
@@ -460,14 +470,14 @@ where
         let Self {
             mut core,
             connect_request_rx,
-            client_packets,
+            send_buffers,
             engine,
             ..
         } = self;
 
         // A queued `Client::connect` fails at once.
         drop(connect_request_rx);
-        drop(client_packets);
+        drop(send_buffers);
         if failed {
             core.shutdown();
         }
@@ -511,17 +521,17 @@ where
 /// dropped, so unsent packets wait in the channel, which bounds them. Once a
 /// channel's token is cancelled, it is closed so blocked handles fail and the
 /// rest drains to its end.
-fn poll_client_packets(
+fn poll_send_buffers(
     core: &ManagerCore,
-    client_packets: &mut [ClientPackets],
+    send_buffers: &mut [SendBuffer],
     next: &mut usize,
     has_permit: bool,
     cx: &mut Context<'_>,
 ) -> Poll<(usize, Option<ClientPacket>)> {
-    let len = client_packets.len();
+    let len = send_buffers.len();
     for offset in 0..len {
         let index = (*next + offset) % len;
-        let channel = &mut client_packets[index];
+        let channel = &mut send_buffers[index];
 
         // Polling the wait only before it fires keeps it from being polled
         // after it finished.
@@ -538,14 +548,4 @@ fn poll_client_packets(
         }
     }
     Poll::Pending
-}
-
-/// Waits for a slot on the receiver whose packet the core holds.
-async fn reserve_held(
-    held_packet_tx: Option<mpsc::Sender<ServerPacket>>,
-) -> Result<mpsc::OwnedPermit<ServerPacket>, mpsc::error::SendError<()>> {
-    held_packet_tx
-        .expect("the branch runs only while a packet is held")
-        .reserve_owned()
-        .await
 }

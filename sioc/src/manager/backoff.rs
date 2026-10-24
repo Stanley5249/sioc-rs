@@ -2,22 +2,28 @@
 
 use std::time::Duration;
 
-/// Grows the delay before each reconnection attempt, with random jitter.
+/// Grows the delay before each reconnection attempt, with random jitter, like
+/// `Backoff` from backo2.
 ///
 /// Attempt `n` waits `delay * 2^n`, moved up or down by a random share of up
 /// to `randomization_factor` of itself, and capped at `delay_max`.
 #[derive(Debug)]
 pub struct Backoff {
+    /// The first delay, like `Backoff.ms`.
     delay: Duration,
+    /// The longest delay, like `Backoff.max`.
     delay_max: Duration,
+    /// The share of jitter, like `Backoff.jitter`.
     randomization_factor: f64,
-    /// The number of attempts before giving up, or `None` for no limit.
+    /// The number of attempts before giving up, or `None` for no limit, like
+    /// `Manager._reconnectionAttempts`.
     max_attempts: Option<u32>,
+    /// The attempts since the last reset, like `Backoff.attempts`.
     attempts: u32,
 }
 
 impl Backoff {
-    /// Creates a backoff with no attempts made.
+    /// Creates a backoff with no attempts made, like the `Backoff` constructor.
     ///
     /// A `randomization_factor` outside 0 to 1 means no jitter, as in JS.
     #[must_use]
@@ -42,7 +48,8 @@ impl Backoff {
         }
     }
 
-    /// Returns the number of attempts since the last reset.
+    /// Returns the number of attempts since the last reset, like
+    /// `Backoff.attempts`.
     #[must_use]
     pub fn attempts(&self) -> u32 {
         self.attempts
@@ -82,7 +89,7 @@ impl Backoff {
         ))
     }
 
-    /// Starts counting attempts from zero again.
+    /// Starts counting attempts from zero again, like `Backoff.reset`.
     pub fn reset(&mut self) {
         self.attempts = 0;
     }

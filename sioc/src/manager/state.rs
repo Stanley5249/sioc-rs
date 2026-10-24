@@ -41,7 +41,7 @@ pub enum ManagerInput {
     /// The caller passes none while [`ManagerCore::held_sender`] is `Some`.
     Message(ServerMessage),
     /// The engine finished, like `Manager.onclose`.
-    Close(Result<(), ManagerError>),
+    Closed(Result<(), ManagerError>),
     /// The reconnection delay is over, like the timer in `Manager.reconnect`.
     Reconnect,
     /// The client handle dropped, like `Manager._destroy` once no socket is
@@ -105,8 +105,8 @@ enum Write {
     /// CONNECT with the auth payload, like `Socket.onopen` sending it. Kept
     /// unencoded, so a namespace that leaves first can take it back.
     Connect { ns: ByteString, auth: ByteString },
-    /// Any other encoded message.
-    Message(Message),
+    /// Any other message, already encoded.
+    Encoded(Message),
 }
 
 /// The synchronous core of the manager, like socket.io-client's `Manager`.
@@ -135,7 +135,8 @@ pub struct ManagerCore {
     /// CONNECT and DISCONNECT packets and the attachments of the one packet
     /// in flight. Packets of the handles wait in their channels instead.
     write_buffer: VecDeque<Write>,
-    /// Effects for the caller, drained after every call.
+    /// Effects for the caller, drained after every call. Rust wait: the JS
+    /// `Manager` acts at once.
     outputs: VecDeque<ManagerOutput>,
 }
 
@@ -158,7 +159,7 @@ impl ManagerCore {
         core
     }
 
-    /// Applies one transition.
+    /// Applies one transition, like a `Manager` or `Socket` handler running.
     ///
     /// # Errors
     ///
@@ -179,10 +180,10 @@ impl ManagerCore {
             ManagerInput::Packet { ns, packet } => self.send(&ns, packet),
             ManagerInput::Disconnect(ns) => self.disconnect(&ns),
             ManagerInput::Message(message) => self.message(message),
-            ManagerInput::Close(result) => {
+            ManagerInput::Closed(result) => {
                 // After an internal error the caller shuts down, so no engine
                 // opens.
-                self.close(result)?;
+                self.finish_engine(result)?;
             }
             ManagerInput::Reconnect => self.reconnect(),
             ManagerInput::Release => self.release(),
@@ -192,7 +193,8 @@ impl ManagerCore {
         Ok(())
     }
 
-    /// Takes the next effect, or `None` once the call has none left.
+    /// Takes the next effect, or `None` once the call has none left. Rust
+    /// wait: the JS `Manager` acts at once.
     pub fn next_output(&mut self) -> Option<ManagerOutput> {
         self.outputs.pop_front().or_else(|| {
             self.namespaces.iter_mut().find_map(|(ns, namespace)| {
@@ -207,8 +209,9 @@ impl ManagerCore {
     }
 
     /// Returns what the caller does with the next packet of `ns`, given
-    /// whether it holds an engine permit. A packet goes out only when nothing
-    /// waits before it, so the write buffer never holds more than one.
+    /// whether it holds an engine permit, like `Socket.emitBuffered` running
+    /// once connected. A packet goes out only when nothing waits before it,
+    /// so the write buffer holds the messages of one packet at most.
     #[must_use]
     pub fn read(&self, ns: &str, has_permit: bool) -> Read {
         let engine_ready = has_permit && self.engine_runs() && self.write_buffer.is_empty();
@@ -217,7 +220,8 @@ impl ManagerCore {
             .map_or(Read::Discard, |namespace| namespace.read(engine_ready))
     }
 
-    /// Returns whether a message waits for an engine permit.
+    /// Returns whether a message waits for an engine permit, like a nonempty
+    /// `writeBuffer`.
     #[must_use]
     pub fn has_message(&self) -> bool {
         self.engine_runs() && !self.write_buffer.is_empty()
@@ -230,7 +234,7 @@ impl ManagerCore {
         }
         let message = match self.write_buffer.pop_front()? {
             Write::Connect { ns, auth } => encode(&ns, &Packet::Connect(auth)),
-            Write::Message(message) => message,
+            Write::Encoded(message) => message,
         };
         self.finish_flushing();
         Some(message)
@@ -246,7 +250,7 @@ impl ManagerCore {
 
     /// Sends the held packet through the reserved slot, or discards it if the
     /// receiver dropped or the namespace ended first.
-    pub fn deliver(
+    pub fn deliver_held(
         &mut self,
         permit: Result<mpsc::OwnedPermit<ServerPacket>, mpsc::error::SendError<()>>,
     ) {
@@ -273,7 +277,8 @@ impl ManagerCore {
         self.ready_state = ReadyState::Closed;
     }
 
-    /// Returns whether every namespace is inactive and no engine runs.
+    /// Returns whether every namespace is inactive and no engine runs. Rust
+    /// cleanup: the JS `Manager` never stops.
     #[must_use]
     pub fn is_idle(&self) -> bool {
         self.ready_state == ReadyState::Closed
@@ -339,9 +344,9 @@ impl ManagerCore {
 
         tracing::trace!(%ns, %packet, "sent packet");
         self.write_buffer
-            .push_back(Write::Message(encode(ns, &packet)));
+            .push_back(Write::Encoded(encode(ns, &packet)));
         let binaries = attachments.into_iter().flatten().map(Message::Binary);
-        self.write_buffer.extend(binaries.map(Write::Message));
+        self.write_buffer.extend(binaries.map(Write::Encoded));
     }
 
     fn disconnect(&mut self, ns: &ByteString) {
@@ -353,7 +358,7 @@ impl ManagerCore {
 
         if namespace.disconnect() {
             self.write_buffer
-                .push_back(Write::Message(encode(ns, &Packet::Disconnect)));
+                .push_back(Write::Encoded(encode(ns, &Packet::Disconnect)));
         } else {
             // The server never heard of the namespace, so its CONNECT stays
             // home.
@@ -525,7 +530,7 @@ impl ManagerCore {
 
     /// Handles the end of the engine and picks the next state, like
     /// `Manager.onclose` and `reconnect`.
-    fn close(&mut self, result: Result<(), ManagerError>) -> Result<(), ManagerError> {
+    fn finish_engine(&mut self, result: Result<(), ManagerError>) -> Result<(), ManagerError> {
         let reconnect = match self.ready_state {
             ReadyState::Open | ReadyState::Flushing => true,
             ReadyState::Closing { reconnect } => reconnect,
