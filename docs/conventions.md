@@ -38,6 +38,8 @@ Test each behavior at the layer that decides it:
 - **Task tests:** Cover only what the core cannot see: cancel safety, permits and backpressure, hang-up detection, and cleanup that never waits on the application. Use a small fake peer.
 - **End-to-end tests:** Check the wiring against the reference servers, one scenario per feature.
 
+A test that needs time runs on Tokio's paused clock with `#[tokio::test(start_paused = true)]`. An end-to-end test waits for the server's next event instead of a fixed delay.
+
 ## Changes that go together
 
 - A fix or a rejected approach that teaches a lesson: `docs/decisions.md`, in the same commit.
