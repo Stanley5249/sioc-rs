@@ -212,14 +212,18 @@ impl Namespace {
     /// running once connected.
     #[must_use]
     pub fn read(&self, engine_ready: bool) -> Read {
-        match &self.state {
-            NamespaceState::Active(active) if active.connected && engine_ready => Read::Send,
-            NamespaceState::Active(active) if active.connected || !active.closed.is_cancelled() => {
-                Read::Wait
-            }
-            NamespaceState::Active(_) | NamespaceState::Inactive | NamespaceState::Draining => {
-                Read::Discard
-            }
+        let NamespaceState::Active(active) = &self.state else {
+            return Read::Discard;
+        };
+        if active.connected {
+            // Confirmed participation flushes accepted packets before local
+            // disconnect; closure stops admission without cancelling that work.
+            return if engine_ready { Read::Send } else { Read::Wait };
+        }
+        if active.closed.is_cancelled() {
+            Read::Discard
+        } else {
+            Read::Wait
         }
     }
 
@@ -375,6 +379,50 @@ impl Namespace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_follow_confirmation_closure_and_engine_capacity() {
+        for (confirmed, closed, engine_ready, expected) in [
+            (false, false, false, Read::Wait),
+            (false, false, true, Read::Wait),
+            (false, true, false, Read::Discard),
+            (false, true, true, Read::Discard),
+            (true, false, false, Read::Wait),
+            (true, false, true, Read::Send),
+            (true, true, false, Read::Wait),
+            (true, true, true, Read::Send),
+        ] {
+            let mut namespace = Namespace::default();
+            let (request, handles) = ConnectRequest::new("/".into(), "{}".into(), 1, 1);
+            namespace.open(request);
+            if confirmed {
+                namespace.confirm();
+            }
+            if closed {
+                handles.closed.cancel();
+            }
+            assert_eq!(
+                namespace.read(engine_ready),
+                expected,
+                "confirmed={confirmed}, closed={closed}, engine_ready={engine_ready}"
+            );
+        }
+    }
+
+    #[test]
+    fn inactive_and_draining_participation_discards_packets() {
+        let mut namespace = Namespace::default();
+        for ready in [false, true] {
+            assert_eq!(namespace.read(ready), Read::Discard);
+        }
+        let (request, _handles) = ConnectRequest::new("/".into(), "{}".into(), 1, 1);
+        namespace.open(request);
+        let _actor_inputs = namespace.take_listen().unwrap();
+        namespace.end("/", None);
+        for ready in [false, true] {
+            assert_eq!(namespace.read(ready), Read::Discard);
+        }
+    }
 
     #[test]
     fn registering_an_ack_reclaims_dropped_waiters() {

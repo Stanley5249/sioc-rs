@@ -26,6 +26,8 @@ Mistakes this project already made and approaches the project rejected, each wit
 
 ## Namespaces
 
+- Read policy handles confirmed participation first: it flushes accepted packets when engine capacity is available, even after admission closes. Unconfirmed closed participation discards them. Keeping those cases separate makes the intentional close-policy asymmetry explicit.
+
 - The actor owns `NamespaceInputs`, which groups the event and ACK channels while preserving their different lifetimes. Naming the whole bundle `SendBuffer` suggested that ACK replies persisted with buffered events.
 
 - CONNECT is queued when participation activates on a running engine, or when a new engine opens for all active namespaces. A separate `connect_due` flag duplicated those transitions and made engine startup clear an enqueue intention it did not use.
