@@ -56,6 +56,8 @@ Mistakes this project already made and approaches the project rejected, each wit
 
 ## Binary
 
+- Reconstruction stores the already-decoded event or ACK and shares one attachment counter and buffer. Repeating payloads, ids and buffers in a second binary-kind enum duplicated distinctions the decoded packet already carries.
+
 - Ending a namespace detaches its partial binary packet and consumes the remaining attachments without delivery. Resetting the decoder would lose frame alignment, while retaining the name as a live destination let an old packet reach replacement handles.
 
 - Placeholders are validated before attachments are retained, and a binary packet carries 1 to `MAX_ATTACHMENTS` attachments. Unchecked references reached application indexing code and could hold reconstruction open.
