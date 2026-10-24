@@ -3,12 +3,13 @@
 //!
 //! [`state::ManagerCore`] owns all namespace, ack, and reconnection state and
 //! never awaits. [`actor::run`] is the one task that owns the I/O around it:
-//! the engine, the reconnection timer, and the channel of every namespace's
-//! handles. Each scope takes one kind of input and talks in two directions:
+//! the engine, the reconnection timer, and the input channels of every
+//! namespace's handles. Each scope takes one kind of input and talks in two
+//! directions:
 //!
 //! ```text
-//!  SocketSender --ClientPacket--> channel (= Socket.sendBuffer) --+
-//!  SocketSender --ACK replies--> current engine's reply input ----+
+//!  SocketSender --events--> event input (= Socket.sendBuffer) ----+
+//!  SocketSender --ACK replies--> engine input (= Socket.ack) ------+
 //!  Client::connect --ConnectRequest-------------------------------+--> actor
 //!  engine --ServerMessage-----------------------------------------+     |
 //!                                                     ManagerInput |     v
@@ -76,7 +77,7 @@ pub mod connect_request;
 pub mod decoder;
 pub mod engine;
 pub mod namespace;
-pub mod send_buffer;
+pub mod namespace_inputs;
 pub mod state;
 
 #[cfg(test)]

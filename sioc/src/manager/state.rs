@@ -68,14 +68,14 @@ pub enum ManagerOutput {
     Schedule(Duration),
     /// Stop waiting, like clearing that timer in `Manager._destroy`.
     Cancel,
-    /// Read the handles' channel of a namespace that became active, as
+    /// Read the event input of a namespace that became active, as
     /// [`ManagerCore::read`] says, and pass its end as
     /// [`ManagerInput::Disconnect`]. Rust channel: JS handles call the
     /// `Socket` directly.
     Listen {
         /// The namespace the channel belongs to.
         ns: ByteString,
-        /// What the handles send, like `Socket.sendBuffer`.
+        /// Events emitted by the handles, like `Socket.sendBuffer`.
         client_packet_rx: mpsc::Receiver<ClientPacket>,
         /// Cancelled once the handles leave or the namespace ends, which turns
         /// [`Read::Wait`] into [`Read::Discard`].

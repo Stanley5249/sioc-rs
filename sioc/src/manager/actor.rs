@@ -16,7 +16,7 @@ use crate::manager::backoff::Backoff;
 use crate::manager::connect_request::ConnectRequest;
 use crate::manager::engine::{Drain, Engine, EngineStep};
 use crate::manager::namespace::Read;
-use crate::manager::send_buffer::SendBuffer;
+use crate::manager::namespace_inputs::NamespaceInputs;
 use crate::manager::state::{ManagerCore, ManagerInput, ManagerOutput};
 
 /// Runs the manager until the client handle and every namespace are gone, like
@@ -38,8 +38,8 @@ where
     let mut actor = ManagerActor {
         core: ManagerCore::new(backoff, fastrand::Rng::new()),
         connect_request_rx: Some(connect_request_rx),
-        send_buffers: Vec::new(),
-        next_send_buffer: 0,
+        namespace_inputs: Vec::new(),
+        next_namespace_input: 0,
         engine: None,
         sleep: None,
         connect_engine,
@@ -59,12 +59,12 @@ struct ManagerActor<F, Fut> {
     /// Requests of [`Client::connect`](crate::client::Client::connect), like
     /// calls to `Manager.socket`, until the client handle drops.
     connect_request_rx: Option<mpsc::Receiver<ConnectRequest>>,
-    /// The channel of every active or draining namespace's handles, like each
-    /// `Socket.sendBuffer`.
-    send_buffers: Vec<SendBuffer>,
-    /// Where the next read of `send_buffers` starts, so namespaces waiting
+    /// Event and ACK inputs of every active or draining namespace. Rust
+    /// channels: JS `Socket.emit` and `Socket.ack` call the manager directly.
+    namespace_inputs: Vec<NamespaceInputs>,
+    /// Where the next read of `namespace_inputs` starts, so namespaces waiting
     /// together take turns. Rust wait: JS writes each packet at once.
-    next_send_buffer: usize,
+    next_namespace_input: usize,
     /// The running engine, like `Manager.engine`.
     engine: Option<Engine<Fut>>,
     /// The reconnection delay, like the timer in `Manager.reconnect`.
@@ -100,7 +100,7 @@ where
 
     fn is_finished(&self) -> bool {
         self.connect_request_rx.is_none()
-            && self.send_buffers.is_empty()
+            && self.namespace_inputs.is_empty()
             && self.engine.is_none()
             && self.core.is_idle()
     }
@@ -123,17 +123,17 @@ where
                     ns,
                     client_packet_rx,
                     closed,
-                } => self.send_buffers.push(SendBuffer {
+                } => self.namespace_inputs.push(NamespaceInputs {
                     ns,
                     client_packet_rx,
                     ack_packet_rx: None,
-                    next_reply: false,
+                    ack_first: false,
                     closed_wait: Box::pin(closed.clone().cancelled_owned()),
                     closed,
                 }),
                 ManagerOutput::ListenAcks { ns, ack_packet_rx } => {
                     let buffer = self
-                        .send_buffers
+                        .namespace_inputs
                         .iter_mut()
                         .find(|buffer| buffer.ns == ns)
                         .expect("the event inbox is installed before its reply input");
@@ -182,8 +182,8 @@ where
         let Self {
             core,
             connect_request_rx,
-            send_buffers,
-            next_send_buffer,
+            namespace_inputs,
+            next_namespace_input,
             engine,
             sleep,
             ..
@@ -194,7 +194,7 @@ where
         let can_reserve_client_message = client_message_permit.is_none();
         let has_engine = engine.is_some();
         let has_client = connect_request_rx.is_some();
-        let has_handles = !send_buffers.is_empty();
+        let has_namespace_inputs = !namespace_inputs.is_empty();
         let waits = sleep.is_some();
 
         let input = tokio::select! {
@@ -210,12 +210,12 @@ where
             },
 
             (index, packet) = poll_fn(|cx| {
-                crate::manager::send_buffer::poll_send_buffers(
-                    core, send_buffers, next_send_buffer, client_message_permit.is_some(), cx,
+                crate::manager::namespace_inputs::poll_namespace_inputs(
+                    core, namespace_inputs, next_namespace_input, client_message_permit.is_some(), cx,
                 )
-            }), if has_handles => match packet {
+            }), if has_namespace_inputs => match packet {
                 Some(packet) => {
-                    let ns = send_buffers[index].ns.clone();
+                    let ns = namespace_inputs[index].ns.clone();
                     let read = core.read(&ns, client_message_permit.is_some());
                     core.handle(ManagerInput::Packet { ns, packet })?;
                     if read == Read::Send {
@@ -227,7 +227,7 @@ where
                     }
                     None
                 }
-                None => Some(ManagerInput::Disconnect(send_buffers.remove(index).ns)),
+                None => Some(ManagerInput::Disconnect(namespace_inputs.remove(index).ns)),
             },
 
             permit = async {
@@ -252,7 +252,7 @@ where
                     // its successor. Persistent event inboxes stay owned here.
                     client_message_permit = None;
                     *engine = None;
-                    for buffer in send_buffers {
+                    for buffer in namespace_inputs {
                         buffer.ack_packet_rx = None;
                     }
                     Some(ManagerInput::Closed(result))
@@ -284,7 +284,7 @@ where
     /// sends, so it never sees a failed send.
     async fn finish(mut self, failed: bool) {
         self.connect_request_rx = None;
-        self.send_buffers.clear();
+        self.namespace_inputs.clear();
         if failed {
             self.core.shutdown();
         }

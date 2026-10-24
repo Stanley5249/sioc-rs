@@ -1,5 +1,5 @@
-//! The channel of each namespace's handles, as the actor reads it, like
-//! socket.io-client's `Socket.sendBuffer`.
+//! The bounded inputs of each namespace's handles. The event inbox holds
+//! `Socket.sendBuffer`; the ACK inbox serves `Socket.ack` for one engine.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -13,20 +13,21 @@ use crate::manager::namespace::Read;
 use crate::manager::state::ManagerCore;
 use crate::packet::ClientPacket;
 
-/// The channel of one namespace's handles, like `Socket.sendBuffer`. Rust
-/// channel: JS handles call the `Socket` directly.
-pub struct SendBuffer {
-    /// The namespace the channel belongs to, like `Socket.nsp`.
+/// The actor's inputs for one namespace. Rust channels: JS handles call
+/// `Socket.emit` and `Socket.ack` directly. Event input survives reconnection;
+/// ACK input belongs to the current engine.
+pub struct NamespaceInputs {
+    /// The namespace these inputs belong to, like `Socket.nsp`.
     pub ns: ByteString,
-    /// The packets the handles sent and the actor has not read, like the
+    /// The events the handles sent and the actor has not read, like the
     /// entries of `Socket.sendBuffer`.
     pub client_packet_rx: mpsc::Receiver<ClientPacket>,
     /// The current engine's ACK input, like `Socket.ack` writing directly.
     /// Rust channel: this input is replaced, while unsent events stay put.
     pub ack_packet_rx: Option<mpsc::Receiver<ClientPacket>>,
-    /// Which input gets first chance next. Rust wait: JS writes synchronously
-    /// and needs no scheduling between a reply channel and an event channel.
-    pub next_reply: bool,
+    /// Whether ACK input is polled first. Rust wait: alternating the first
+    /// opportunity prevents either input from starving the other.
+    pub ack_first: bool,
     /// Cancelled once the handles leave or the namespace ends, like
     /// `Socket.active` turning false. Rust cleanup.
     pub closed: CancellationToken,
@@ -42,57 +43,57 @@ pub struct SendBuffer {
 /// dropped, so unsent packets wait in the channel, which bounds them. Once a
 /// channel's token is cancelled, it is closed so blocked handles fail and the
 /// rest drains to its end.
-pub fn poll_send_buffers(
+pub fn poll_namespace_inputs(
     core: &ManagerCore,
-    send_buffers: &mut [SendBuffer],
+    namespace_inputs: &mut [NamespaceInputs],
     next: &mut usize,
-    has_permit: bool,
+    has_client_message_permit: bool,
     cx: &mut Context<'_>,
 ) -> Poll<(usize, Option<ClientPacket>)> {
-    let len = send_buffers.len();
+    let len = namespace_inputs.len();
     for offset in 0..len {
         let index = (*next + offset) % len;
-        let channel = &mut send_buffers[index];
+        let inputs = &mut namespace_inputs[index];
 
         // Polling the wait only before it fires keeps it from being polled
         // after it finished.
-        if channel.closed.is_cancelled() || channel.closed_wait.as_mut().poll(cx).is_ready() {
-            channel.client_packet_rx.close();
-            if let Some(rx) = &mut channel.ack_packet_rx {
+        if inputs.closed.is_cancelled() || inputs.closed_wait.as_mut().poll(cx).is_ready() {
+            inputs.client_packet_rx.close();
+            if let Some(rx) = &mut inputs.ack_packet_rx {
                 rx.close();
             }
         }
 
-        let read = core.read(&channel.ns, has_permit);
+        let read = core.read(&inputs.ns, has_client_message_permit);
         if read == Read::Discard {
-            channel.ack_packet_rx = None;
+            inputs.ack_packet_rx = None;
         }
         if read == Read::Wait {
             continue;
         }
         let mut events_ended = false;
-        for reply in [channel.next_reply, !channel.next_reply] {
-            let receiver = if reply {
-                channel.ack_packet_rx.as_mut()
+        for ack in [inputs.ack_first, !inputs.ack_first] {
+            let receiver = if ack {
+                inputs.ack_packet_rx.as_mut()
             } else {
-                Some(&mut channel.client_packet_rx)
+                Some(&mut inputs.client_packet_rx)
             };
             let Some(receiver) = receiver else {
                 continue;
             };
             match receiver.poll_recv(cx) {
                 Poll::Ready(Some(packet)) => {
-                    channel.next_reply = !reply;
+                    inputs.ack_first = !ack;
                     *next = index + 1;
                     return Poll::Ready((index, Some(packet)));
                 }
                 Poll::Ready(None) => {
-                    if reply {
-                        channel.ack_packet_rx = None;
+                    if ack {
+                        inputs.ack_packet_rx = None;
                     } else {
                         events_ended = true;
                     }
-                    if events_ended && channel.ack_packet_rx.is_none() {
+                    if events_ended && inputs.ack_packet_rx.is_none() {
                         *next = index + 1;
                         return Poll::Ready((index, None));
                     }

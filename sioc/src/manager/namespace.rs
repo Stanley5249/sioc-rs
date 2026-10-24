@@ -47,8 +47,8 @@ enum NamespaceState {
 struct Active {
     /// Waiters of events this participation sent, like `Socket.acks`.
     acks: HashMap<u64, oneshot::Sender<DynAck>>,
-    /// The inbox until ownership transfers to the actor's `SendBuffer`, like
-    /// `Socket.sendBuffer`. Only its owner drains it.
+    /// The inbox until ownership transfers to the actor's `NamespaceInputs`,
+    /// like `Socket.sendBuffer`. Only its owner drains it.
     client_packet_rx: Option<mpsc::Receiver<ClientPacket>>,
     /// The confirmed engine's ACK route, like `Socket.ack`. Rust channel.
     ack_route_tx: watch::Sender<Option<mpsc::Sender<ClientPacket>>>,

@@ -29,11 +29,11 @@ fn a_reply_flood_does_not_starve_buffered_events() {
     event_tx.try_send(event(r#"["waiting"]"#, None)).unwrap();
     ack_tx.try_send(ack(0)).unwrap();
     let closed = CancellationToken::new();
-    let mut buffers = [crate::manager::send_buffer::SendBuffer {
+    let mut buffers = [crate::manager::namespace_inputs::NamespaceInputs {
         ns: "/".into(),
         client_packet_rx: event_rx,
         ack_packet_rx: Some(ack_rx),
-        next_reply: true,
+        ack_first: true,
         closed_wait: Box::pin(closed.clone().cancelled_owned()),
         closed,
     }];
@@ -41,7 +41,7 @@ fn a_reply_flood_does_not_starve_buffered_events() {
     let mut events = 0;
     for id in 1..=2 {
         let (_, packet) = std::future::poll_fn(|cx| {
-            crate::manager::send_buffer::poll_send_buffers(
+            crate::manager::namespace_inputs::poll_namespace_inputs(
                 &rig.core,
                 &mut buffers,
                 &mut next,
@@ -64,7 +64,7 @@ fn a_reply_flood_does_not_starve_buffered_events() {
 
 #[test]
 fn both_input_ends_release_the_namespace_in_either_polling_order() {
-    for next_reply in [false, true] {
+    for ack_first in [false, true] {
         let mut rig = crate::manager::tests::rig::Rig::new();
         let _handles = rig.connected("/");
         let (event_tx, event_rx) = mpsc::channel(1);
@@ -72,17 +72,17 @@ fn both_input_ends_release_the_namespace_in_either_polling_order() {
         drop((event_tx, ack_tx));
         let closed = CancellationToken::new();
         closed.cancel();
-        let mut buffers = [crate::manager::send_buffer::SendBuffer {
+        let mut buffers = [crate::manager::namespace_inputs::NamespaceInputs {
             ns: "/".into(),
             client_packet_rx: event_rx,
             ack_packet_rx: Some(ack_rx),
-            next_reply,
+            ack_first,
             closed_wait: Box::pin(closed.clone().cancelled_owned()),
             closed,
         }];
         let mut next = 0;
         let (index, packet) = std::future::poll_fn(|cx| {
-            crate::manager::send_buffer::poll_send_buffers(
+            crate::manager::namespace_inputs::poll_namespace_inputs(
                 &rig.core,
                 &mut buffers,
                 &mut next,
