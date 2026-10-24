@@ -49,11 +49,6 @@ pub enum EngineStep {
     Closed(Result<(), ManagerError>),
 }
 
-/// A pending channel reservation. Rust wait: JS `engine.write` never awaits.
-type Reservation = Pin<
-    Box<dyn Future<Output = Result<mpsc::OwnedPermit<Message>, mpsc::error::SendError<()>>> + Send>,
->;
-
 /// One engine session, like `Manager.engine`. Its fields never escape the
 /// owner, so every termination uses the same polling and drain path.
 pub struct Engine<Fut> {
@@ -63,8 +58,6 @@ pub struct Engine<Fut> {
     client_message_tx: Option<mpsc::Sender<Message>>,
     /// One immediately writable message slot. Rust bound.
     permit: Option<mpsc::OwnedPermit<Message>>,
-    /// An in-progress slot reservation retained across polls. Rust wait.
-    reservation: Option<Reservation>,
     /// The engine's data events until EOF.
     server_message_rx: mpsc::Receiver<ServerMessage>,
     /// One message read while application delivery is full. Rust bound.
@@ -88,7 +81,6 @@ where
             connection: Connection::Opening(Box::pin(future)),
             client_message_tx: Some(client_message_tx),
             permit: None,
-            reservation: None,
             server_message_rx,
             next_server_message: None,
             drain: Drain::Deliver,
@@ -104,7 +96,6 @@ where
         }
         let changed = self.client_message_tx.take().is_some();
         self.permit = None;
-        self.reservation = None;
         if matches!(drain, Drain::Discard) && matches!(self.connection, Connection::Opening(_)) {
             self.connection = Connection::Finished(Ok(()));
         }
@@ -138,16 +129,40 @@ where
         }
     }
 
-    /// Advances the session. Dropping this wait loses no message or permit,
-    /// because the connection, reservation and early message remain owned.
-    pub async fn next(&mut self, receive: bool, reserve: bool) -> EngineStep {
-        poll_fn(|cx| self.poll_next(receive, reserve, cx)).await
+    /// Advances the session. An acquired permit stays owned by the engine.
+    /// A pending reservation can restart when another input wins because this
+    /// engine is the output channel's only writer and reservation waiter.
+    pub async fn next(
+        &mut self,
+        can_receive_server_message: bool,
+        can_reserve_client_message: bool,
+    ) -> EngineStep {
+        let reservation = self
+            .client_message_tx
+            .clone()
+            .filter(|_| can_reserve_client_message && self.permit.is_none())
+            .map(mpsc::Sender::reserve_owned);
+        tokio::pin!(reservation);
+        poll_fn(|cx| {
+            self.poll_next(
+                can_receive_server_message,
+                reservation.as_mut().as_pin_mut(),
+                cx,
+            )
+        })
+        .await
     }
 
     fn poll_next(
         &mut self,
-        receive: bool,
-        reserve: bool,
+        can_receive_server_message: bool,
+        reservation: Option<
+            Pin<
+                &mut impl Future<
+                    Output = Result<mpsc::OwnedPermit<Message>, mpsc::error::SendError<()>>,
+                >,
+            >,
+        >,
         cx: &mut Context<'_>,
     ) -> Poll<EngineStep> {
         // Poll first so a connection that closes its server direction and
@@ -172,7 +187,7 @@ where
         }
 
         let draining = self.client_message_tx.is_none();
-        if (receive || draining)
+        if (can_receive_server_message || draining)
             && let Some(message) = self.next_server_message.take()
             && (!draining || matches!(self.drain, Drain::Deliver))
         {
@@ -193,7 +208,7 @@ where
                     if draining && matches!(self.drain, Drain::Discard) {
                         return Poll::Ready(EngineStep::Progress);
                     }
-                    if receive || draining {
+                    if can_receive_server_message || draining {
                         return Poll::Ready(EngineStep::Message { message, draining });
                     }
                     self.next_server_message = Some(message);
@@ -214,25 +229,22 @@ where
             }
         }
 
-        if let Some(sender) = &self.client_message_tx
-            && reserve
-            && self.permit.is_none()
-        {
-            let reservation = self
-                .reservation
-                .get_or_insert_with(|| Box::pin(sender.clone().reserve_owned()));
-            if let Poll::Ready(result) = reservation.as_mut().poll(cx) {
-                self.reservation = None;
-                if let Ok(permit) = result {
-                    self.permit = Some(permit);
-                } else {
-                    self.connection = Connection::Finished(Err(ManagerError::EngineEnded));
-                    self.close(Drain::Discard);
-                }
-                return Poll::Ready(EngineStep::Progress);
-            }
+        if self.client_message_tx.is_none() {
+            return Poll::Pending;
         }
-        Poll::Pending
+        let Some(reservation) = reservation else {
+            return Poll::Pending;
+        };
+        let Poll::Ready(result) = reservation.poll(cx) else {
+            return Poll::Pending;
+        };
+        if let Ok(permit) = result {
+            self.permit = Some(permit);
+        } else {
+            self.connection = Connection::Finished(Err(ManagerError::EngineEnded));
+            self.close(Drain::Discard);
+        }
+        Poll::Ready(EngineStep::Progress)
     }
 }
 

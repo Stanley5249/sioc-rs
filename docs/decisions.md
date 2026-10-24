@@ -4,6 +4,8 @@ Mistakes this project already made and approaches the project rejected, each wit
 
 ## Async and shutdown
 
+- A pending engine output reservation belongs to one actor wait. The engine is the channel's only writer, so restarting a cancelled reservation loses no position to another waiter. Acquired permits stay owned until handoff; storing the pending future separately added a boxed object and cleanup state without another responsibility.
+
 - One engine owner closes admission, drains the incoming direction and collects the connection result. Normal closure, internal failure and shutdown use this same path. Opening cancellation drops its pending future instead of waiting for a handshake that may have no deadline.
 - Packet selection owns its output permit until the synchronous header handoff. Keeping only a readiness snapshot let concurrent engine polling revoke the permit after the event left its inbox, so engine cleanup discarded a truly unsent event. A close transition reports progress before waiting again, allowing the caller to return or release its owned slot.
 - A local opening cancellation drops the connection future; a peer-side opening failure keeps polling it after closing admission so its original error survives input reclamation.
