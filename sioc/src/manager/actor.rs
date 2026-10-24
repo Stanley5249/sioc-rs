@@ -1,10 +1,6 @@
 //! The task that owns the manager's I/O: the engine, the reconnection timer,
 //! and the channels of every namespace's handles. It turns what they yield
 //! into [`ManagerInput`]s and carries out the [`ManagerOutput`]s.
-//!
-//! It stays in one file past 400 lines, because `next_step` borrows every
-//! field of the actor at once, which a split across modules would have to make
-//! public.
 
 use std::future::{Future, poll_fn};
 use std::pin::Pin;

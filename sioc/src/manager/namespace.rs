@@ -330,3 +330,25 @@ impl Namespace {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registering_an_ack_reclaims_dropped_waiters() {
+        let mut namespace = Namespace::default();
+        let (live_tx, _live_rx) = oneshot::channel();
+        namespace.register_ack(live_tx);
+        for _ in 0..100 {
+            let (ack_tx, ack_rx) = oneshot::channel();
+            namespace.register_ack(ack_tx);
+            drop(ack_rx);
+        }
+        assert_eq!(namespace.acks.len(), 2);
+
+        let (ack_tx, _ack_rx) = oneshot::channel();
+        assert_eq!(namespace.register_ack(ack_tx), 101);
+        assert_eq!(namespace.acks.len(), 2);
+    }
+}

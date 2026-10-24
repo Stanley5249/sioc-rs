@@ -4,10 +4,6 @@
 //! [`ManagerCore`] never awaits and spawns nothing. It touches the
 //! application's channels only through `try_send`, `oneshot::Sender::send`,
 //! and permits its caller hands in, so plain `#[test]`s drive it.
-//!
-//! It stays in one file past 400 lines, because every transition reads and
-//! writes the same private fields, which a split across modules would have to
-//! make public.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
