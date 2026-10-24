@@ -127,6 +127,7 @@ impl Decoder {
                 id,
                 ack: DynAck::new(payload).with_attachments(attachments),
             },
+            BinaryPacket::Discard { .. } => return Ok(None),
         };
 
         Ok(Some(Ns(ns, decoded)))
@@ -136,6 +137,26 @@ impl Decoder {
     /// the engine that is gone. Like `Decoder.destroy`.
     pub fn reset(&mut self) {
         self.reconstructor = None;
+    }
+
+    /// Detaches a namespace's partial packet while consuming its remaining
+    /// attachments. Rust cleanup: reuse cannot inherit the old reconstruction,
+    /// and the current engine still needs its binary frame alignment.
+    pub fn disconnect(&mut self, ns: &str) {
+        if let Some(Ns(pending, packet)) = &mut self.reconstructor
+            && pending == ns
+        {
+            let remaining = match packet {
+                BinaryPacket::Event {
+                    count, attachments, ..
+                }
+                | BinaryPacket::Ack {
+                    count, attachments, ..
+                } => *count - attachments.len(),
+                BinaryPacket::Discard { remaining } => *remaining,
+            };
+            *packet = BinaryPacket::Discard { remaining };
+        }
     }
 }
 
@@ -176,6 +197,9 @@ fn validate_placeholder_value(value: &serde_json::Value, count: usize) -> Result
 /// `BinaryReconstructor.reconPack`.
 #[derive(Debug)]
 enum BinaryPacket {
+    /// Remaining frames of an ended namespace's packet. Rust cleanup: retain
+    /// alignment while releasing its payload and attachments immediately.
+    Discard { remaining: usize },
     /// A `BINARY_EVENT`, with its optional ack id.
     Event {
         payload: ByteString,
@@ -213,6 +237,7 @@ impl BinaryPacket {
 
     fn attach(&mut self, bytes: Bytes) {
         match self {
+            Self::Discard { remaining } => *remaining -= 1,
             Self::Event { attachments, .. } | Self::Ack { attachments, .. } => {
                 attachments.push(bytes);
             }
@@ -221,6 +246,7 @@ impl BinaryPacket {
 
     fn is_complete(&self) -> bool {
         match self {
+            Self::Discard { remaining } => *remaining == 0,
             Self::Event {
                 attachments, count, ..
             }

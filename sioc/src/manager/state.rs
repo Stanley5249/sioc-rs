@@ -17,7 +17,7 @@ use crate::error::ManagerError;
 use crate::manager::backoff::Backoff;
 use crate::manager::connect_request::ConnectRequest;
 use crate::manager::decoder::{Decoded, Decoder};
-use crate::manager::namespace::{Namespace, Read};
+use crate::manager::namespace::{Delivery, Namespace, Read};
 use crate::packet::{ClientPacket, Ns, Packet, ServerPacket};
 
 /// One transition for the core, like an event reaching a `Manager` or
@@ -130,7 +130,7 @@ pub struct ManagerCore {
     decoder: Decoder,
     /// One server packet whose receiver is full. Rust bound: JS emits
     /// synchronously.
-    held_packet: Option<Ns<ServerPacket>>,
+    held_packet: Option<Delivery>,
     /// Messages waiting for the engine, like the engine's `writeBuffer`: the
     /// CONNECT and DISCONNECT packets and the attachments of the one packet
     /// in flight. Packets of the handles wait in their channels instead.
@@ -171,11 +171,16 @@ impl ManagerCore {
     /// Panics if a server message arrives while the core holds a packet, which
     /// the caller rules out.
     pub fn handle(&mut self, input: ManagerInput) -> Result<(), ManagerError> {
+        let release = matches!(input, ManagerInput::Disconnect(_) | ManagerInput::Release);
         match input {
             ManagerInput::Connect(request) => {
                 let ns = request.ns.clone();
                 tracing::debug!(%ns, "namespace opening");
-                self.namespaces.entry(ns).or_default().open(request);
+                let namespace = self.namespaces.entry(ns.clone()).or_default();
+                if namespace.is_inactive() {
+                    self.decoder.disconnect(&ns);
+                }
+                namespace.open(request);
             }
             ManagerInput::Packet { ns, packet } => self.send(&ns, packet),
             ManagerInput::Disconnect(ns) => self.disconnect(&ns),
@@ -186,10 +191,13 @@ impl ManagerCore {
                 self.finish_engine(result)?;
             }
             ManagerInput::Reconnect => self.reconnect(),
-            ManagerInput::Release => self.release(),
+            ManagerInput::Release => {}
         }
 
         self.settle();
+        if release {
+            self.release();
+        }
         Ok(())
     }
 
@@ -244,8 +252,9 @@ impl ManagerCore {
     /// packet for a full receiver. Rust bound: JS emits synchronously.
     #[must_use]
     pub fn held_sender(&self) -> Option<mpsc::Sender<ServerPacket>> {
-        let Ns(ns, _) = self.held_packet.as_ref()?;
-        self.namespaces.get(ns)?.server_packet_tx()
+        self.held_packet
+            .as_ref()
+            .map(|delivery| delivery.sender.clone())
     }
 
     /// Sends the held packet through the reserved slot, or discards it if the
@@ -254,10 +263,15 @@ impl ManagerCore {
         &mut self,
         permit: Result<mpsc::OwnedPermit<ServerPacket>, mpsc::error::SendError<()>>,
     ) {
-        let Some(Ns(ns, packet)) = self.held_packet.take() else {
+        let Some(Delivery {
+            ns, packet, closed, ..
+        }) = self.held_packet.take()
+        else {
             return;
         };
-        if let Ok(permit) = permit {
+        if let Ok(permit) = permit
+            && !closed.is_cancelled()
+        {
             permit.send(packet);
         } else {
             tracing::debug!(%ns, "discarded server packet for a dropped receiver");
@@ -352,6 +366,14 @@ impl ManagerCore {
 
     fn disconnect(&mut self, ns: &ByteString) {
         tracing::debug!(%ns, "client closed");
+        self.decoder.disconnect(ns);
+        if self
+            .held_packet
+            .as_ref()
+            .is_some_and(|delivery| delivery.ns == ns)
+        {
+            self.held_packet = None;
+        }
         let namespace = self
             .namespaces
             .get_mut(ns)
@@ -367,18 +389,26 @@ impl ManagerCore {
                 |write| !matches!(write, Write::Connect { ns: queued, .. } if queued == ns),
             );
         }
-        self.release();
     }
 
     /// Runs after every transition: drops a held packet whose namespace ended,
     /// gives an engine to namespaces that need one, and queues CONNECT for
     /// namespaces that became active, like `Socket.connect`.
     fn settle(&mut self) {
-        if let Some(Ns(ns, _)) = &self.held_packet
-            && !self.namespaces.get(ns).is_some_and(Namespace::is_active)
+        if let Some(delivery) = &self.held_packet
+            && delivery.closed.is_cancelled()
         {
-            tracing::debug!(%ns, "discarded held server packet for a closed namespace");
+            tracing::debug!(ns = %delivery.ns, "discarded held server packet for a closed namespace");
             self.held_packet = None;
+        }
+
+        // Reopening is a core transition after old delivery cleanup, never a
+        // side effect of a namespace cleanup helper.
+        for (ns, namespace) in &mut self.namespaces {
+            if let Some(request) = namespace.take_reopen() {
+                self.decoder.disconnect(ns);
+                namespace.open(request);
+            }
         }
 
         if self.needs_engine() {
@@ -485,7 +515,7 @@ impl ManagerCore {
         };
 
         match decoded {
-            Ok(Some(Ns(ns, decoded))) => self.receive(ns, decoded),
+            Ok(Some(Ns(ns, decoded))) => self.receive(&ns, decoded),
             Ok(None) => {}
             Err(error) => {
                 // The server's fault, not a library bug, so the client
@@ -498,14 +528,14 @@ impl ManagerCore {
     }
 
     /// Routes one decoded server packet, like `Socket.onpacket`.
-    fn receive(&mut self, ns: ByteString, decoded: Decoded) {
-        let Some(namespace) = self.namespaces.get_mut(&ns) else {
+    fn receive(&mut self, ns: &ByteString, decoded: Decoded) {
+        let Some(namespace) = self.namespaces.get_mut(ns) else {
             tracing::debug!(%ns, "discarded server packet for an unknown namespace");
             return;
         };
 
         let packet = match decoded {
-            Decoded::Ack { id, ack } => return namespace.resolve_ack(&ns, id, ack),
+            Decoded::Ack { id, ack } => return namespace.resolve_ack(ns, id, ack),
             Decoded::Packet(packet) => packet,
         };
 
@@ -517,15 +547,15 @@ impl ManagerCore {
             ServerPacket::Disconnect | ServerPacket::ConnectError(_) => {
                 tracing::debug!(%ns, %packet, "namespace ended by the server");
                 // The server refused the namespace or left it, so both end it.
-                namespace.end(&ns, Some(packet));
+                namespace.end(ns, Some(packet));
                 return;
             }
             ServerPacket::Event(_) => {}
         }
 
-        if let Some(packet) = namespace.deliver(&ns, packet) {
+        if let Some(delivery) = namespace.deliver(ns, packet) {
             tracing::debug!(%ns, "holding server packet for a full receiver");
-            self.held_packet = Some(Ns(ns, packet));
+            self.held_packet = Some(delivery);
         }
     }
 

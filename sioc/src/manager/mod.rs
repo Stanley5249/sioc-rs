@@ -31,6 +31,11 @@
 //!   server direction ended, and each engine gets new channels.
 //! - Ending a namespace never waits on the application: its token closes the
 //!   channel, which the actor reads to the end.
+//! - A held delivery owns its original receiver and cancellation token. The
+//!   core reopens a name only after old inbox EOF and delivery cleanup. ACK
+//!   waiters belong to that active participation; only the per-name ID counter
+//!   survives it. An ended binary reconstruction consumes its remaining frames
+//!   without retaining or delivering the old payload.
 //!
 //! The behavior follows socket.io-client 4.8.4:
 //!

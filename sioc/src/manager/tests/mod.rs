@@ -8,5 +8,6 @@
 
 mod actor;
 mod binary;
+mod namespace;
 mod rig;
 mod state;

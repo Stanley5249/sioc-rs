@@ -17,6 +17,9 @@ Mistakes this project already made and approaches the project rejected, each wit
 
 ## Namespaces
 
+- Namespace cleanup never opens replacement handles. The core finishes old inbox ownership and held delivery before opening the waiting request. Repeated terminal packets keep the old participation draining. Held deliveries own the original receiver and token rather than resolving the namespace name again.
+- Ack waiters live with active participation; only the per-name ack counter outlives it. Keeping waiters beside the persistent name allowed cleanup and new handles to share mutable state.
+
 - A namespace ends through the EOF of its inbox when the last `SocketSender` drops. A disconnect message sent from `Drop` was lost when the inbox was full.
 - A namespace that ends before the actor took its inbox frees its name at once. Waiting for old handles to drain an inbox nobody polled left the name taken forever.
 - A send that waits for inbox capacity fails once the namespace closes. Before the shared `CancellationToken`, such a send kept waiting after the namespace closed.
@@ -39,6 +42,8 @@ Mistakes this project already made and approaches the project rejected, each wit
 - Each handshake has a deadline. Without one, a stalled attempt never failed, so the client never reconnected.
 
 ## Binary
+
+- Ending a namespace detaches its partial binary packet and consumes the remaining attachments without delivery. Resetting the decoder would lose frame alignment, while retaining the name as a live destination let an old packet reach replacement handles.
 
 - Placeholders are validated before attachments are retained, and a binary packet carries 1 to `MAX_ATTACHMENTS` attachments. Unchecked references reached application indexing code and could hold reconstruction open.
 
