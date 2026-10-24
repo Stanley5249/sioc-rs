@@ -88,6 +88,10 @@ impl TestManager {
     }
 
     async fn spawn_with(backoff: Option<Backoff>) -> Self {
+        Self::spawn_with_channels(backoff, ChannelConfig::from(32)).await
+    }
+
+    async fn spawn_with_channels(backoff: Option<Backoff>, channels: ChannelConfig) -> Self {
         let (connect_request_tx, connect_request_rx) = mpsc::channel(32);
         let (session_tx, mut session_rx) = mpsc::channel(1);
         let connect_engine = move |server_message_tx, client_message_rx| {
@@ -109,7 +113,7 @@ impl TestManager {
         let task = tokio::spawn(crate::manager::actor::run(
             connect_request_rx,
             connect_engine,
-            ChannelConfig::from(32),
+            channels,
             backoff,
         ));
         let session = session_rx.recv().await;
@@ -1316,4 +1320,62 @@ async fn held_packet_keeps_later_events_for_the_next_engine() {
     assert!(manager.recv_client_text().await.starts_with('0'));
     manager.send_server_message(CONNECT_RESPONSE).await;
     assert_eq!(&*manager.recv_client_text().await, r#"2["late"]"#);
+}
+
+/// Every queue holds one item. A receiver the application stops reading holds
+/// up what the server sends to the whole connection, as the README documents,
+/// but the other namespace still emits, and both flow again once it reads.
+#[tokio::test]
+async fn a_stalled_receiver_stops_only_incoming_data() {
+    let mut manager = TestManager::spawn_with_channels(None, ChannelConfig::from(1)).await;
+    let (_a_tx, mut a_rx) = manager.open_with("/a", ByteString::new(), 1).await;
+    let (b_tx, mut b_rx) = manager.open_with("/b", ByteString::new(), 1).await;
+    manager.send_server_message(r#"0/a,{"sid":"a"}"#).await;
+    manager.send_server_message(r#"0/b,{"sid":"b"}"#).await;
+    // `/a` holds its Connect, so this packet waits in the manager.
+    manager.send_server_message(r#"2/a,["held"]"#).await;
+    manager.send_server_message(r#"2/b,["queued"]"#).await;
+
+    b_tx.send(event(r#"["out"]"#, None)).await.unwrap();
+    assert_eq!(&*manager.recv_client_text().await, r#"2/b,["out"]"#);
+
+    assert!(matches!(b_rx.recv().await, Some(ServerPacket::Connect(_))));
+    assert!(matches!(a_rx.recv().await, Some(ServerPacket::Connect(_))));
+    assert!(matches!(a_rx.recv().await, Some(ServerPacket::Event(_))));
+    assert!(matches!(b_rx.recv().await, Some(ServerPacket::Event(_))));
+}
+
+/// A timed-out ack handle stops waiting, but its event still goes out once
+/// the server confirms the namespace.
+#[tokio::test]
+async fn ack_timeout_keeps_the_event() {
+    let mut manager = TestManager::spawn().await;
+    let (tx, _rx) = manager.open("/").await;
+    let (ack_tx, ack_rx) = oneshot::channel::<DynAck>();
+    tx.send(event(r#"["slow"]"#, Some(ack_tx))).await.unwrap();
+
+    let waited = tokio::time::timeout(Duration::from_millis(10), ack_rx).await;
+    assert!(waited.is_err(), "nothing answers an unsent event");
+
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    assert_eq!(&*manager.recv_client_text().await, r#"20["slow"]"#);
+    manager.send_server_message(r#"30["late"]"#).await;
+    manager.finish().await.unwrap();
+}
+
+/// Aborting the manager task ends every handle instead of leaving it waiting.
+#[tokio::test]
+async fn aborting_the_manager_ends_the_handles() {
+    let mut manager = TestManager::spawn().await;
+    let (tx, mut rx) = manager.open("/").await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    assert!(matches!(rx.recv().await, Some(ServerPacket::Connect(_))));
+
+    manager.task.abort();
+    assert!(manager.task.await.unwrap_err().is_cancelled());
+    assert!(rx.recv().await.is_none());
+    assert!(matches!(
+        tx.send(event(r#"["after"]"#, None)).await,
+        Err(SocketError::Closed)
+    ));
 }
