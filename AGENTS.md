@@ -3,6 +3,7 @@
 ## Workflow
 
 - Read `README.md`.
+- Before changing an area, read its section in `docs/decisions.md` and the docs of the modules you touch. When a fix or a rejected approach teaches a lesson, add it to `docs/decisions.md` in the same commit. When the structure changes, update the module docs in the same commit.
 - Run `just --list` or read `justfile` for commands.
 - Include `--workspace --all-targets` in `cargo` commands to unify features across the workspace.
 - Set `RUST_LOG=sioc=trace` to log every wire packet. Set `RUST_LOG=eioc=trace` to log library internals.
@@ -33,6 +34,7 @@
 - Re-export the public API through `prelude`. Keep `Result` and `Error` aliases outside `prelude` so they do not shadow the corresponding `std` types.
 - Import types and traits by name, or glob-import a `prelude`. To call a function in another module of the same crate, use its full `crate::` path instead of importing that module.
 - For a module with child files, use `<name>/mod.rs` as the module file. Keep that file limited to documentation and `mod` declarations.
+- Name items after their layer: frame for the transport, message for Engine.IO, and packet for Socket.IO. Engine sessions open and close, namespaces connect and disconnect, and the manager shuts down.
 - Name each channel's sender and receiver after the items the channel carries. When two channels carry the same item type, prefix both ends of each channel with `server_` or `client_` to identify the side that produces the items.
 
 ## Tests
