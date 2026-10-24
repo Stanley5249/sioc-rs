@@ -13,8 +13,9 @@ pub struct ChannelConfig {
     pub engine: usize,
     /// Transport channel: encoded frames to send to the transport.
     pub transport: usize,
-    /// Manager inboxes: messages from the engine, new namespaces, and each
-    /// namespace's client packets and buffered outgoing events.
+    /// Manager channels: messages from the engine, new namespaces, and each
+    /// namespace's client packets, which also hold the events emitted before
+    /// the server confirms the namespace.
     pub manager: usize,
     /// Per-namespace inbox: server packets delivered to each
     /// [`SocketReceiver`](crate::client::SocketReceiver), plus one separate

@@ -6,10 +6,9 @@
 
 use bytes::Bytes;
 use bytestring::ByteString;
-use eioc::prelude::Message;
 use miette::Diagnostic;
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use tokio::task::JoinError;
 use tokio::time::error::Elapsed;
 
@@ -314,15 +313,6 @@ pub enum ManagerError {
     #[diagnostic(transparent)]
     Packet(#[from] PacketError),
 
-    /// Sending a client message to the engine failed because the channel is
-    /// closed.
-    #[error("client message channel closed")]
-    #[diagnostic(
-        code(sioc::manager::client_message),
-        help("library bug, please report")
-    )]
-    ClientMessage(#[from] mpsc::error::SendError<Message>),
-
     /// Received a text frame while a binary reassembly was in progress.
     #[error("unexpected text frame: {0:?}")]
     #[diagnostic(
@@ -343,9 +333,9 @@ pub enum ManagerError {
     )]
     UnexpectedBinary(Bytes),
 
-    /// The engine finished while the manager still held its message sender,
-    /// which the engine keeps reading until the manager drops it. JS has no
-    /// counterpart, because its engine is one object instead of a task.
+    /// The engine dropped its message receiver, or finished, while the
+    /// manager still held the sender, which the engine keeps reading until the
+    /// manager drops it. Rust task: the JS engine is one object.
     #[error("engine finished before the manager closed it")]
     #[diagnostic(code(sioc::manager::engine_ended), help("library bug, please report"))]
     EngineEnded,
@@ -362,7 +352,7 @@ impl ManagerError {
         match self {
             Self::Engine(error) => error.is_internal(),
             Self::Packet(_) | Self::UnexpectedText(_) | Self::UnexpectedBinary(_) => false,
-            Self::ClientMessage(_) | Self::EngineEnded => true,
+            Self::EngineEnded => true,
         }
     }
 }
@@ -370,6 +360,7 @@ impl ManagerError {
 #[cfg(test)]
 mod tests {
     use eioc::error::EngineError;
+    use tokio::sync::mpsc;
 
     use super::*;
 
@@ -392,7 +383,6 @@ mod tests {
             ManagerError::Engine(
                 EngineError::ClientFrame(mpsc::error::SendError(Bytes::new().into())).into(),
             ),
-            ManagerError::ClientMessage(mpsc::error::SendError(Message::Text(ByteString::new()))),
             ManagerError::EngineEnded,
         ];
         for error in errors {

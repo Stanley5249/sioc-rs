@@ -190,7 +190,7 @@ let client = ClientBuilder::new(url)
 
 Every namespace of a client shares one connection, as in the JavaScript client, so a receiver that stops reading also holds up the other namespaces of that client. Open a separate `Client` for a namespace that must stay independent, like `multiplex: false` in the JavaScript client. Keep retained receivers draining so incoming messages and heartbeats can progress.
 
-Outgoing packets have a bounded inbox and a bounded pre-connect buffer per namespace. `ChannelConfig::manager` sets the capacity of each, so before confirmation, sending waits when both are full.
+Outgoing packets wait in a bounded channel per namespace until the server confirms the namespace. `ChannelConfig::manager` sets its capacity, so sending waits once it is full.
 
 ## Status
 

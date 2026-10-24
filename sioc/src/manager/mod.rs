@@ -1,39 +1,35 @@
 //! The Socket.IO manager, like socket.io-client's `Manager`: one Engine.IO
 //! connection shared by every namespace of a client, and its reconnection.
 //!
-//! [`actor::run`] is the one task that owns every channel end, the engine, and
-//! the reconnection timer. It turns what they yield into inputs for the
-//! synchronous [`core`], which owns all namespace, reconnection, and ack state,
-//! and carries out the effects the core hands back. One owner means no lock
-//! and no second registry.
+//! [`state::ManagerCore`] owns all namespace, ack, and reconnection state and
+//! never awaits. [`actor::run`] is the one task that owns the I/O around it:
+//! the engine, the reconnection timer, and the channel of every namespace's
+//! handles. Each scope takes one kind of input and talks in two directions:
 //!
 //! ```text
-//!  Client --ConnectRequest--+                     +--> Open / Close engine
-//!  namespace inboxes -------+--> actor::run ------+--> Schedule / Cancel wait
-//!  engine --ServerMessage---+     | handle        +--> Listen (poll an inbox)
-//!  engine future, sleep ----+     v
-//!                           ManagerCore --next_message--> engine permit
-//!                                       --try_send / deliver--> SocketReceiver
+//!  SocketSender --ClientPacket--> channel (= Socket.sendBuffer) --+
+//!  Client::connect --ConnectRequest-------------------------------+--> actor
+//!  engine --ServerMessage-----------------------------------------+     |
+//!                                                     ManagerInput |     v
+//!                                                     ManagerCore  <-----+
+//!            SocketReceiver <--try_send / held packet--   |   --write buffer + permit--> engine
 //! ```
 //!
-//! The actor never awaits a send in a handler. It waits for an engine permit,
-//! a receiver slot, or a room permit as one `select!` branch beside the
-//! others, so a full queue holds up only the data that needs it, while
-//! connect, shutdown, and the other direction keep going. Every bound lives in
-//! a channel capacity or a semaphore:
+//! Invariants:
 //!
-//! - Each namespace inbox and send buffer holds `ChannelConfig::manager`
-//!   packets. Draining a closed inbox ignores the room, so a buffer reaches at
-//!   most twice that.
-//! - The core holds one server packet for a full receiver, and one binary
-//!   packet under reconstruction.
-//! - Each namespace queues at most one CONNECT and one DISCONNECT.
-//!
-//! Shutdown never waits on the application. Once the client handle and every
-//! inbox are gone, the core lets the engine go after its queued packets leave.
-//! After an internal error, the core ends every namespace at once and the
-//! actor drops the inboxes. Either way the actor reads the engine to its end
-//! before it returns, so the engine never sees a failed send.
+//! - The actor reads a namespace's channel only when the packet can go to the
+//!   engine at once on a permit it already holds, or is to be dropped. Unsent
+//!   packets wait in the channel, which bounds them by
+//!   `ChannelConfig::manager`.
+//! - The write buffer holds CONNECT and DISCONNECT packets and the attachments
+//!   of the one packet in flight. A server packet whose receiver is full is
+//!   held alone, and the actor reads no engine message until it is delivered.
+//! - An ack waiter is registered when its event goes to the engine, so an
+//!   engine's end fails exactly the waiters of events it took.
+//! - An engine closes for the core only after its future finished and its
+//!   server direction ended, and each engine gets new channels.
+//! - Ending a namespace never waits on the application: its token closes the
+//!   channel, which the actor reads to the end.
 //!
 //! The behavior follows socket.io-client 4.8.4:
 //!
@@ -55,7 +51,9 @@
 pub mod actor;
 pub mod backoff;
 pub mod connect_request;
-pub mod core;
+pub mod decoder;
+pub mod namespace;
+pub mod state;
 
 #[cfg(test)]
 mod tests;

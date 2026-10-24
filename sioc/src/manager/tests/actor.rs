@@ -262,11 +262,12 @@ async fn closes_when_client_handle_drops_with_no_namespace() {
 async fn request_namespace(
     connect_request_tx: &mpsc::Sender<ConnectRequest>,
     ns: &str,
-) -> crate::manager::connect_request::ConnectHandles {
-    let (connect_request, mut handles) = ConnectRequest::new(ns.into(), ByteString::new(), 32, 32);
+) -> (SocketSender, SocketReceiver) {
+    let (connect_request, handles) = ConnectRequest::new(ns.into(), ByteString::new(), 32, 32);
     connect_request_tx.send(connect_request).await.unwrap();
-    (&mut handles.reply_rx).await.unwrap().unwrap();
-    handles
+    let (tx, rx, reply_rx) = handles.into_socket();
+    reply_rx.await.unwrap().unwrap();
+    (tx, rx)
 }
 
 #[tokio::test]
@@ -381,7 +382,7 @@ async fn dropping_handles_disconnects_only_that_namespace() {
 async fn unconfirmed_namespace_applies_backpressure_and_flushes_in_order() {
     let mut manager = TestManager::spawn().await;
     let (tx, mut rx) = manager.open("/").await;
-    for _ in 0..64 {
+    for _ in 0..32 {
         tx.send(event(r#"["queued"]"#, None)).await.unwrap();
     }
     let pending = tx.send(event(r#"["last"]"#, None));
@@ -395,7 +396,7 @@ async fn unconfirmed_namespace_applies_backpressure_and_flushes_in_order() {
 
     manager.send_server_message(CONNECT_RESPONSE).await;
     let receive = async {
-        for _ in 0..64 {
+        for _ in 0..32 {
             assert_eq!(&*manager.recv_client_text().await, r#"2["queued"]"#);
         }
         assert_eq!(&*manager.recv_client_text().await, r#"2["last"]"#);
@@ -411,7 +412,7 @@ async fn unconfirmed_namespace_applies_backpressure_and_flushes_in_order() {
 async fn full_unconfirmed_buffer_does_not_block_other_namespaces() {
     let mut manager = TestManager::spawn().await;
     let (tx, _rx) = manager.open("/").await;
-    for _ in 0..64 {
+    for _ in 0..32 {
         tx.send(event(r#"["queued"]"#, None)).await.unwrap();
     }
     let pending = tx.send(event(r#"["blocked"]"#, None));
@@ -440,7 +441,7 @@ async fn full_unconfirmed_buffer_does_not_block_other_namespaces() {
 async fn dropping_last_sender_releases_a_full_unconfirmed_buffer() {
     let mut manager = TestManager::spawn().await;
     let (tx, _rx) = manager.open("/").await;
-    for _ in 0..64 {
+    for _ in 0..32 {
         tx.send(event(r#"["queued"]"#, None)).await.unwrap();
     }
     drop(tx);
@@ -590,14 +591,17 @@ async fn ack_waits_for_nothing_once_confirmed() {
 }
 
 #[tokio::test]
-async fn ack_before_server_connect_is_discarded() {
+async fn ack_before_server_connect_waits_for_it() {
     let mut manager = TestManager::spawn().await;
     let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
     client_packet_tx.send(ack(42)).await.unwrap();
     assert_quiet(&mut manager.session().client_message_rx).await;
 
+    // The reply waits in the channel. If its id belongs to an earlier engine,
+    // the server ignores it, because its ack ids never repeat.
     manager.send_server_message(CONNECT_RESPONSE).await;
     server_packet_rx.recv().await.unwrap();
+    assert_eq!(&*manager.recv_client_text().await, "342[true]");
     client_packet_tx.send(ack(43)).await.unwrap();
     assert_eq!(&*manager.recv_client_text().await, "343[true]");
     manager.finish().await.unwrap();
@@ -861,7 +865,7 @@ async fn closed_engine_channel_is_error() {
     drop(result_tx);
     assert!(matches!(
         task.await.unwrap(),
-        Err(ManagerError::ClientMessage(_))
+        Err(ManagerError::EngineEnded)
     ));
 }
 
