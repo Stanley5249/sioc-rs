@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 
-use super::rig::{Effect, Rig, event};
+use super::rig::{Effect, Rig, event, event_ack};
+use crate::manager::namespace::Read;
 use crate::manager::state::ManagerInput;
 use crate::packet::{ClientPacket, ServerPacket};
 
@@ -12,31 +13,38 @@ const PLACEHOLDER: &str = "{\"_placeholder\":true,\"num\":0}";
 
 #[test]
 fn binary_packets_leave_with_their_attachments_before_other_messages() {
-    let mut rig = Rig::new(8);
+    let mut rig = Rig::new();
     rig.connected("/");
     rig.connected("/b");
 
     let payload = "[\"e\",{\"_placeholder\":true,\"num\":0},{\"_placeholder\":true,\"num\":1}]";
     let attachments = vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")];
-    rig.send("/", event(payload, None, Some(attachments)));
-    rig.emit("/b", "[\"x\"]");
-    rig.emit("/", "[\"y\"]");
-
-    assert_eq!(
-        rig.pull(),
-        [
-            format!("52-{payload}").as_str(),
-            "bin:a",
-            "bin:b",
-            "2/b,[\"x\"]",
-            "2[\"y\"]",
-        ]
+    rig.send(
+        "/",
+        ClientPacket::Event {
+            payload: payload.into(),
+            ack_tx: None,
+            attachments: Some(attachments),
+        },
     );
+
+    // No namespace reads before the attachments left.
+    assert_eq!(rig.core.read("/", true), Read::Wait);
+    assert_eq!(rig.core.read("/b", true), Read::Wait);
+    assert_eq!(
+        rig.messages(),
+        [format!("52-{payload}").as_str(), "bin:a", "bin:b"]
+    );
+
+    rig.send("/b", event("[\"x\"]"));
+    assert_eq!(rig.messages(), ["2/b,[\"x\"]"]);
+    rig.send("/", event("[\"y\"]"));
+    assert_eq!(rig.messages(), ["2[\"y\"]"]);
 }
 
 #[test]
 fn binary_ack_replies_leave_with_their_attachments() {
-    let mut rig = Rig::new(8);
+    let mut rig = Rig::new();
     rig.connected("/");
     rig.send(
         "/",
@@ -47,21 +55,22 @@ fn binary_ack_replies_leave_with_their_attachments() {
         },
     );
     assert_eq!(
-        rig.pull(),
+        rig.messages(),
         ["61-4[{\"_placeholder\":true,\"num\":0}]", "bin:r"]
     );
 }
 
 #[test]
 fn incoming_binary_packets_are_rebuilt() {
-    let mut rig = Rig::new(8);
-    let mut handles = rig.open("/", "{}");
+    let mut rig = Rig::new();
+    let mut handles = rig.connect("/", "{}", 32);
     rig.handshake();
-    rig.pull();
+    rig.messages();
     rig.confirm("/");
     handles.server_packet_rx.try_recv().unwrap();
-    let mut ack = rig.emit_ack("/", "[\"q\"]");
-    rig.pull();
+    let (packet, mut ack) = event_ack("[\"q\"]");
+    rig.send("/", packet);
+    rig.messages();
 
     rig.server(&format!("51-[\"e\",{PLACEHOLDER}]"));
     rig.server_binary(b"z");
@@ -91,25 +100,25 @@ fn server_protocol_errors_close_the_engine_without_an_internal_error() {
     ];
 
     for case in cases {
-        let mut rig = Rig::reconnecting(8);
+        let mut rig = Rig::reconnecting();
         rig.connected("/");
         case(&mut rig);
         assert_eq!(rig.effects(), [Effect::Close]);
         assert!(!rig.core.has_message());
 
         // The engine then finishes without an error, and the client reconnects.
-        rig.try_input(ManagerInput::Closed(Ok(()))).unwrap();
-        assert_eq!(rig.effects(), [Effect::Schedule(Duration::ZERO)]);
+        let effects = rig.step(ManagerInput::Closed(Ok(())));
+        assert_eq!(effects, [Effect::Schedule(Duration::ZERO)]);
     }
 }
 
 #[test]
 fn reconstruction_restarts_with_the_next_engine() {
-    let mut rig = Rig::reconnecting(8);
+    let mut rig = Rig::reconnecting();
     rig.connected("/");
     rig.server(&format!("51-[\"e\",{PLACEHOLDER}]"));
-    rig.close();
-    rig.input(ManagerInput::Reconnect);
+    rig.step(ManagerInput::Closed(Ok(())));
+    rig.step(ManagerInput::Reconnect);
     rig.handshake();
     rig.effects();
 
