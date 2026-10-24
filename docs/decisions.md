@@ -51,3 +51,7 @@ Mistakes this project already made and approaches it rejected, each with the cho
 ## Configuration
 
 - A zero channel capacity is a builder error. It used to panic inside Tokio.
+
+## Tests
+
+- Protocol rules are tested on the sans-I/O core by inputs and outputs. Core tests that ran through a rig modeling the actor's channel reads repeated the actor's logic and had to be rewritten whenever the core's boundary changed.
