@@ -106,7 +106,7 @@ impl TestManager {
                 result_rx.await.unwrap_or(Ok(()))
             }
         };
-        let task = tokio::spawn(crate::manager::client_packet::client_packets_to_messages(
+        let task = tokio::spawn(crate::manager::actor::run(
             connect_request_rx,
             connect_engine,
             ChannelConfig::from(32),
@@ -958,11 +958,15 @@ async fn internal_send_failure_releases_a_full_retained_receiver() {
     manager.send_server_message(r#"2["blocked"]"#).await;
     manager.session().client_message_rx.close();
     tx.send(event(r#"["fails"]"#, None)).await.unwrap();
-    let error = tokio::time::timeout(Duration::from_secs(1), manager.finish())
+    let result = tokio::time::timeout(Duration::from_secs(1), manager.finish())
         .await
-        .expect("internal failure must release blocked delivery")
-        .unwrap_err();
-    assert!(matches!(error, ManagerError::ClientMessage(_)));
+        .expect("a broken engine must release blocked delivery");
+    // The manager sees the closed receiver on its next send, the engine
+    // finishing while it still holds the sender, or the engine hanging up
+    // first, whichever comes first. Only the first two are failures.
+    if let Err(error) = result {
+        assert!(error.is_internal(), "{error:?}");
+    }
 }
 
 #[tokio::test]
@@ -1186,4 +1190,130 @@ async fn opened_engine_restarts_the_attempt_count() {
 
     drop(client_packet_tx);
     manager.finish().await.unwrap();
+}
+
+/// The application emits once per server event while the server floods and
+/// every queue holds two items, the deadlock that `44b0c3f` fixed.
+#[tokio::test]
+async fn emits_while_handling_a_server_flood() {
+    const FLOOD: usize = 2000;
+
+    let (connect_request_tx, connect_request_rx) = mpsc::channel(4);
+    let (session_tx, mut session_rx) = mpsc::channel(1);
+    let connect_engine = move |server_message_tx, client_message_rx| {
+        let session_tx = session_tx.clone();
+        async move {
+            let (result_tx, result_rx) = oneshot::channel();
+            let session = TestSession {
+                server_message_tx,
+                client_message_rx,
+                result_tx,
+            };
+            if session_tx.send(session).await.is_err() {
+                return Ok(());
+            }
+            result_rx.await.unwrap_or(Ok(()))
+        }
+    };
+    let task = tokio::spawn(crate::manager::actor::run(
+        connect_request_rx,
+        connect_engine,
+        ChannelConfig::from(2),
+        None,
+    ));
+    let TestSession {
+        server_message_tx,
+        mut client_message_rx,
+        result_tx,
+    } = session_rx.recv().await.unwrap();
+
+    let (connect_request, handles) = ConnectRequest::new("/".into(), ByteString::new(), 2, 1);
+    connect_request_tx.send(connect_request).await.unwrap();
+    let (tx, mut rx, reply_rx) = handles.into_socket();
+    reply_rx.await.unwrap().unwrap();
+
+    // The engine reads client messages independently of the server direction.
+    let reader = tokio::spawn(async move {
+        let mut events = 0;
+        while events < FLOOD {
+            match client_message_rx.recv().await {
+                Some(Message::Text(text)) if text.starts_with('2') => events += 1,
+                Some(_) => {}
+                None => panic!("the manager closed the engine during the flood"),
+            }
+        }
+        client_message_rx
+    });
+    let flooder = tokio::spawn({
+        let server_message_tx = server_message_tx.clone();
+        async move {
+            let connect = ServerMessage::Text(CONNECT_RESPONSE.into());
+            server_message_tx.send(connect).await.unwrap();
+            for _ in 0..FLOOD {
+                let flood = ServerMessage::Text(r#"2["flood"]"#.into());
+                server_message_tx.send(flood).await.unwrap();
+            }
+        }
+    });
+    let app = tokio::spawn(async move {
+        let mut received = 0;
+        while received < FLOOD {
+            match rx.recv().await {
+                Some(ServerPacket::Event(_)) => {
+                    received += 1;
+                    tx.send(event(r#"["reply"]"#, None)).await.unwrap();
+                }
+                Some(_) => {}
+                None => panic!("the receiver ended during the flood"),
+            }
+        }
+        (tx, rx)
+    });
+
+    let finished = async {
+        flooder.await.unwrap();
+        let client_message_rx = reader.await.unwrap();
+        let handles = app.await.unwrap();
+        (client_message_rx, handles)
+    };
+    let (mut client_message_rx, handles) = tokio::time::timeout(Duration::from_secs(20), finished)
+        .await
+        .expect("emitting while handling a flood never deadlocks");
+
+    drop(handles);
+    drop(connect_request_tx);
+    drop(server_message_tx);
+    while client_message_rx.recv().await.is_some() {}
+    result_tx.send(Ok(())).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+/// A full receiver holds one packet, which stops reading the engine. The
+/// engine's hang-up must still close it, so an event emitted afterwards waits
+/// for the next engine instead of going into the session that only drains.
+#[tokio::test]
+async fn held_packet_keeps_later_events_for_the_next_engine() {
+    let mut manager = TestManager::spawn_reconnecting().await;
+    let (tx, mut rx) = manager.open_with("/", ByteString::new(), 1).await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    // The Connect packet fills the receiver, so the manager holds this one.
+    manager.send_server_message(r#"2["held"]"#).await;
+    assert_quiet(&mut manager.session().client_message_rx).await;
+
+    let old = manager.session.take().expect("a session is open");
+    drop(old.server_message_tx);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    tx.send(event(r#"["late"]"#, None)).await.unwrap();
+
+    // The old engine gets nothing more, and closes once the manager lets go.
+    let mut client_message_rx = old.client_message_rx;
+    assert!(client_message_rx.recv().await.is_none());
+    old.result_tx.send(Ok(())).unwrap();
+
+    rx.recv().await.unwrap();
+    rx.recv().await.unwrap();
+    manager.session = manager.session_rx.recv().await;
+    assert!(manager.recv_client_text().await.starts_with('0'));
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    assert_eq!(&*manager.recv_client_text().await, r#"2["late"]"#);
 }

@@ -51,14 +51,10 @@ impl Backoff {
     /// Counts an attempt and returns its delay, or `None` once the attempts
     /// ran out, like `Backoff.duration` with the attempt check in
     /// `Manager.reconnect`.
-    pub fn next_delay(&mut self) -> Option<Duration> {
-        self.next_delay_with(&mut fastrand::Rng::new())
-    }
-
-    /// Like [`next_delay`](Self::next_delay), but draws the jitter from `rng`,
-    /// so a caller that owns a seeded generator gets reproducible delays. JS
-    /// has no counterpart, because it calls `Math.random`.
-    pub fn next_delay_with(&mut self, rng: &mut fastrand::Rng) -> Option<Duration> {
+    ///
+    /// Draws the jitter from `rng`, so a caller that owns a seeded generator
+    /// gets reproducible delays where JS calls `Math.random`.
+    pub fn next_delay(&mut self, rng: &mut fastrand::Rng) -> Option<Duration> {
         if self.max_attempts.is_some_and(|max| self.attempts >= max) {
             return None;
         }
@@ -108,7 +104,7 @@ mod tests {
     #[test]
     fn delay_doubles_up_to_the_cap() {
         let mut backoff = backoff(0.0, None);
-        let delays: Vec<_> = std::iter::from_fn(|| backoff.next_delay())
+        let delays: Vec<_> = std::iter::from_fn(|| backoff.next_delay(&mut fastrand::Rng::new()))
             .take(5)
             .map(|delay| delay.as_millis())
             .collect();
@@ -120,7 +116,10 @@ mod tests {
         let mut backoff = backoff(0.5, None);
         for _ in 0..100 {
             backoff.reset();
-            let millis = backoff.next_delay().unwrap().as_millis();
+            let millis = backoff
+                .next_delay(&mut fastrand::Rng::new())
+                .unwrap()
+                .as_millis();
             assert!((500..=1500).contains(&millis), "{millis}");
         }
     }
@@ -129,20 +128,26 @@ mod tests {
     fn factor_outside_zero_to_one_means_no_jitter() {
         for factor in [-0.5, 1.5, f64::NAN] {
             let mut backoff = backoff(factor, None);
-            assert_eq!(backoff.next_delay(), Some(Duration::from_secs(1)));
+            assert_eq!(
+                backoff.next_delay(&mut fastrand::Rng::new()),
+                Some(Duration::from_secs(1))
+            );
         }
     }
 
     #[test]
     fn attempts_run_out_until_reset() {
         let mut backoff = backoff(0.0, Some(2));
-        backoff.next_delay().unwrap();
-        backoff.next_delay().unwrap();
+        backoff.next_delay(&mut fastrand::Rng::new()).unwrap();
+        backoff.next_delay(&mut fastrand::Rng::new()).unwrap();
         assert_eq!(backoff.attempts(), 2);
-        assert_eq!(backoff.next_delay(), None);
+        assert_eq!(backoff.next_delay(&mut fastrand::Rng::new()), None);
 
         backoff.reset();
-        assert_eq!(backoff.next_delay(), Some(Duration::from_secs(1)));
+        assert_eq!(
+            backoff.next_delay(&mut fastrand::Rng::new()),
+            Some(Duration::from_secs(1))
+        );
     }
 
     #[test]
@@ -151,7 +156,7 @@ mod tests {
             let mut rng = fastrand::Rng::with_seed(seed);
             let mut backoff = backoff(0.5, None);
             (0..4)
-                .map(|_| backoff.next_delay_with(&mut rng))
+                .map(|_| backoff.next_delay(&mut rng))
                 .collect::<Vec<_>>()
         };
         assert_eq!(delays(7), delays(7));
@@ -162,6 +167,9 @@ mod tests {
     fn huge_attempt_counts_stay_at_the_cap() {
         let mut backoff = backoff(0.5, None);
         backoff.attempts = u32::MAX - 1;
-        assert_eq!(backoff.next_delay(), Some(Duration::from_secs(5)));
+        assert_eq!(
+            backoff.next_delay(&mut fastrand::Rng::new()),
+            Some(Duration::from_secs(5))
+        );
     }
 }

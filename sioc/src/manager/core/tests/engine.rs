@@ -116,10 +116,10 @@ fn delays_use_the_seeded_rng_and_restart_after_a_handshake() {
 
     let mut rng = fastrand::Rng::with_seed(42);
     let mut mirror = new_backoff();
-    let first = mirror.next_delay_with(&mut rng).unwrap();
-    let second = mirror.next_delay_with(&mut rng).unwrap();
+    let first = mirror.next_delay(&mut rng).unwrap();
+    let second = mirror.next_delay(&mut rng).unwrap();
     mirror.reset();
-    let third = mirror.next_delay_with(&mut rng).unwrap();
+    let third = mirror.next_delay(&mut rng).unwrap();
 
     let mut rig = Rig::seeded(8, Some(new_backoff()), 42);
     rig.connected("/");
@@ -150,8 +150,8 @@ fn an_internal_error_is_returned_and_shutdown_ends_everything() {
     let mut handles = rig.connected("/");
     let mut buffered = rig.emit_ack("/", "[\"e\"]");
 
-    let result = rig.try_input(ManagerInput::Close(Err(ManagerError::EngineEvent)));
-    assert!(matches!(result, Err(ManagerError::EngineEvent)));
+    let result = rig.try_input(ManagerInput::Close(Err(ManagerError::EngineEnded)));
+    assert!(matches!(result, Err(ManagerError::EngineEnded)));
 
     rig.shutdown();
     assert_eq!(buffered.try_recv().unwrap_err(), TryRecvError::Closed);

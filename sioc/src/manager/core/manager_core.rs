@@ -52,9 +52,9 @@ enum ReadyState {
 /// One caller applies one [`ManagerInput`] at a time with
 /// [`handle`](Self::handle) and carries out the effects from
 /// [`next_output`](Self::next_output). It drains `next_output` after every
-/// `handle`, [`next_message`](Self::next_message), and
-/// [`shutdown`](Self::shutdown), so the queue holds at most
-/// [`MAX_QUEUED_OUTPUTS`] items.
+/// `handle` and [`next_message`](Self::next_message), so the queue holds at
+/// most [`MAX_QUEUED_OUTPUTS`] items. After [`shutdown`](Self::shutdown) it
+/// may close the engine itself instead.
 #[derive(Debug)]
 pub struct ManagerCore {
     /// Every namespace name, like `Manager.nsps`.
@@ -132,6 +132,7 @@ impl ManagerCore {
             ManagerInput::Message(message) => self.message(message),
             ManagerInput::Close(engine_result) => result = self.close(engine_result),
             ManagerInput::Reconnect => self.reconnect(),
+            ManagerInput::Release => self.release(),
         }
 
         // After an internal error the caller shuts down, so no engine opens.
@@ -455,7 +456,7 @@ impl ManagerCore {
             return None;
         };
 
-        let delay = backoff.next_delay_with(&mut self.rng);
+        let delay = backoff.next_delay(&mut self.rng);
         if let Some(delay) = delay {
             tracing::info!(attempt = backoff.attempts(), ?delay, "reconnecting");
         } else {

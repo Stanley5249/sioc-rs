@@ -150,3 +150,23 @@ fn engine_loss_while_disconnecting_ends_the_namespace() {
     assert_eq!(rig.effects(), []);
     assert!(rig.core.is_idle());
 }
+
+#[test]
+fn a_reopen_that_ends_before_it_is_listened_to_frees_the_name() {
+    let mut rig = Rig::new(8);
+    rig.connected("/");
+    rig.emit("/", "[\"e1\"]");
+    rig.disconnect("/");
+    let mut waiting = rig.open("/", "{}");
+
+    // The engine closes without reconnection: the waiting request takes the
+    // name, then the namespace ends with every other one before its inbox
+    // was handed out.
+    rig.close();
+    assert!(matches!(waiting.reply_rx.try_recv(), Ok(Ok(()))));
+    assert!(waiting.closed.is_cancelled());
+    assert!(rig.core.is_idle());
+
+    let mut third = rig.open("/", "{}");
+    assert!(matches!(third.reply_rx.try_recv(), Ok(Ok(()))));
+}

@@ -306,9 +306,14 @@ impl Namespace {
                     tracing::debug!(%ns, "discarded terminal packet for a dropped receiver");
                 }
 
-                self.clear();
-                self.client_packet_rx = None;
-                self.state = NamespaceState::Draining(None);
+                // An inbox the caller never took has no old handles to
+                // drain, so the name is free at once.
+                if self.client_packet_rx.take().is_some() {
+                    self.become_inactive(None);
+                } else {
+                    self.clear();
+                    self.state = NamespaceState::Draining(None);
+                }
             }
             // The inbox already ended, so nothing is left to drain.
             NamespaceState::Disconnecting(reopen) => self.become_inactive(reopen),

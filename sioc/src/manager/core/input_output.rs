@@ -39,6 +39,10 @@ pub enum ManagerInput {
     Close(Result<(), ManagerError>),
     /// The reconnection delay is over, like the timer in `Manager.reconnect`.
     Reconnect,
+    /// The client handle dropped and no inbox remains, so nothing can need a
+    /// new engine, like `Manager._destroy` once no socket is active. The engine
+    /// closes once its queued packets leave.
+    Release,
 }
 
 /// One effect for the caller to carry out. JS has no counterpart, because the
@@ -58,7 +62,8 @@ pub enum ManagerOutput {
     /// its handles call the `Socket` directly.
     ///
     /// Before each receive, the caller takes one permit from `room` and forgets
-    /// it, so the core never buffers more than the room it gave. Once `closed`
+    /// it once a packet arrives, so the core never buffers more than the room
+    /// it gave. Once `closed`
     /// is cancelled, because the namespace ended or its last handle left, the
     /// caller closes the inbox and drains it to the end without permits, so
     /// the end never waits on the engine. It passes every item as
