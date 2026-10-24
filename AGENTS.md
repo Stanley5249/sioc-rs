@@ -13,8 +13,8 @@
 
 `mpsc` below refers to `tokio::sync::mpsc`.
 
-- Run each direction of a bidirectional pipe in a separate loop. Run both loops together with `tokio::join!`. A loop waiting for one output stops serving its other inputs.
-- Use `tokio::select!` in a loop only if each arm handles a stop signal or its handler awaits only the loop's single output. Prove that every branch future is safe to cancel.
+- Keep each piece of state in one task. A loop that serves several inputs never awaits inside a handler. It waits for each output, such as a channel permit or a timer, as its own `select!` branch beside the inputs, so a full queue holds up only the data that needs it. Prove that every branch future is safe to cancel.
+- Run independent I/O directions, such as a transport's read and write halves, in separate loops joined with `tokio::join!` when no state ties them together.
 - Shut down through half-close. A task drops its channel senders with `drop` to initiate shutdown, then waits until `mpsc::Receiver::recv` or `mpsc::UnboundedReceiver::recv` returns `None` for every input channel before finishing. Under this protocol, sends between library tasks succeed; treat any send failure as an error. If delivery fails because the caller dropped a receiver, discard the item.
 - Use `mpsc::channel` to give every channel fed by the server a bounded capacity. Use `mpsc::unbounded_channel` only if library state limits the number of queued items. Document that limit in a comment on the channel.
 
