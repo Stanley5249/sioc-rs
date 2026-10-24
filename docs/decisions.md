@@ -8,12 +8,16 @@ Mistakes this project already made and approaches it rejected, each with the cho
 - After a failure, the failing side keeps accepting input until the other side hangs up. Stopping at once made the other side fail with a closed-channel error, which replaced the root error.
 - The end of a channel is the only close signal between tasks. Forwarding the Engine.IO `Close` packet as well gave two signals for one state, so every side had to handle both.
 - Every channel the server can fill is bounded, and an unbounded channel needs a bound the library enforces. An unbounded control channel queued a message for every repeated CONNECT or unknown DISCONNECT, so a server could grow it without limit.
+- One task owns the manager's state, and a synchronous core decides every transition. Two loops that shared namespace state behind a `Mutex` each saw half of every transition, which needed a three-step confirmation state and an unbounded event channel between them.
+- An inbox whose buffer is full still ends when its last handle leaves. Holding the inbox until the buffer had room hid its end, so an unconfirmed namespace never closed. The shared token now tells the actor to drain without room.
+- A server packet held for a full receiver never hides the engine's hang-up. The actor kept sending buffered events into a session that only drained, which lost them, and an empty closed server direction blocked the engine's cleanup.
 - Rejected: one input channel shared by all sources. It loses per-namespace EOF and backpressure, starves control behind data, and needs a forwarding task for engine messages.
 - Rejected: generation counters, incarnation ids, or session tags to tell old work from new. Old work is isolated by ownership and finished cleanup instead.
 
 ## Namespaces
 
 - A namespace ends through the EOF of its inbox when the last `SocketSender` drops. A disconnect message sent from `Drop` was lost when the inbox was full.
+- A namespace that ends before the actor took its inbox frees its name at once. Waiting for old handles to drain an inbox nobody polled left the name taken forever.
 - A send that waits for inbox capacity fails once the namespace closes. Before the shared `CancellationToken`, such a send kept waiting after the namespace closed.
 - The terminal DISCONNECT or CONNECT_ERROR travels on its own oneshot. Through the data queue, it never arrived while the receiver was full, so shutdown hung.
 - CONNECT_ERROR closes the namespace like DISCONNECT. Before, the namespace stayed open after a refusal and could not open again.
