@@ -674,3 +674,57 @@ fn a_dropped_receiver_discards_packets_without_holding() {
     assert!(rig.core.held_sender().is_none());
     rig.server("2[\"e2\"]");
 }
+
+#[test]
+fn disconnecting_one_namespace_keeps_the_engine_for_the_other() {
+    let mut rig = Rig::new();
+    let first = rig.connected("/");
+    let _second = rig.connected("/b");
+
+    first.closed.cancel();
+    assert_eq!(rig.step(disconnect("/")), []);
+    assert_eq!(rig.messages(), ["1"]);
+    assert_eq!(rig.effects(), []);
+
+    rig.send("/b", event("[\"still\"]"));
+    assert_eq!(rig.messages(), ["2/b,[\"still\"]"]);
+}
+
+#[test]
+fn server_packets_for_a_namespace_the_client_never_opened_are_discarded() {
+    let mut rig = Rig::new();
+    let mut handles = rig.connected("/");
+    handles.server_packet_rx.try_recv().unwrap();
+
+    rig.server("2/gone,[\"late\"]");
+    rig.server("3/gone,0[\"late\"]");
+    rig.server("1/gone,");
+    assert_eq!(rig.effects(), []);
+    assert_eq!(rig.messages(), Vec::<String>::new());
+    handles.server_packet_rx.try_recv().unwrap_err();
+    assert_eq!(rig.core.read("/", true), Read::Send);
+}
+
+#[test]
+fn a_repeated_server_connect_sends_nothing_more() {
+    let mut rig = Rig::new();
+    let _handles = rig.connected("/");
+    rig.confirm("/");
+    assert_eq!(rig.effects(), []);
+    assert_eq!(rig.messages(), Vec::<String>::new());
+
+    rig.send("/", event("[\"once\"]"));
+    assert_eq!(rig.messages(), ["2[\"once\"]"]);
+}
+
+#[test]
+fn without_a_namespace_a_lost_engine_is_not_reopened() {
+    let mut rig = Rig::reconnecting();
+    assert_eq!(rig.effects(), [Effect::Open]);
+
+    assert_eq!(rig.step(ManagerInput::Closed(Ok(()))), []);
+    assert!(rig.core.is_idle());
+
+    let _handles = rig.connect("/", "{}", 32);
+    assert_eq!(rig.effects(), [Effect::Open, listen("/")]);
+}

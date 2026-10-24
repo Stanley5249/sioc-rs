@@ -126,3 +126,24 @@ fn reconstruction_restarts_with_the_next_engine() {
     rig.server_binary(b"z");
     assert_eq!(rig.effects(), [Effect::Close]);
 }
+
+#[test]
+fn an_incoming_binary_event_waits_for_every_attachment() {
+    let mut rig = Rig::new();
+    let mut handles = rig.connected("/");
+    handles.server_packet_rx.try_recv().unwrap();
+
+    let two = "{\"_placeholder\":true,\"num\":1}";
+    rig.server(&format!("52-[\"e\",{PLACEHOLDER},{two}]"));
+    rig.server_binary(b"a");
+    handles.server_packet_rx.try_recv().unwrap_err();
+
+    rig.server_binary(b"b");
+    let Ok(ServerPacket::Event(event)) = handles.server_packet_rx.try_recv() else {
+        panic!("the binary event arrives with its last attachment");
+    };
+    assert_eq!(
+        event.attachments.unwrap(),
+        [Bytes::from_static(b"a"), Bytes::from_static(b"b")]
+    );
+}
