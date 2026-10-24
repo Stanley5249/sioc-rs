@@ -18,7 +18,6 @@ use crate::manager::engine::{Drain, Engine, EngineStep};
 use crate::manager::namespace::Read;
 use crate::manager::send_buffer::SendBuffer;
 use crate::manager::state::{ManagerCore, ManagerInput, ManagerOutput};
-use crate::packet::{ClientPacket, ServerPacket};
 
 /// Runs the manager until the client handle and every namespace are gone, like
 /// socket.io-client's `Manager` for as long as its sockets live.
@@ -76,28 +75,6 @@ struct ManagerActor<F, Fut> {
     channels: ChannelConfig,
 }
 
-/// What one turn of the `select!` saw. Rust wait: each JS source calls its
-/// own handler.
-enum Step {
-    /// Something for the core to handle.
-    Input(ManagerInput),
-    /// The client handle dropped.
-    ClientClosed,
-    /// The engine has room for one message, or dropped its receiver.
-    Engine(EngineStep),
-    /// The next packet and the output slot owned by its selection, or EOF.
-    /// Rust bound: the header handoff happens in the same synchronous handler.
-    ClientPacket(
-        usize,
-        Option<ClientPacket>,
-        Option<mpsc::OwnedPermit<Message>>,
-    ),
-    /// The receiver of the held packet has room, or dropped.
-    Deliver(Result<mpsc::OwnedPermit<ServerPacket>, mpsc::error::SendError<()>>),
-    /// Every source is gone. `select!` can see that one turn before `drive`.
-    Exhausted,
-}
-
 impl<F, Fut> ManagerActor<F, Fut>
 where
     F: FnMut(mpsc::Sender<ServerMessage>, mpsc::Receiver<Message>) -> Fut,
@@ -115,8 +92,7 @@ where
                 continue;
             }
 
-            let step = self.next_step().await;
-            if let Some(input) = self.apply(step)? {
+            if let Some(input) = self.turn().await? {
                 self.core.handle(input)?;
             }
         }
@@ -198,14 +174,11 @@ where
         true
     }
 
-    /// Waits for the next thing any source yields.
-    ///
-    /// Every branch future is cancel safe: `recv`, `poll_recv`, and
-    /// `reserve_owned` lose nothing when dropped, and the engine future, the
-    /// sleep, and the cancel waits are polled by reference. The branches only
-    /// report what happened, because the futures borrow the actor until
-    /// `select!` returns.
-    async fn next_step(&mut self) -> Step {
+    /// Waits for one input and handles its I/O synchronously. Each branch
+    /// future is cancel safe: channels retain unread packets, the engine owns
+    /// its future and acquired slot, and the reconnection deadline is pinned.
+    /// Packet selection owns its output permit until the header is handed off.
+    async fn turn(&mut self) -> Result<Option<ManagerInput>, ManagerError> {
         let Self {
             core,
             connect_request_rx,
@@ -215,125 +188,94 @@ where
             sleep,
             ..
         } = self;
-
         let held_packet_tx = core.held_sender();
-        let holds_packet = held_packet_tx.is_some();
-        let mut permit = engine.as_mut().and_then(Engine::take_permit);
-        let has_permit = permit.is_some();
-        let runs_engine = engine.is_some();
+        let can_receive_server_message = held_packet_tx.is_none();
+        let mut client_message_permit = engine.as_mut().and_then(Engine::take_permit);
+        let can_reserve_client_message = client_message_permit.is_none();
+        let has_engine = engine.is_some();
         let has_client = connect_request_rx.is_some();
         let has_handles = !send_buffers.is_empty();
         let waits = sleep.is_some();
-        let core = &*core;
 
-        let step = tokio::select! {
+        let input = tokio::select! {
             request = async {
                 connect_request_rx.as_mut().expect("the guard checked the receiver").recv().await
-            }, if has_client => match request {
-                Some(request) => Step::Input(ManagerInput::Connect(request)),
-                None => Step::ClientClosed,
+            }, if has_client => {
+                if let Some(request) = request {
+                    Some(ManagerInput::Connect(request))
+                } else {
+                    *connect_request_rx = None;
+                    Some(ManagerInput::Release)
+                }
             },
 
             (index, packet) = poll_fn(|cx| {
-                crate::manager::send_buffer::poll_send_buffers(core, send_buffers, next_send_buffer, has_permit, cx)
-            }), if has_handles => Step::ClientPacket(index, packet, permit.take()),
+                crate::manager::send_buffer::poll_send_buffers(
+                    core, send_buffers, next_send_buffer, client_message_permit.is_some(), cx,
+                )
+            }), if has_handles => match packet {
+                Some(packet) => {
+                    let ns = send_buffers[index].ns.clone();
+                    let read = core.read(&ns, client_message_permit.is_some());
+                    core.handle(ManagerInput::Packet { ns, packet })?;
+                    if read == Read::Send {
+                        let permit = client_message_permit.take()
+                            .expect("a sendable packet owns an engine permit");
+                        let header = core.next_message()
+                            .expect("a sendable packet produces its header");
+                        permit.send(header);
+                    }
+                    None
+                }
+                None => Some(ManagerInput::Disconnect(send_buffers.remove(index).ns)),
+            },
 
             permit = async {
                 held_packet_tx.expect("the guard checked the sender").reserve_owned().await
-            }, if holds_packet => Step::Deliver(permit),
+            }, if !can_receive_server_message => {
+                core.deliver_held(permit);
+                None
+            },
 
             step = async {
-                engine.as_mut().expect("the guard checked the engine").next(!holds_packet, !has_permit).await
-            }, if runs_engine => Step::Engine(step),
+                engine.as_mut()
+                    .expect("the guard checked the engine")
+                    .next(can_receive_server_message, can_reserve_client_message).await
+            }, if has_engine => match step {
+                EngineStep::Message { message, draining } => Some(if draining {
+                    ManagerInput::Drain(message)
+                } else {
+                    ManagerInput::Message(message)
+                }),
+                EngineStep::Closed(result) => {
+                    // Complete session reclamation before the core can open
+                    // its successor. Persistent event inboxes stay owned here.
+                    client_message_permit = None;
+                    *engine = None;
+                    for buffer in send_buffers {
+                        buffer.ack_packet_rx = None;
+                    }
+                    Some(ManagerInput::Closed(result))
+                }
+                EngineStep::Progress => None,
+            },
 
             () = async {
                 sleep.as_mut().expect("the guard checked the sleep").await;
             }, if waits => {
                 *sleep = None;
-                Step::Input(ManagerInput::Reconnect)
-            }
+                Some(ManagerInput::Reconnect)
+            },
 
-            else => Step::Exhausted,
+            else => unreachable!("drive stops before every input source is gone"),
         };
-        if let Some(permit) = permit {
+        if let Some(permit) = client_message_permit {
             engine
                 .as_mut()
                 .expect("a reserved slot belongs to the current engine")
                 .return_permit(permit);
         }
-        step
-    }
-
-    /// Applies a step that needs no transition, and returns the input of one
-    /// that does.
-    fn apply(&mut self, step: Step) -> Result<Option<ManagerInput>, ManagerError> {
-        let input = match step {
-            Step::Input(input) => input,
-            Step::ClientClosed => {
-                self.connect_request_rx = None;
-                ManagerInput::Release
-            }
-            Step::ClientPacket(index, Some(packet), permit) => {
-                let ns = self.send_buffers[index].ns.clone();
-                let read = self.core.read(&ns, permit.is_some());
-                self.core.handle(ManagerInput::Packet { ns, packet })?;
-                if let Some(permit) = permit {
-                    if read == Read::Send {
-                        let header = self
-                            .core
-                            .next_message()
-                            .expect("a sendable packet produces its header");
-                        permit.send(header);
-                    } else {
-                        self.engine
-                            .as_mut()
-                            .expect("a reserved slot belongs to the current engine")
-                            .return_permit(permit);
-                    }
-                }
-                return Ok(None);
-            }
-            Step::ClientPacket(index, None, permit) => {
-                if let Some(permit) = permit {
-                    self.engine
-                        .as_mut()
-                        .expect("a reserved slot belongs to the current engine")
-                        .return_permit(permit);
-                }
-                ManagerInput::Disconnect(self.send_buffers.remove(index).ns)
-            }
-            Step::Engine(EngineStep::Message { message, draining }) => {
-                if draining {
-                    ManagerInput::Drain(message)
-                } else {
-                    ManagerInput::Message(message)
-                }
-            }
-            Step::Engine(EngineStep::Closed(result)) => {
-                // The owner reports completion only after its future and
-                // incoming direction ended. Dropping it reclaims the session.
-                self.engine = None;
-                // Reclaim every session-local input before the core can
-                // schedule another engine. Event inboxes remain untouched.
-                for buffer in &mut self.send_buffers {
-                    buffer.ack_packet_rx = None;
-                }
-                ManagerInput::Closed(result)
-            }
-            Step::Engine(EngineStep::Progress) => return Ok(None),
-            Step::Deliver(permit) => {
-                self.core.deliver_held(permit);
-                return Ok(None);
-            }
-            Step::Exhausted => {
-                assert!(
-                    self.is_finished(),
-                    "every source is gone only once the client and its namespaces are"
-                );
-                return Ok(None);
-            }
-        };
-        Ok(Some(input))
+        Ok(input)
     }
 
     /// Releases every resource. After an internal error, ends every namespace
