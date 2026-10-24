@@ -1,0 +1,186 @@
+//! Full queues, stalled receivers, and floods.
+
+use std::time::Duration;
+
+use bytestring::ByteString;
+use eioc::prelude::{Message, ServerMessage};
+use tokio::sync::{mpsc, oneshot};
+
+use super::harness::*;
+use crate::config::ChannelConfig;
+use crate::manager::connect_request::ConnectRequest;
+use crate::packet::ServerPacket;
+
+#[tokio::test]
+async fn emits_flow_while_receiver_is_full() {
+    let mut manager = TestManager::spawn().await;
+    let (client_packet_tx, mut server_packet_rx) =
+        manager.open_with("/", ByteString::new(), 1).await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    for _ in 0..4 {
+        manager.send_server_message(r#"2["flood"]"#).await;
+    }
+
+    client_packet_tx
+        .send(event(r#"["out"]"#, None))
+        .await
+        .unwrap();
+    let text = tokio::time::timeout(Duration::from_secs(5), manager.recv_client_text())
+        .await
+        .expect("emit stalled behind a full receiver");
+    assert_eq!(&*text, r#"2["out"]"#);
+
+    assert!(matches!(
+        server_packet_rx.recv().await,
+        Some(ServerPacket::Connect(_))
+    ));
+}
+
+/// The application emits once per server event while the server floods and
+/// every queue holds two items, the deadlock that `44b0c3f` fixed.
+#[tokio::test]
+async fn emits_while_handling_a_server_flood() {
+    const FLOOD: usize = 2000;
+
+    let (connect_request_tx, connect_request_rx) = mpsc::channel(4);
+    let (session_tx, mut session_rx) = mpsc::channel(1);
+    let connect_engine = move |server_message_tx, client_message_rx| {
+        let session_tx = session_tx.clone();
+        async move {
+            let (result_tx, result_rx) = oneshot::channel();
+            let session = TestSession {
+                server_message_tx,
+                client_message_rx,
+                result_tx,
+            };
+            if session_tx.send(session).await.is_err() {
+                return Ok(());
+            }
+            result_rx.await.unwrap_or(Ok(()))
+        }
+    };
+    let task = tokio::spawn(crate::manager::actor::run(
+        connect_request_rx,
+        connect_engine,
+        ChannelConfig::from(2),
+        None,
+    ));
+    let TestSession {
+        server_message_tx,
+        mut client_message_rx,
+        result_tx,
+    } = session_rx.recv().await.unwrap();
+
+    let (connect_request, handles) = ConnectRequest::new("/".into(), ByteString::new(), 2, 1);
+    connect_request_tx.send(connect_request).await.unwrap();
+    let (tx, mut rx, reply_rx) = handles.into_socket();
+    reply_rx.await.unwrap().unwrap();
+
+    // The engine reads client messages independently of the server direction.
+    let reader = tokio::spawn(async move {
+        let mut events = 0;
+        while events < FLOOD {
+            match client_message_rx.recv().await {
+                Some(Message::Text(text)) if text.starts_with('2') => events += 1,
+                Some(_) => {}
+                None => panic!("the manager closed the engine during the flood"),
+            }
+        }
+        client_message_rx
+    });
+    let flooder = tokio::spawn({
+        let server_message_tx = server_message_tx.clone();
+        async move {
+            let connect = ServerMessage::Text(CONNECT_RESPONSE.into());
+            server_message_tx.send(connect).await.unwrap();
+            for _ in 0..FLOOD {
+                let flood = ServerMessage::Text(r#"2["flood"]"#.into());
+                server_message_tx.send(flood).await.unwrap();
+            }
+        }
+    });
+    let app = tokio::spawn(async move {
+        let mut received = 0;
+        while received < FLOOD {
+            match rx.recv().await {
+                Some(ServerPacket::Event(_)) => {
+                    received += 1;
+                    tx.send(event(r#"["reply"]"#, None)).await.unwrap();
+                }
+                Some(_) => {}
+                None => panic!("the receiver ended during the flood"),
+            }
+        }
+        (tx, rx)
+    });
+
+    let finished = async {
+        flooder.await.unwrap();
+        let client_message_rx = reader.await.unwrap();
+        let handles = app.await.unwrap();
+        (client_message_rx, handles)
+    };
+    let (mut client_message_rx, handles) = tokio::time::timeout(Duration::from_secs(20), finished)
+        .await
+        .expect("emitting while handling a flood never deadlocks");
+
+    drop(handles);
+    drop(connect_request_tx);
+    drop(server_message_tx);
+    while client_message_rx.recv().await.is_some() {}
+    result_tx.send(Ok(())).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+/// A full receiver holds one packet, which stops reading the engine. The
+/// engine's hang-up must still close it, so an event emitted afterwards waits
+/// for the next engine instead of going into the session that only drains.
+#[tokio::test]
+async fn held_packet_keeps_later_events_for_the_next_engine() {
+    let mut manager = TestManager::spawn_reconnecting().await;
+    let (tx, mut rx) = manager.open_with("/", ByteString::new(), 1).await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    // The Connect packet fills the receiver, so the manager holds this one.
+    manager.send_server_message(r#"2["held"]"#).await;
+    assert_quiet(&mut manager.session().client_message_rx).await;
+
+    let old = manager.session.take().expect("a session is open");
+    drop(old.server_message_tx);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    tx.send(event(r#"["late"]"#, None)).await.unwrap();
+
+    // The old engine gets nothing more, and closes once the manager lets go.
+    let mut client_message_rx = old.client_message_rx;
+    assert!(client_message_rx.recv().await.is_none());
+    old.result_tx.send(Ok(())).unwrap();
+
+    rx.recv().await.unwrap();
+    rx.recv().await.unwrap();
+    manager.session = manager.session_rx.recv().await;
+    assert!(manager.recv_client_text().await.starts_with('0'));
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    assert_eq!(&*manager.recv_client_text().await, r#"2["late"]"#);
+}
+
+/// Every queue holds one item. A receiver the application stops reading holds
+/// up what the server sends to the whole connection, as the README documents,
+/// but the other namespace still emits, and both flow again once it reads.
+#[tokio::test]
+async fn a_stalled_receiver_stops_only_incoming_data() {
+    let mut manager = TestManager::spawn_with_channels(None, ChannelConfig::from(1)).await;
+    let (_a_tx, mut a_rx) = manager.open_with("/a", ByteString::new(), 1).await;
+    let (b_tx, mut b_rx) = manager.open_with("/b", ByteString::new(), 1).await;
+    manager.send_server_message(r#"0/a,{"sid":"a"}"#).await;
+    manager.send_server_message(r#"0/b,{"sid":"b"}"#).await;
+    // `/a` holds its Connect, so this packet waits in the manager.
+    manager.send_server_message(r#"2/a,["held"]"#).await;
+    manager.send_server_message(r#"2/b,["queued"]"#).await;
+
+    b_tx.send(event(r#"["out"]"#, None)).await.unwrap();
+    assert_eq!(&*manager.recv_client_text().await, r#"2/b,["out"]"#);
+
+    assert!(matches!(b_rx.recv().await, Some(ServerPacket::Connect(_))));
+    assert!(matches!(a_rx.recv().await, Some(ServerPacket::Connect(_))));
+    assert!(matches!(a_rx.recv().await, Some(ServerPacket::Event(_))));
+    assert!(matches!(b_rx.recv().await, Some(ServerPacket::Event(_))));
+}
