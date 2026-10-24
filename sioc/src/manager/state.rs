@@ -40,6 +40,9 @@ pub enum ManagerInput {
     /// The engine delivered a message, like `Manager.onopen` and `ondata`.
     /// The caller passes none while [`ManagerCore::held_sender`] is `Some`.
     Message(ServerMessage),
+    /// Remaining engine messages during reclamation. Rust cleanup: processing
+    /// final control packets must not await an application's full receiver.
+    Drain(ServerMessage),
     /// The engine finished, like `Manager.onclose`.
     Closed(Result<(), ManagerError>),
     /// The reconnection delay is over, like the timer in `Manager.reconnect`.
@@ -184,7 +187,14 @@ impl ManagerCore {
             }
             ManagerInput::Packet { ns, packet } => self.send(&ns, packet),
             ManagerInput::Disconnect(ns) => self.disconnect(&ns),
-            ManagerInput::Message(message) => self.message(message),
+            ManagerInput::Message(message) => {
+                assert!(
+                    self.held_packet.is_none(),
+                    "the caller waits for the held delivery before reading more data"
+                );
+                self.message(message);
+            }
+            ManagerInput::Drain(message) => self.message(message),
             ManagerInput::Closed(result) => {
                 // After an internal error the caller shuts down, so no engine
                 // opens.
@@ -493,10 +503,6 @@ impl ManagerCore {
     }
 
     fn message(&mut self, message: ServerMessage) {
-        assert!(
-            self.held_packet.is_none(),
-            "the caller reads no engine message while a server packet is held"
-        );
         if !self.engine_runs() {
             tracing::debug!("discarded server message for a closing engine");
             return;
@@ -554,8 +560,15 @@ impl ManagerCore {
         }
 
         if let Some(delivery) = namespace.deliver(ns, packet) {
-            tracing::debug!(%ns, "holding server packet for a full receiver");
-            self.held_packet = Some(delivery);
+            if self.held_packet.is_none() {
+                tracing::debug!(%ns, "holding server packet for a full receiver");
+                self.held_packet = Some(delivery);
+            } else {
+                // Only Drain inputs can reach a full receiver while another
+                // packet is held. Keep that original delivery, and reclaim
+                // later overflow without waiting for the application.
+                tracing::debug!(%ns, "discarded overflow during engine cleanup");
+            }
         }
     }
 

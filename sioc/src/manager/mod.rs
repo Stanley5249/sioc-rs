@@ -29,6 +29,12 @@
 //!   engine's end fails exactly the waiters of events it took.
 //! - An engine closes for the core only after its future finished and its
 //!   server direction ended, and each engine gets new channels.
+//!   [`engine::Engine`] owns that completion and uses one reclamation path.
+//!   Peer closure processes final control packets without awaiting application
+//!   capacity; local closure discards unread server messages. An existing held
+//!   delivery keeps its original destination, while later overflow during
+//!   reclamation is discarded. Opening cancellation drops the connection future
+//!   before a successful handshake, even without a deadline.
 //! - Ending a namespace never waits on the application: its token closes the
 //!   channel, which the actor reads to the end.
 //! - A held delivery owns its original receiver and cancellation token. The
@@ -58,6 +64,7 @@ pub mod actor;
 pub mod backoff;
 pub mod connect_request;
 pub mod decoder;
+pub mod engine;
 pub mod namespace;
 pub mod send_buffer;
 pub mod state;

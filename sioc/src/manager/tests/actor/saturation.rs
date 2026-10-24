@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use bytestring::ByteString;
 use eioc::prelude::{Message, ServerMessage};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 use super::harness::*;
 use crate::config::ChannelConfig;
@@ -48,18 +48,7 @@ async fn emits_while_handling_a_server_flood() {
     let (session_tx, mut session_rx) = mpsc::channel(1);
     let connect_engine = move |server_message_tx, client_message_rx| {
         let session_tx = session_tx.clone();
-        async move {
-            let (result_tx, result_rx) = oneshot::channel();
-            let session = TestSession {
-                server_message_tx,
-                client_message_rx,
-                result_tx,
-            };
-            if session_tx.send(session).await.is_err() {
-                return Ok(());
-            }
-            result_rx.await.unwrap_or(Ok(()))
-        }
+        run_session(server_message_tx, client_message_rx, session_tx)
     };
     let task = tokio::spawn(crate::manager::actor::run(
         connect_request_rx,
@@ -144,21 +133,27 @@ async fn held_packet_keeps_later_events_for_the_next_engine() {
     manager.send_server_message(CONNECT_RESPONSE).await;
     // The Connect packet fills the receiver, so the manager holds this one.
     manager.send_server_message(r#"2["held"]"#).await;
-    assert_quiet(&mut manager.session().client_message_rx).await;
 
     let old = manager.session.take().expect("a session is open");
     drop(old.server_message_tx);
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    tx.send(event(r#"["late"]"#, None)).await.unwrap();
 
     // The old engine gets nothing more, and closes once the manager lets go.
     let mut client_message_rx = old.client_message_rx;
     assert!(client_message_rx.recv().await.is_none());
+    tx.send(event(r#"["late"]"#, None)).await.unwrap();
     old.result_tx.send(Ok(())).unwrap();
 
-    rx.recv().await.unwrap();
-    rx.recv().await.unwrap();
-    manager.session = manager.session_rx.recv().await;
+    tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("the original held packet survives cleanup")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("the original held packet survives cleanup")
+        .unwrap();
+    manager.session = tokio::time::timeout(Duration::from_secs(1), manager.session_rx.recv())
+        .await
+        .expect("the next engine opens after cleanup");
     assert!(manager.recv_client_text().await.starts_with('0'));
     manager.send_server_message(CONNECT_RESPONSE).await;
     assert_eq!(&*manager.recv_client_text().await, r#"2["late"]"#);

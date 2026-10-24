@@ -9,12 +9,12 @@ use eioc::prelude::{Message, ServerMessage};
 use tokio::sync::mpsc;
 use tokio::time::Sleep;
 use tracing::Instrument;
-use tracing::instrument::Instrumented;
 
 use crate::config::ChannelConfig;
 use crate::error::ManagerError;
 use crate::manager::backoff::Backoff;
 use crate::manager::connect_request::ConnectRequest;
+use crate::manager::engine::{Drain, Engine, EngineStep};
 use crate::manager::send_buffer::SendBuffer;
 use crate::manager::state::{ManagerCore, ManagerInput, ManagerOutput};
 use crate::packet::{ClientPacket, ServerPacket};
@@ -75,40 +75,6 @@ struct ManagerActor<F, Fut> {
     channels: ChannelConfig,
 }
 
-/// One running engine, like `Manager.engine` with the subscriptions
-/// `Manager.open` adds.
-///
-/// The engine's future and its server direction end at different times, and
-/// the actor reports the engine closed only once both have, so no old message
-/// reaches the next engine.
-struct Engine<Fut> {
-    /// The engine itself until it finishes, like the `Engine` object.
-    future: Option<Pin<Box<Instrumented<Fut>>>>,
-    /// What goes to the engine, like `engine.write`. Dropping it closes the
-    /// engine, like `engine.close`.
-    client_message_tx: Option<mpsc::Sender<Message>>,
-    /// Room for one message, taken before a handle's packet is read so the
-    /// packet goes out at once. Rust bound: `engine.write` never waits.
-    permit: Option<mpsc::OwnedPermit<Message>>,
-    /// What the server sends, like the engine's `"data"` events.
-    server_message_rx: Option<mpsc::Receiver<ServerMessage>>,
-    /// One server message read while a packet is held, so the engine's
-    /// hang-up still shows. Rust bound: JS emits synchronously.
-    next_server_message: Option<ServerMessage>,
-    /// The engine's result, like the reason of its `"close"` event, kept until
-    /// the server direction ends too.
-    result: Option<Result<(), ManagerError>>,
-}
-
-impl<Fut> Engine<Fut> {
-    /// Drops the sender and any permit, which closes the engine, like
-    /// `engine.close`.
-    fn close(&mut self) {
-        self.client_message_tx = None;
-        self.permit = None;
-    }
-}
-
 /// What one turn of the `select!` saw. Rust wait: each JS source calls its
 /// own handler.
 enum Step {
@@ -117,17 +83,11 @@ enum Step {
     /// The client handle dropped.
     ClientClosed,
     /// The engine has room for one message, or dropped its receiver.
-    Permit(Result<mpsc::OwnedPermit<Message>, mpsc::error::SendError<()>>),
+    Engine(EngineStep),
     /// The next packet of a send buffer, by index, or `None` at its end.
     ClientPacket(usize, Option<ClientPacket>),
     /// The receiver of the held packet has room, or dropped.
     Deliver(Result<mpsc::OwnedPermit<ServerPacket>, mpsc::error::SendError<()>>),
-    /// A server message read while a packet is held.
-    NextServerMessage(ServerMessage),
-    /// The engine dropped its server message sender.
-    ServerEnded,
-    /// The engine future finished.
-    EngineFinished(Result<(), ManagerError>),
     /// Every source is gone. `select!` can see that one turn before `drive`.
     Exhausted,
 }
@@ -142,25 +102,15 @@ where
     async fn drive(&mut self) -> Result<(), ManagerError> {
         loop {
             self.apply_outputs();
-            self.close_hung_up_engine();
-
-            if let Some(result) = self.take_finished_engine() {
-                self.core.handle(ManagerInput::Closed(result))?;
-                continue;
-            }
             if self.is_finished() {
                 return Ok(());
             }
             if self.send_message() {
                 continue;
             }
-            if let Some(message) = self.take_next_server_message() {
-                self.core.handle(ManagerInput::Message(message))?;
-                continue;
-            }
 
             let step = self.next_step().await;
-            if let Some(input) = self.apply(step)? {
+            if let Some(input) = self.apply(step) {
                 self.core.handle(input)?;
             }
         }
@@ -180,7 +130,7 @@ where
                 ManagerOutput::Open => self.open_engine(),
                 ManagerOutput::Close => {
                     if let Some(engine) = &mut self.engine {
-                        engine.close();
+                        engine.close(Drain::Discard);
                     }
                 }
                 ManagerOutput::Schedule(delay) => {
@@ -214,61 +164,7 @@ where
         let future = (self.connect_engine)(server_message_tx, client_message_rx)
             .instrument(tracing::info_span!("engine"));
 
-        self.engine = Some(Engine {
-            future: Some(Box::pin(future)),
-            client_message_tx: Some(client_message_tx),
-            permit: None,
-            server_message_rx: Some(server_message_rx),
-            next_server_message: None,
-            result: None,
-        });
-    }
-
-    /// Closes an engine that hung up, even while a held packet leaves its last
-    /// messages unread, so nothing more goes into a session that only drains.
-    /// An empty hung-up server direction ends at once, so a held packet never
-    /// delays the engine's cleanup.
-    fn close_hung_up_engine(&mut self) {
-        let Some(engine) = &mut self.engine else {
-            return;
-        };
-        let Some(server_message_rx) = &engine.server_message_rx else {
-            return;
-        };
-        if !server_message_rx.is_closed() {
-            return;
-        }
-        let drained = server_message_rx.is_empty() && engine.next_server_message.is_none();
-        engine.close();
-        if drained {
-            engine.server_message_rx = None;
-        }
-    }
-
-    /// Takes the result of an engine whose future and server direction both
-    /// ended, like `Manager.onclose`.
-    fn take_finished_engine(&mut self) -> Option<Result<(), ManagerError>> {
-        let finished = self
-            .engine
-            .as_ref()
-            .is_some_and(|engine| engine.future.is_none() && engine.server_message_rx.is_none());
-        if !finished {
-            return None;
-        }
-        let result = self
-            .engine
-            .take()
-            .and_then(|engine| engine.result)
-            .expect("a finished engine keeps its result");
-        Some(result)
-    }
-
-    /// Takes the server message read early, once no packet is held.
-    fn take_next_server_message(&mut self) -> Option<ServerMessage> {
-        if self.core.held_sender().is_some() {
-            return None;
-        }
-        self.engine.as_mut()?.next_server_message.take()
+        self.engine = Some(Engine::new(future, client_message_tx, server_message_rx));
     }
 
     /// Sends one waiting message on the held permit, like `engine.write`.
@@ -277,10 +173,10 @@ where
         let Some(engine) = &mut self.engine else {
             return false;
         };
-        if engine.permit.is_none() || !self.core.has_message() {
+        if !engine.has_permit() || !self.core.has_message() {
             return false;
         }
-        let permit = engine.permit.take().expect("the check above saw a permit");
+        let permit = engine.take_permit().expect("the check above saw a permit");
         let message = self.core.next_message().expect("has_message promised one");
         permit.send(message);
         true
@@ -306,31 +202,8 @@ where
 
         let held_packet_tx = core.held_sender();
         let holds_packet = held_packet_tx.is_some();
-        let has_permit = engine
-            .as_ref()
-            .is_some_and(|engine| engine.permit.is_some());
-        let reserve_tx = engine
-            .as_ref()
-            .filter(|engine| engine.permit.is_none())
-            .and_then(|engine| engine.client_message_tx.clone());
-        let reserves = reserve_tx.is_some();
-        let stashed = engine
-            .as_ref()
-            .is_some_and(|engine| engine.next_server_message.is_some());
-        let (server_message_rx, future) = match engine {
-            Some(engine) => (engine.server_message_rx.as_mut(), engine.future.as_mut()),
-            None => (None, None),
-        };
-        // While a packet is held and one more message waits, the server
-        // direction is not read, so its hang-up shows only through this check,
-        // made at each poll.
-        let (server_message_rx, held_server_rx) = if holds_packet && stashed {
-            (None, server_message_rx.map(|rx| &*rx))
-        } else {
-            (server_message_rx, None)
-        };
-        let reads_server = server_message_rx.is_some();
-        let runs_engine = future.is_some();
+        let has_permit = engine.as_ref().is_some_and(Engine::has_permit);
+        let runs_engine = engine.is_some();
         let has_client = connect_request_rx.is_some();
         let has_handles = !send_buffers.is_empty();
         let waits = sleep.is_some();
@@ -344,13 +217,7 @@ where
                 None => Step::ClientClosed,
             },
 
-            permit = async {
-                reserve_tx.expect("the guard checked the sender").reserve_owned().await
-            }, if reserves => Step::Permit(permit),
-
             (index, packet) = poll_fn(|cx| {
-                let hung_up = held_server_rx.is_some_and(mpsc::Receiver::is_closed);
-                let has_permit = has_permit && !hung_up;
                 crate::manager::send_buffer::poll_send_buffers(core, send_buffers, next_send_buffer, has_permit, cx)
             }), if has_handles => Step::ClientPacket(index, packet),
 
@@ -358,17 +225,9 @@ where
                 held_packet_tx.expect("the guard checked the sender").reserve_owned().await
             }, if holds_packet => Step::Deliver(permit),
 
-            message = async {
-                server_message_rx.expect("the guard checked the receiver").recv().await
-            }, if reads_server => match message {
-                Some(message) if holds_packet => Step::NextServerMessage(message),
-                Some(message) => Step::Input(ManagerInput::Message(message)),
-                None => Step::ServerEnded,
-            },
-
-            result = async {
-                future.expect("the guard checked the future").await
-            }, if runs_engine => Step::EngineFinished(result.map_err(ManagerError::from)),
+            step = async {
+                engine.as_mut().expect("the guard checked the engine").next(!holds_packet).await
+            }, if runs_engine => Step::Engine(step),
 
             () = async {
                 sleep.as_mut().expect("the guard checked the sleep").await;
@@ -383,13 +242,7 @@ where
 
     /// Applies a step that needs no transition, and returns the input of one
     /// that does.
-    ///
-    /// # Errors
-    ///
-    /// Returns an internal error if the engine dropped its message receiver
-    /// or finished while the manager still held its sender, both of which the
-    /// engine rules out.
-    fn apply(&mut self, step: Step) -> Result<Option<ManagerInput>, ManagerError> {
+    fn apply(&mut self, step: Step) -> Option<ManagerInput> {
         let input = match step {
             Step::Input(input) => input,
             Step::ClientClosed => {
@@ -403,102 +256,56 @@ where
             Step::ClientPacket(index, None) => {
                 ManagerInput::Disconnect(self.send_buffers.remove(index).ns)
             }
-            Step::Permit(permit) => {
-                let engine = self.engine.as_mut().expect("a permit belongs to an engine");
-                engine.permit = Some(permit.map_err(|_| ManagerError::EngineEnded)?);
-                return Ok(None);
+            Step::Engine(EngineStep::Message { message, draining }) => {
+                if draining {
+                    ManagerInput::Drain(message)
+                } else {
+                    ManagerInput::Message(message)
+                }
             }
+            Step::Engine(EngineStep::Closed(result)) => {
+                // The owner reports completion only after its future and
+                // incoming direction ended. Dropping it reclaims the session.
+                self.engine = None;
+                ManagerInput::Closed(result)
+            }
+            Step::Engine(EngineStep::Progress) => return None,
             Step::Deliver(permit) => {
                 self.core.deliver_held(permit);
-                return Ok(None);
-            }
-            Step::NextServerMessage(message) => {
-                let engine = self
-                    .engine
-                    .as_mut()
-                    .expect("a message belongs to an engine");
-                engine.next_server_message = Some(message);
-                return Ok(None);
-            }
-            Step::ServerEnded => {
-                // The engine hung up, so it finishes once the manager drops
-                // its sender.
-                let engine = self
-                    .engine
-                    .as_mut()
-                    .expect("a receiver belongs to an engine");
-                engine.server_message_rx = None;
-                engine.close();
-                return Ok(None);
-            }
-            Step::EngineFinished(result) => {
-                let engine = self.engine.as_mut().expect("a future belongs to an engine");
-                engine.future = None;
-                if engine.client_message_tx.is_some() {
-                    return Err(ManagerError::EngineEnded);
-                }
-                engine.result = Some(result);
-                return Ok(None);
+                return None;
             }
             Step::Exhausted => {
                 assert!(
                     self.is_finished(),
                     "every source is gone only once the client and its namespaces are"
                 );
-                return Ok(None);
+                return None;
             }
         };
-        Ok(Some(input))
+        Some(input)
     }
 
     /// Releases every resource. After an internal error, ends every namespace
     /// without waiting for the application: dropping the channels fails
     /// blocked sends. Then finishes the engine, reading what the server still
     /// sends, so it never sees a failed send.
-    async fn finish(self, failed: bool) {
-        let Self {
-            mut core,
-            connect_request_rx,
-            send_buffers,
-            engine,
-            ..
-        } = self;
-
-        // A queued `Client::connect` fails at once.
-        drop(connect_request_rx);
-        drop(send_buffers);
+    async fn finish(mut self, failed: bool) {
+        self.connect_request_rx = None;
+        self.send_buffers.clear();
         if failed {
-            core.shutdown();
+            self.core.shutdown();
         }
-
         tracing::debug!("client ended");
-
-        let Some(Engine {
-            future,
-            client_message_tx,
-            permit,
-            server_message_rx,
-            ..
-        }) = engine
-        else {
-            return;
-        };
-        drop((client_message_tx, permit));
-
-        let drain = async {
-            if let Some(mut server_message_rx) = server_message_rx {
-                while server_message_rx.recv().await.is_some() {}
+        if let Some(engine) = &mut self.engine {
+            engine.close(Drain::Discard);
+            loop {
+                if let EngineStep::Closed(result) = engine.next(false).await {
+                    if let Err(error) = result {
+                        tracing::warn!(%error, "engine failed");
+                    }
+                    break;
+                }
             }
-        };
-        let finish = async {
-            match future {
-                Some(future) => future.await,
-                None => Ok(()),
-            }
-        };
-        let ((), result) = tokio::join!(drain, finish);
-        if let Err(error) = result {
-            tracing::warn!(%error, "engine failed");
         }
     }
 }

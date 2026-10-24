@@ -4,4 +4,5 @@
 mod harness;
 
 mod lifecycle;
+mod opening;
 mod saturation;

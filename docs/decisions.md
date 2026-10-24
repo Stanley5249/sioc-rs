@@ -4,6 +4,9 @@ Mistakes this project already made and approaches the project rejected, each wit
 
 ## Async and shutdown
 
+- One engine owner closes admission, drains the incoming direction and collects the connection result. Normal closure, internal failure and shutdown use this same path. Opening cancellation drops its pending future instead of waiting for a handshake that may have no deadline.
+- Peer closure processes final control packets while reclaiming the session. An already-held packet keeps its original receiver, while later incoming overflow is discarded during cleanup. Local closure discards unread engine messages. This explicit drain policy prevents application capacity from becoming a cleanup prerequisite.
+
 - A loop never awaits a send while it has other inputs to serve. One loop that served both directions stalled the heartbeat and deadlocked the engine and the manager once both inboxes filled, and the same loop deadlocked a caller that emits while handling events under a server flood.
 - After a failure, the failing side keeps accepting input until the other side hangs up. Stopping at once made the other side fail with a closed-channel error, which replaced the root error.
 - The end of a channel is the only close signal between tasks. Forwarding the Engine.IO `Close` packet as well gave two signals for one state, so every side had to handle both.

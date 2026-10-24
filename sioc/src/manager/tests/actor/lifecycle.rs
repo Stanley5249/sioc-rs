@@ -118,6 +118,29 @@ async fn local_disconnect_finishes_with_a_full_retained_receiver() {
     while rx.recv().await.is_some() {}
 }
 
+#[tokio::test(start_paused = true)]
+async fn peer_close_drains_final_messages_without_an_application_consumer() {
+    let mut manager = TestManager::spawn().await;
+    let (tx, mut rx) = manager.open_with("/", ByteString::new(), 1).await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    // An emitted event proves the namespace was confirmed while Connect
+    // remains in the full application queue.
+    tx.send(event(r#"["ready"]"#, None)).await.unwrap();
+    manager.recv_client_text().await;
+    for message in [r#"2["held"]"#, r#"2["overflow"]"#, "1"] {
+        manager.send_server_message(message).await;
+    }
+    tokio::time::timeout(Duration::from_secs(1), manager.finish())
+        .await
+        .expect("engine cleanup drains without application consumption")
+        .unwrap();
+    assert!(matches!(rx.recv().await, Some(ServerPacket::Connect(_))));
+    // The final namespace termination still reaches its separate terminal
+    // channel, even when normal event delivery was full during reclamation.
+    assert!(matches!(rx.recv().await, Some(ServerPacket::Disconnect)));
+    assert!(rx.recv().await.is_none());
+}
+
 /// Aborting the manager task ends every handle instead of leaving it waiting.
 #[tokio::test]
 async fn aborting_the_manager_ends_the_handles() {
