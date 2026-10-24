@@ -4,13 +4,10 @@
 
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
-use std::task::{Context, Poll};
 
-use bytestring::ByteString;
 use eioc::prelude::{Message, ServerMessage};
 use tokio::sync::mpsc;
 use tokio::time::Sleep;
-use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 use tracing::Instrument;
 use tracing::instrument::Instrumented;
 
@@ -18,7 +15,7 @@ use crate::config::ChannelConfig;
 use crate::error::ManagerError;
 use crate::manager::backoff::Backoff;
 use crate::manager::connect_request::ConnectRequest;
-use crate::manager::namespace::Read;
+use crate::manager::send_buffer::SendBuffer;
 use crate::manager::state::{ManagerCore, ManagerInput, ManagerOutput};
 use crate::packet::{ClientPacket, ServerPacket};
 
@@ -78,22 +75,6 @@ struct ManagerActor<F, Fut> {
     channels: ChannelConfig,
 }
 
-/// The channel of one namespace's handles, like `Socket.sendBuffer`. Rust
-/// channel: JS handles call the `Socket` directly.
-struct SendBuffer {
-    /// The namespace the channel belongs to, like `Socket.nsp`.
-    ns: ByteString,
-    /// The packets the handles sent and the actor has not read, like the
-    /// entries of `Socket.sendBuffer`.
-    client_packet_rx: mpsc::Receiver<ClientPacket>,
-    /// Cancelled once the handles leave or the namespace ends, like
-    /// `Socket.active` turning false. Rust cleanup.
-    closed: CancellationToken,
-    /// Wakes the actor once `closed` is cancelled, while the core leaves the
-    /// channel unread. Rust wait.
-    closed_wait: Pin<Box<WaitForCancellationFutureOwned>>,
-}
-
 /// One running engine, like `Manager.engine` with the subscriptions
 /// `Manager.open` adds.
 ///
@@ -117,6 +98,15 @@ struct Engine<Fut> {
     /// The engine's result, like the reason of its `"close"` event, kept until
     /// the server direction ends too.
     result: Option<Result<(), ManagerError>>,
+}
+
+impl<Fut> Engine<Fut> {
+    /// Drops the sender and any permit, which closes the engine, like
+    /// `engine.close`.
+    fn close(&mut self) {
+        self.client_message_tx = None;
+        self.permit = None;
+    }
 }
 
 /// What one turn of the `select!` saw. Rust wait: each JS source calls its
@@ -190,8 +180,7 @@ where
                 ManagerOutput::Open => self.open_engine(),
                 ManagerOutput::Close => {
                     if let Some(engine) = &mut self.engine {
-                        engine.client_message_tx = None;
-                        engine.permit = None;
+                        engine.close();
                     }
                 }
                 ManagerOutput::Schedule(delay) => {
@@ -246,12 +235,13 @@ where
         let Some(server_message_rx) = &engine.server_message_rx else {
             return;
         };
-        if server_message_rx.is_closed() {
-            engine.client_message_tx = None;
-            engine.permit = None;
-            if server_message_rx.is_empty() && engine.next_server_message.is_none() {
-                engine.server_message_rx = None;
-            }
+        if !server_message_rx.is_closed() {
+            return;
+        }
+        let drained = server_message_rx.is_empty() && engine.next_server_message.is_none();
+        engine.close();
+        if drained {
+            engine.server_message_rx = None;
         }
     }
 
@@ -361,7 +351,7 @@ where
             (index, packet) = poll_fn(|cx| {
                 let hung_up = held_server_rx.is_some_and(mpsc::Receiver::is_closed);
                 let has_permit = has_permit && !hung_up;
-                poll_send_buffers(core, send_buffers, next_send_buffer, has_permit, cx)
+                crate::manager::send_buffer::poll_send_buffers(core, send_buffers, next_send_buffer, has_permit, cx)
             }), if has_handles => Step::ClientPacket(index, packet),
 
             permit = async {
@@ -438,8 +428,7 @@ where
                     .as_mut()
                     .expect("a receiver belongs to an engine");
                 engine.server_message_rx = None;
-                engine.client_message_tx = None;
-                engine.permit = None;
+                engine.close();
                 return Ok(None);
             }
             Step::EngineFinished(result) => {
@@ -512,40 +501,4 @@ where
             tracing::warn!(%error, "engine failed");
         }
     }
-}
-
-/// Reads the next packet the core asks for, from the namespaces in turn.
-/// Returns the index of the channel and its packet, or `None` at its end.
-///
-/// A channel is read only when its packet can go out at once or is to be
-/// dropped, so unsent packets wait in the channel, which bounds them. Once a
-/// channel's token is cancelled, it is closed so blocked handles fail and the
-/// rest drains to its end.
-fn poll_send_buffers(
-    core: &ManagerCore,
-    send_buffers: &mut [SendBuffer],
-    next: &mut usize,
-    has_permit: bool,
-    cx: &mut Context<'_>,
-) -> Poll<(usize, Option<ClientPacket>)> {
-    let len = send_buffers.len();
-    for offset in 0..len {
-        let index = (*next + offset) % len;
-        let channel = &mut send_buffers[index];
-
-        // Polling the wait only before it fires keeps it from being polled
-        // after it finished.
-        if channel.closed.is_cancelled() || channel.closed_wait.as_mut().poll(cx).is_ready() {
-            channel.client_packet_rx.close();
-        }
-
-        if core.read(&channel.ns, has_permit) == Read::Wait {
-            continue;
-        }
-        if let Poll::Ready(packet) = channel.client_packet_rx.poll_recv(cx) {
-            *next = index + 1;
-            return Poll::Ready((index, packet));
-        }
-    }
-    Poll::Pending
 }

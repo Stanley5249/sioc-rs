@@ -345,8 +345,9 @@ impl ManagerCore {
         tracing::trace!(%ns, %packet, "sent packet");
         self.write_buffer
             .push_back(Write::Encoded(encode(ns, &packet)));
-        let binaries = attachments.into_iter().flatten().map(Message::Binary);
-        self.write_buffer.extend(binaries.map(Write::Encoded));
+        let attachments = attachments.into_iter().flatten();
+        self.write_buffer
+            .extend(attachments.map(|attachment| Write::Encoded(Message::Binary(attachment))));
     }
 
     fn disconnect(&mut self, ns: &ByteString) {
@@ -596,11 +597,9 @@ impl ManagerCore {
             tracing::debug!("ignored reconnect with no wait pending");
             return;
         }
-        if self.needs_engine() {
-            self.open_engine();
-        } else {
-            self.ready_state = ReadyState::Closed;
-        }
+        // `release` cancels the wait once no namespace needs an engine.
+        debug_assert!(self.needs_engine(), "a pending wait has a namespace");
+        self.open_engine();
     }
 }
 

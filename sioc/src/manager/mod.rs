@@ -54,6 +54,7 @@ pub mod backoff;
 pub mod connect_request;
 pub mod decoder;
 pub mod namespace;
+pub mod send_buffer;
 pub mod state;
 
 #[cfg(test)]

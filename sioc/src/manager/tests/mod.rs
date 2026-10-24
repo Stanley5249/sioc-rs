@@ -3,5 +3,6 @@
 //! `#[test]`s through [`rig::Rig`], which plays the actor's part.
 
 mod actor;
+mod binary;
 mod rig;
 mod state;
