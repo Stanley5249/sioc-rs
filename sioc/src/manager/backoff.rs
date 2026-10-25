@@ -83,10 +83,14 @@ impl Backoff {
         };
 
         let max_millis = self.delay_max.as_secs_f64() * 1000.0;
-
-        Some(Duration::from_secs_f64(
-            millis.clamp(0.0, max_millis).floor() / 1000.0,
-        ))
+        let seconds = millis.clamp(0.0, max_millis).floor() / 1000.0;
+        // The configured cap is exact; its floating representation may round
+        // beyond Duration::MAX, so keep the original value at the ceiling.
+        Some(if seconds >= self.delay_max.as_secs_f64() {
+            self.delay_max
+        } else {
+            Duration::from_secs_f64(seconds)
+        })
     }
 
     /// Starts counting attempts from zero again, like `Backoff.reset`.
@@ -178,5 +182,19 @@ mod tests {
             backoff.next_delay(&mut fastrand::Rng::new()),
             Some(Duration::from_secs(5))
         );
+    }
+
+    #[test]
+    fn maximum_duration_stays_within_the_configured_cap() {
+        let near_max = Duration::MAX.checked_sub(Duration::from_secs(1)).unwrap();
+        for (cap, expected) in [
+            (Duration::MAX, Duration::MAX),
+            (near_max, near_max),
+            (Duration::from_micros(2500), Duration::from_millis(2)),
+        ] {
+            let mut backoff = Backoff::new(Duration::MAX, cap, 0.0, None);
+            let mut rng = fastrand::Rng::with_seed(7);
+            assert_eq!(backoff.next_delay(&mut rng), Some(expected));
+        }
     }
 }

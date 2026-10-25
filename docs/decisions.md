@@ -57,6 +57,10 @@ Mistakes this project already made and approaches the project rejected, each wit
 
 ## Reconnection
 
+- At the reconnection delay ceiling, keep the configured `Duration` itself.
+  Floating-point conversion can round `Duration::MAX` beyond its valid range,
+  so converting the ceiling back from seconds panicked on a retry.
+
 - Engine loss ends participation whose handles already closed before deciding whether to retry. Scheduling first let an immediate retry win the race against inbox EOF and open an engine that no live namespace needed.
 
 - A jitter outside 0 to 1 counts as none, like JS. A factor above 1 produced negative delays.
