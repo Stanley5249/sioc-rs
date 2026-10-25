@@ -4,7 +4,8 @@ use bytes::Bytes;
 use bytestring::ByteString;
 
 use crate::error::{ManagerError, PacketError};
-use crate::packet::{Connect, ConnectError, DynAck, DynEvent, Ns, Packet, ServerPacket};
+use crate::packet::{Connect, ConnectError, DynAck, DynEvent, ServerPacket};
+use crate::parser::{Ns, Packet};
 
 /// A decoded server packet, like the packet socket.io-parser's `Decoder`
 /// emits as `"decoded"`.

@@ -354,7 +354,7 @@ pub struct SocketSender {
 impl SocketSender {
     /// Wraps the channel to a namespace and the token that marks it closed.
     #[must_use]
-    pub fn new(client_packet_tx: mpsc::Sender<ClientPacket>, closed: CancellationToken) -> Self {
+    fn new(client_packet_tx: mpsc::Sender<ClientPacket>, closed: CancellationToken) -> Self {
         Self {
             client_packet_tx,
             _closed: Arc::new(closed.clone().drop_guard()),

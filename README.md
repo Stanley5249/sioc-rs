@@ -28,6 +28,8 @@ let (tx, mut rx) = client.connect("/").await?;
 
 Derive `EventType` and `SerializePayload` on your type. `EventType` provides the event name for routing and defaults to the struct name in snake case. `SerializePayload` serializes the fields as a JSON array to match the Socket.IO wire format: `42["message","Hello World!"]`.
 
+For custom emission, implement `Emit` to prepare a `sioc::packet::ClientPacket` and use `AckHandle::new` for acknowledgement handles. Create namespace handles through `Client::connect`; the manager owns their channels and wire encoding.
+
 ```rust
 #[derive(Debug, EventType, SerializePayload)]
 #[sioc(event(name = "message"))]

@@ -18,7 +18,8 @@ use crate::manager::backoff::Backoff;
 use crate::manager::connect_request::ConnectRequest;
 use crate::manager::decoder::{Decoded, Decoder};
 use crate::manager::namespace::{Namespace, Read};
-use crate::packet::{ClientPacket, Ns, Packet, ServerPacket};
+use crate::packet::{ClientPacket, ServerPacket};
+use crate::parser::{Ns, Packet};
 
 /// One transition for the core, like an event reaching a `Manager` or
 /// `Socket` handler.

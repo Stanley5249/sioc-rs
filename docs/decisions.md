@@ -17,6 +17,11 @@ Mistakes this project already made and approaches the project rejected, each wit
 
 ## Namespaces
 
+- `Client::connect` constructs namespace handles and owns their channel setup.
+  Wire packets and prefix parsing belong to the private parser; custom `Emit`
+  and `Acknowledge` implementations use public `ClientPacket` values, and
+  custom emitters construct their reply handles with `AckHandle::new`.
+
 - A namespace ends through the EOF of its inbox when the last `SocketSender` drops. A disconnect message sent from `Drop` was lost when the inbox was full.
 - A namespace that ends before the actor took its inbox frees its name at once. Waiting for old handles to drain an inbox nobody polled left the name taken forever.
 - A send that waits for inbox capacity fails once the namespace closes. Before the shared `CancellationToken`, such a send kept waiting after the namespace closed.
