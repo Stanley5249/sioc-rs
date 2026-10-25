@@ -455,6 +455,23 @@ fn release_with_no_namespace_closes_the_first_engine() {
 }
 
 #[test]
+fn release_keeps_the_engine_until_the_last_namespace_disconnects() {
+    let mut rig = Rig::new();
+    let handles = rig.connected("/");
+
+    assert_eq!(rig.step(ManagerInput::Release), []);
+    assert_eq!(rig.messages(), Vec::<String>::new());
+    assert_eq!(rig.core.read("/", true), Read::Send);
+
+    handles.closed.cancel();
+    assert_eq!(rig.step(disconnect("/")), []);
+    assert_eq!(rig.messages(), ["1"]);
+    assert_eq!(rig.effects(), [Effect::Close]);
+    assert_eq!(rig.step(ManagerInput::Closed(Ok(()))), []);
+    assert!(rig.core.is_idle());
+}
+
+#[test]
 fn no_engine_opens_while_one_runs_or_closes() {
     let mut rig = Rig::reconnecting();
     rig.connect("/", "{}", 32);

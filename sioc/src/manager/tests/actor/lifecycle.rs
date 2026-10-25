@@ -26,7 +26,7 @@ async fn closes_when_client_handle_drops_with_no_namespace() {
     task.await.unwrap().unwrap();
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn closes_after_client_handle_and_last_namespace_drop() {
     let mut manager = TestManager::spawn().await;
     let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
@@ -40,7 +40,6 @@ async fn closes_after_client_handle_and_last_namespace_drop() {
     } = manager;
     let mut session = session.unwrap();
     drop(connect_request_tx);
-    assert_quiet(&mut session.client_message_rx).await;
 
     drop(client_packet_tx);
     assert!(matches!(

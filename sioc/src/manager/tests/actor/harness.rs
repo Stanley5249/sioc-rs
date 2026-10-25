@@ -55,12 +55,6 @@ pub struct TestManager {
     pub task: JoinHandle<Result<(), ManagerError>>,
 }
 
-/// Asserts that nothing reaches the engine for a short while.
-pub async fn assert_quiet(client_message_rx: &mut mpsc::Receiver<Message>) {
-    let result = tokio::time::timeout(Duration::from_millis(50), client_message_rx.recv()).await;
-    assert!(result.is_err(), "unexpected message {result:?}");
-}
-
 pub fn event(payload: &'static str, ack_tx: Option<oneshot::Sender<DynAck>>) -> ClientPacket {
     ClientPacket::Event {
         payload: ByteString::from_static(payload),
