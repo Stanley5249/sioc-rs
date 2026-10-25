@@ -336,6 +336,20 @@ fn engine_loss_before_a_disconnect_drains_ends_the_namespace_without_reconnectin
     assert!(rig.core.is_idle());
 }
 
+#[test]
+fn engine_loss_after_the_last_namespace_ended_schedules_no_retry() {
+    let mut rig = Rig::reconnecting();
+    let handles = rig.connected("/");
+    handles.closed.cancel();
+    rig.step(disconnect("/"));
+    rig.messages();
+
+    // The engine ends with no retry timer and no new engine.
+    assert_eq!(rig.step(ManagerInput::Closed(Ok(()))), [Effect::Close]);
+    assert_eq!(rig.step(ManagerInput::Reconnect), []);
+    assert!(rig.core.is_idle());
+}
+
 // Reopening a name
 
 #[test]
