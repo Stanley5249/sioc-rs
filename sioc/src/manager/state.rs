@@ -19,7 +19,7 @@ use crate::manager::connect_request::ConnectRequest;
 use crate::manager::decoder::{Decoded, Decoder};
 use crate::manager::namespace::{Namespace, Read};
 use crate::packet::{ClientPacket, ServerPacket};
-use crate::parser::{Ns, Packet};
+use crate::parser::packet::{Ns, Packet};
 
 /// One transition for the core, like an event reaching a `Manager` or
 /// `Socket` handler.
