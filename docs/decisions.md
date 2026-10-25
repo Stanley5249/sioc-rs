@@ -6,13 +6,13 @@ Write each entry in one or two sentences: what went wrong or was rejected, then 
 
 ## Async and shutdown
 
-- Actor select handlers apply I/O results synchronously and yield only protocol inputs. A separate `Step` enum and interpreter repeated those same outcomes without crossing another wait or defining a separate ownership boundary.
-- After a packet input, the actor hands off the message the core produces on its owned slot. Recomputing the read policy in the actor repeated a protocol decision already made before the packet was dequeued.
-- A pending engine output reservation belongs to one actor wait. The engine is the channel's only writer, so restarting a cancelled reservation loses no position to another waiter. Acquired permits stay owned until handoff; storing the pending future separately added a boxed object and cleanup state without another responsibility.
-- One engine owner closes admission, drains the incoming direction and collects the connection result. Normal closure, internal failure and shutdown use this same path. Opening cancellation drops its pending future instead of waiting for a handshake that may have no deadline.
-- Packet selection owns its output permit until the synchronous header handoff. Keeping only a readiness snapshot let concurrent engine polling revoke the permit after the event left its inbox, so engine cleanup discarded a truly unsent event. A close transition reports progress before waiting again, allowing the caller to return or release its owned slot.
-- A local opening cancellation drops the connection future; a peer-side opening failure keeps polling it after closing admission so its original error survives input reclamation.
-- Peer closure processes final control packets while reclaiming the session. An already-held packet keeps its original receiver, while later incoming overflow is discarded during cleanup. Local closure discards unread engine messages. This explicit drain policy prevents application capacity from becoming a cleanup prerequisite.
+- Actor select handlers apply I/O results synchronously and yield only protocol inputs. A separate step enum and interpreter repeated outcomes the handlers had already decided.
+- After a packet input, the actor hands off the message the core produced. Recomputing the read policy in the actor repeated a decision the core had already made.
+- A cancelled output reservation is restarted, because the engine is the channel's only writer. Storing the pending future separately added state without another responsibility.
+- One owner closes admission, drains the incoming direction, and collects the result, for normal closure, failure, and shutdown alike. Cancelling an opening drops its future, because a handshake may have no deadline.
+- Packet selection keeps its output permit until the event is handed off. A readiness snapshot let engine polling revoke the permit after the event left its inbox, so cleanup discarded an unsent event.
+- A local cancel of an opening drops the connection future, but a peer-side failure keeps polling it after closing admission, so the original error survives.
+- Peer closure processes the final control packets and discards later overflow, and local closure discards unread messages. Cleanup never waits for application capacity.
 - A loop never awaits a send while it has other inputs to serve. One loop that served both directions stalled the heartbeat and deadlocked the engine and the manager once both inboxes filled, and the same loop deadlocked a caller that emits while handling events under a server flood.
 - After a failure, the failing side keeps accepting input until the other side hangs up. Stopping at once made the other side fail with a closed-channel error, which replaced the root error.
 - The end of a channel is the only close signal between tasks. Forwarding the Engine.IO `Close` packet as well gave two signals for one state, so every side had to handle both.
@@ -26,12 +26,12 @@ Write each entry in one or two sentences: what went wrong or was rejected, then 
 
 ## Namespaces
 
-- Wire framing and direct `SocketSender` construction stay internal. Exposing those APIs made implementation details part of the public compatibility contract.
-- Read policy handles confirmed participation first: it flushes accepted packets when engine capacity is available, even after admission closes. Unconfirmed closed participation discards them. Keeping those cases separate makes the intentional close-policy asymmetry explicit.
-- The actor owns `NamespaceInputs`, which groups the event and ACK channels while preserving their different lifetimes. Naming the whole bundle `SendBuffer` suggested that ACK replies persisted with buffered events.
-- CONNECT is queued when participation activates on a running engine, or when a new engine opens for all active namespaces. A separate `connect_due` flag duplicated those transitions and made engine startup clear an enqueue intention it did not use.
-- Namespace cleanup never opens replacement handles. The core finishes old inbox ownership and held delivery before opening the waiting request. Repeated terminal packets keep the old participation draining. Held deliveries own the original receiver and token rather than resolving the namespace name again. That token gives post-transition cleanup one path to discard a delivery before reopening.
-- Ack waiters live with active participation; only the per-name ack counter outlives it. Keeping waiters beside the persistent name allowed cleanup and new handles to share mutable state.
+- Wire framing and direct `SocketSender` construction stay internal. Exposing them made implementation details part of the public compatibility contract.
+- Confirmed participation flushes accepted packets when the engine has room, even after admission closes, and unconfirmed closed participation discards them. The two cases stay separate because their close policies differ on purpose.
+- Event and ACK channels live in one group that keeps their separate lifetimes. Calling the group a send buffer suggested that ACK replies persisted like buffered events.
+- CONNECT is queued when a namespace activates on a running engine or a new engine opens. A separate due flag duplicated those transitions and made engine startup clear an intent it did not use.
+- Cleanup finishes the old inbox and any held delivery before it opens a waiting request, so it never opens replacement handles. A held delivery keeps its original receiver and token instead of resolving the name again.
+- Ack waiters live with the active participation, and only the per-name counter outlives it. Keeping waiters beside the persistent name let cleanup and new handles share mutable state.
 - A namespace ends through the EOF of its inbox when the last `SocketSender` drops. A disconnect message sent from `Drop` was lost when the inbox was full.
 - A namespace that ends before the actor took its inbox frees its name at once. Waiting for old handles to drain an inbox nobody polled left the name taken forever.
 - A send that waits for inbox capacity fails once the namespace closes. Before the shared `CancellationToken`, such a send kept waiting after the namespace closed.
@@ -43,26 +43,26 @@ Write each entry in one or two sentences: what went wrong or was rejected, then 
 
 ## Acks
 
-- Unsent events keep their namespace inbox, while ACK replies use a separate bounded input for the confirmed engine. Engine completion drops that input before reconnection, including blocked submissions that captured its sender. Buffering both kinds in the persistent event inbox silently replayed old replies on the next engine. Each input has the configured manager capacity, and local disconnect drains both before releasing the namespace name.
-- Event and reply inputs alternate their first polling opportunity, so a reply flood cannot starve buffered events. When both inputs end in one poll, that poll reports completion; returning pending after observing both EOFs left no future wake and stalled namespace cleanup.
-- Replies submitted while unconfirmed are discarded, preserving the existing rule. `AckId` stays a wire id without a session tag; session isolation applies to queued submissions through their owned input source rather than changing the public event API.
+- Unsent events keep the namespace inbox, and ACK replies use a separate bounded input that ends with the engine. Buffering both in the persistent inbox replayed old replies on the next engine.
+- Event and reply inputs take turns being polled first, so a reply flood cannot starve events. When both end in one poll, that poll reports completion, because returning pending left no wake and stalled cleanup.
+- Replies submitted while unconfirmed are discarded. `AckId` stays a wire id without a session tag, and session isolation comes from the owned input source.
 - Ack ids count per namespace name and never restart. Restarting at 0 on reopen let a late ack for the closed namespace answer an event of the new one.
 - Rejected: a session tag on server ack ids. The tag was added and reverted, because the server draws ids from one counter per namespace that never resets, so the server already ignores a stale id, and the JS client sends acks without a check.
 - Registering an ack reclaims waiters whose handles were dropped or timed out. Without that, unanswered requests accumulated waiters.
 
 ## Reconnection
 
-- Exponential delay and jitter use finite floating-point operands. A fixed exponent ceiling stopped growth before large configured caps; saturating at the numeric type's limit preserves zero delays and lets the configured cap decide when positive delays stop growing.
-- At the reconnection delay ceiling, keep the configured `Duration` itself. Floating-point conversion can round `Duration::MAX` beyond its valid range, so converting the ceiling back from seconds panicked on a retry.
-- Engine loss ends participation whose handles already closed before deciding whether to retry. Scheduling first let an immediate retry win the race against inbox EOF and open an engine that no live namespace needed.
+- Exponential delay and jitter use finite floats that saturate at the type's limit. A fixed exponent ceiling stopped growth before large configured caps.
+- At the delay ceiling, the code keeps the configured `Duration`. Converting `Duration::MAX` through floating-point seconds rounded past its range and panicked on a retry.
+- Engine loss ends participation whose handles already closed before it decides to retry. Scheduling first let an immediate retry open an engine no live namespace needed.
 - A jitter outside 0 to 1 counts as none, like JS. A factor above 1 produced negative delays.
 - The attempt count restarts on a successful Engine.IO handshake. Restarting on namespace CONNECT differed from JS `Manager.onreconnect`, which counts only failed connection attempts in a row.
 - Each handshake has a deadline. Without one, a stalled attempt never failed, so the client never reconnected.
 
 ## Binary
 
-- Reconstruction stores the already-decoded event or ACK and shares one attachment counter and buffer. Repeating payloads, ids and buffers in a second binary-kind enum duplicated distinctions the decoded packet already carries.
-- Ending a namespace detaches its partial binary packet and consumes the remaining attachments without delivery. Resetting the decoder would lose frame alignment, while retaining the name as a live destination let an old packet reach replacement handles.
+- Reconstruction stores the decoded event or ACK with one shared attachment counter and buffer. A second binary-kind enum repeated distinctions the decoded packet already carries.
+- Ending a namespace consumes its remaining attachments without delivery. Resetting the decoder lost frame alignment, and keeping the name as a live destination let an old packet reach replacement handles.
 - Placeholders are validated before attachments are retained, and a binary packet carries 1 to `MAX_ATTACHMENTS` attachments. Unchecked references reached application indexing code and could hold reconstruction open.
 
 ## Engine.IO
