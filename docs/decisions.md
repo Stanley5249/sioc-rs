@@ -57,6 +57,11 @@ Mistakes this project already made and approaches the project rejected, each wit
 
 ## Reconnection
 
+- Exponential delay and jitter use finite floating-point operands. A fixed
+  exponent ceiling stopped growth before large configured caps; saturating at
+  the numeric type's limit preserves zero delays and lets the configured cap
+  decide when positive delays stop growing.
+
 - At the reconnection delay ceiling, keep the configured `Duration` itself.
   Floating-point conversion can round `Duration::MAX` beyond its valid range,
   so converting the ceiling back from seconds panicked on a retry.
