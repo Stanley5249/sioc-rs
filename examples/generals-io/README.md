@@ -6,13 +6,10 @@ The bot uses a state machine for queuing, play, game over, and rematches. It joi
 
 ## Setup
 
-- `GENERALS_IO_USER_ID` - Your generals.io user ID. In browser developer tools, open the Network tab (Fetch/XHR or Socket section) and find Socket.IO packets. Look for packets like `42["stars_and_rank","your-user-id"]`.
-
-- `GENERALS_IO_USERNAME` - The username to set on an account that has none yet. The bot keeps an existing username, and an account without one needs this variable.
-
-- `GENERALS_IO_MODE` - Optional. `private` joins a custom game with a random room name, which is the default, and `1v1` joins the public 1v1 queue.
-
-- `RUST_LOG` - Log verbosity. See [filter directives](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#directives).
+- `GENERALS_IO_USER_ID`: Your generals.io user ID. In browser developer tools, open the Network tab (Fetch/XHR or Socket section) and find Socket.IO packets. Look for packets like `42["stars_and_rank","your-user-id"]`.
+- `GENERALS_IO_USERNAME`: The username to set on an account that has none yet. The bot keeps an existing username, and an account without one needs this variable.
+- `GENERALS_IO_MODE`: Optional. `private` joins a custom game with a random room name, which is the default, and `1v1` joins the public 1v1 queue.
+- `RUST_LOG`: Log verbosity. See [filter directives](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#directives).
 
 From the workspace root, copy `examples/.env.example` to `examples/.env`, fill in your user ID, and run the bot. `examples/.env` stays out of Git.
 

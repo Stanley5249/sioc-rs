@@ -30,8 +30,8 @@ Derive macros for [`sioc`](https://docs.rs/sioc).
 
 MIT OR Apache-2.0.
 
-[`EventType`]: https://github.com/Stanley5249/sioc-rs/blob/54ed5d128b99308095391b0e4f40bb8c919589ed/sioc/src/marker.rs
-[`AckType`]: https://github.com/Stanley5249/sioc-rs/blob/54ed5d128b99308095391b0e4f40bb8c919589ed/sioc/src/marker.rs
+[`EventType`]: https://docs.rs/sioc/latest/sioc/marker/trait.EventType.html
+[`AckType`]: https://docs.rs/sioc/latest/sioc/marker/trait.AckType.html
 [`SerializePayload`]: https://docs.rs/sioc/latest/sioc/payload/trait.SerializePayload.html
 [`DeserializePayload`]: https://docs.rs/sioc/latest/sioc/payload/trait.DeserializePayload.html
 [`EventRouter`]: https://docs.rs/sioc/latest/sioc/event/trait.EventRouter.html

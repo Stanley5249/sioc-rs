@@ -4,11 +4,11 @@ A chat client in Rust that joins a room, talks to a bot, and shares an image. Us
 
 The example follows the main README's client flow.
 
-- **Open and connect**. Build a client and connect to the default namespace.
-- **Emit**. Send a `Say` message to the room.
-- **Listen**. Receive `Message`, `Notice`, `Confirm`, and `Image` events in a typed loop.
-- **Acks**. Request an ack from the server (`Join`) and answer one from the server (`Confirm`).
-- **Binary**. Send an `Image` attachment and receive it back.
+- **Open and connect**: Build a client and connect to the default namespace.
+- **Emit**: Send a `Say` message to the room.
+- **Listen**: Receive `Message`, `Notice`, `Confirm`, and `Image` events in a typed loop.
+- **Acks**: Request an ack from the server (`Join`) and answer one from the server (`Confirm`).
+- **Binary**: Send an `Image` attachment and receive it back.
 
 ## Prerequisites
 
