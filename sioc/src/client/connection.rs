@@ -76,6 +76,12 @@ where
     }
 
     /// Override the HTTP client used for polling.
+    ///
+    /// Closing a polling session waits for the server to answer the Close
+    /// request, unlike the JS client, which does not wait. The default client
+    /// has no timeout, so a server that accepts the request and never answers
+    /// holds the close, and [`Client::join`], open. Set a timeout on this
+    /// client to bound it.
     pub fn http_client(mut self, client: reqwest::Client) -> Self {
         self.http_client = Some(client);
         self

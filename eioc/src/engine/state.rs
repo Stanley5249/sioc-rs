@@ -177,6 +177,13 @@ impl EngineCore {
         }
     }
 
+    /// Whether the handshake is still pending, so the server holds no session
+    /// yet.
+    #[must_use]
+    pub fn is_opening(&self) -> bool {
+        matches!(self.state, SessionState::Opening { .. })
+    }
+
     /// Whether the session is over, so the caller stops sending frames.
     #[must_use]
     pub fn is_closed(&self) -> bool {

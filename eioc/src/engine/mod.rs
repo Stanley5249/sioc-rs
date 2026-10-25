@@ -24,7 +24,9 @@
 //!   for capacity.
 //! - Messages sent before the handshake wait in the transport channel, like
 //!   `writeBuffer`, because a transport reads that channel only after the
-//!   handshake.
+//!   handshake. A hang-up during opening drops the transport, since the server
+//!   holds no session yet. The task sees that hang-up only while the transport
+//!   channel has room, so the manager sends nothing before Open.
 //! - The transport checks that the first frame is Open, and ends the server
 //!   direction at the server's Close packet, which `ServerFrame` cannot hold.
 //!   `ClientFrame` holds only what the engine sends, because the transport owns

@@ -82,9 +82,11 @@ fn messages_during_opening_are_encoded_for_the_transport_channel() {
 #[test]
 fn closing_an_opening_ends_its_deadline() {
     let mut core = EngineCore::new(Some(Duration::from_secs(5)), Instant::now());
+    assert!(core.is_opening());
 
     core.close();
 
+    assert!(!core.is_opening());
     assert!(core.is_closed());
     assert_eq!(core.deadline(), None);
 }

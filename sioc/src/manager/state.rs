@@ -97,7 +97,11 @@ pub enum ManagerOutput {
 enum ReadyState {
     /// No engine runs, like `"closed"`.
     Closed,
-    /// An engine runs, like `"opening"` and `"open"`.
+    /// An engine runs before its handshake, like `"opening"`. Messages wait
+    /// in the write buffer, like `Socket.connect` waiting for the manager's
+    /// `"open"` event, so nothing reaches the engine before Open.
+    Opening,
+    /// An engine runs after its handshake, like `"open"`.
     Open,
     /// An engine runs that no namespace needs. It closes once its write
     /// buffer empties, like `Manager._destroy` after the last DISCONNECT.
@@ -257,7 +261,7 @@ impl ManagerCore {
     /// so the write buffer holds the messages of one packet at most.
     #[must_use]
     pub fn read(&self, ns: &str, has_permit: bool) -> Read {
-        let engine_ready = has_permit && self.engine_runs() && self.write_buffer.is_empty();
+        let engine_ready = has_permit && self.engine_writes() && self.write_buffer.is_empty();
         self.namespaces
             .get(ns)
             .map_or(Read::Discard, |namespace| namespace.read(engine_ready))
@@ -267,12 +271,12 @@ impl ManagerCore {
     /// `writeBuffer`.
     #[must_use]
     pub fn has_message(&self) -> bool {
-        self.engine_runs() && !self.write_buffer.is_empty()
+        self.engine_writes() && !self.write_buffer.is_empty()
     }
 
     /// Takes one message for the engine, like `engine.write`.
     pub fn next_message(&mut self) -> Option<ClientMessage> {
-        if !self.engine_runs() {
+        if !self.engine_writes() {
             return None;
         }
         let message = match self.write_buffer.pop_front()? {
@@ -336,6 +340,14 @@ impl ManagerCore {
     }
 
     fn engine_runs(&self) -> bool {
+        matches!(
+            self.ready_state,
+            ReadyState::Opening | ReadyState::Open | ReadyState::Flushing
+        )
+    }
+
+    /// Whether the engine has opened, so the write buffer may leave.
+    fn engine_writes(&self) -> bool {
         matches!(self.ready_state, ReadyState::Open | ReadyState::Flushing)
     }
 
@@ -347,11 +359,11 @@ impl ManagerCore {
     /// `Manager._packet`. The header leaves on the permit the caller holds;
     /// attachments follow before any other message.
     fn send(&mut self, ns: &ByteString, packet: ClientPacket) {
-        let engine_runs = self.engine_runs();
+        let engine_writes = self.engine_writes();
         let Some(namespace) = self
             .namespaces
             .get_mut(ns)
-            .filter(|namespace| namespace.is_connected() && engine_runs)
+            .filter(|namespace| namespace.is_connected() && engine_writes)
         else {
             // The namespace or its handles are gone, so nothing sends it.
             tracing::debug!(%ns, "discarded client packet for a closed namespace");
@@ -456,7 +468,10 @@ impl ManagerCore {
                     self.open_engine();
                 }
                 ReadyState::Flushing => self.ready_state = ReadyState::Open,
-                ReadyState::Open | ReadyState::Closing { .. } | ReadyState::Reconnecting => {}
+                ReadyState::Opening
+                | ReadyState::Open
+                | ReadyState::Closing { .. }
+                | ReadyState::Reconnecting => {}
             }
         }
     }
@@ -469,6 +484,8 @@ impl ManagerCore {
             return;
         }
         match self.ready_state {
+            // Nothing has reached the server yet, so there is nothing to flush.
+            ReadyState::Opening => self.close_engine(false),
             ReadyState::Open => {
                 self.ready_state = ReadyState::Flushing;
                 self.finish_flushing();
@@ -495,10 +512,11 @@ impl ManagerCore {
     }
 
     /// Asks for an engine, with CONNECT queued for every active namespace so
-    /// they go out first, like `Manager.open` followed by `Socket.onopen`.
+    /// they go out first once it opens, like `Manager.open` followed by
+    /// `Socket.onopen`.
     fn open_engine(&mut self) {
         tracing::debug!("engine opening");
-        self.ready_state = ReadyState::Open;
+        self.ready_state = ReadyState::Opening;
         self.outputs.push_back(ManagerOutput::Open);
 
         for (ns, namespace) in &self.namespaces {
@@ -526,6 +544,9 @@ impl ManagerCore {
         let decoded = match message {
             ServerMessage::Open(handshake) => {
                 tracing::debug!(sid = %handshake.sid, "engine opened");
+                if self.ready_state == ReadyState::Opening {
+                    self.ready_state = ReadyState::Open;
+                }
                 // The handshake succeeded, so the next drop counts attempts
                 // from zero, like `Manager.onreconnect`.
                 self.reset_backoff();
@@ -591,7 +612,7 @@ impl ManagerCore {
     /// `Manager.onclose` and `reconnect`.
     fn finish_engine(&mut self, result: Result<(), ManagerError>) -> Result<(), ManagerError> {
         let reconnect = match self.ready_state {
-            ReadyState::Open | ReadyState::Flushing => true,
+            ReadyState::Opening | ReadyState::Open | ReadyState::Flushing => true,
             ReadyState::Closing { reconnect } => reconnect,
             ReadyState::Closed | ReadyState::Reconnecting => {
                 tracing::debug!("ignored close of an engine that is gone");

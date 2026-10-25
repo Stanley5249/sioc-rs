@@ -23,6 +23,10 @@ pub struct EngineOptions<C> {
     pub url: Url,
     /// The client for polling requests. JS uses the platform's
     /// `XMLHttpRequest` or `fetch`.
+    ///
+    /// Closing a polling session waits for the server to answer the Close
+    /// request, unlike the JS client. Set a timeout on this client to bound
+    /// that wait.
     pub http_client: reqwest::Client,
     /// Opens WebSocket connections. JS uses the platform's
     /// `WebSocket`.
@@ -55,9 +59,11 @@ pub struct EngineOptions<C> {
 /// sends never fail. Drop `client_message_tx` before awaiting `task`, which
 /// waits for that hang-up.
 ///
-/// To cancel an opening, drop `task` instead. Before the handshake the
-/// transport does not read, so once its channel is full the task cannot see
-/// the hang-up, and a handshake may have no deadline.
+/// Dropping `client_message_tx` before the handshake drops the opening. Send
+/// nothing before [`ServerMessage::Open`]: the transport reads its channel
+/// only after the handshake, so once that channel is full the task cannot
+/// see the hang-up, and a handshake may have no deadline. Dropping `task`
+/// aborts the session at any point.
 #[derive(Debug)]
 pub struct Engine {
     /// What the client sends, like `Socket.write`.
@@ -129,7 +135,8 @@ where
 ///
 /// The end of each channel drives cleanup. When the manager hangs up, the
 /// session closes, the unread server messages are discarded, and the
-/// transport sends Close once its channel ends. When the transport ends the
+/// transport sends Close once its channel ends, or is dropped if the
+/// handshake is still pending. When the transport ends the
 /// server direction, the session closes and the messages already received
 /// are still delivered. A deadline failure drops the transport, because the
 /// server no longer answers, and still delivers the message already received.
@@ -263,6 +270,13 @@ where
                     }
                 } else {
                     client_message_rx = None;
+                    // Before the handshake the server holds no session to
+                    // close, and the transport does not read its channel yet,
+                    // so the opening is dropped instead of waited for.
+                    if core.is_opening() {
+                        transport = None;
+                        server_frame_rx = None;
+                    }
                     core.close();
                 }
             },

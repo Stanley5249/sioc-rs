@@ -51,8 +51,10 @@ async fn closes_after_client_handle_and_last_namespace_drop() {
     task.await.unwrap().unwrap();
 }
 
+/// An engine stops reading early only by returning an error, which the
+/// client ends with instead of a closed channel.
 #[tokio::test]
-async fn closed_engine_channel_is_error() {
+async fn an_engine_that_stops_reading_ends_the_client_with_its_error() {
     let TestManager {
         connect_request_tx,
         session,
@@ -72,10 +74,14 @@ async fn closed_engine_channel_is_error() {
     handles.reply_rx.await.unwrap().unwrap();
 
     drop(server_message_tx);
-    drop(result_tx);
+    result_tx
+        .send(Err(eioc::error::EngineError::ServerMessageClosed.into()))
+        .unwrap();
     assert!(matches!(
         task.await.unwrap(),
-        Err(ManagerError::EngineEnded)
+        Err(ManagerError::Engine(eioc::error::Error::Engine(
+            eioc::error::EngineError::ServerMessageClosed
+        )))
     ));
 }
 

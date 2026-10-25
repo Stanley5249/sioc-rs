@@ -219,17 +219,24 @@ async fn server_frames_flow_while_the_transport_is_full() {
     assert_eq!(harness.client_frame_rx.recv().await, Some(sent("waits")));
 }
 
-#[tokio::test]
+/// With no client message, the client branch holds the transport's only slot
+/// while it waits, and a pending pong must disable it. Without that, the two
+/// reservations race in random `select!` order, so each round catches the bug
+/// with a chance of one half. The rounds make a pass by luck unlikely, not
+/// impossible. A missed pong does not hang: the paused clock runs out the
+/// ping window, and the closed channel fails the assertion.
+#[tokio::test(start_paused = true)]
 async fn pong_takes_the_slot_a_waiting_client_branch_holds() {
     let mut harness = Harness::open(4, 1).await;
-    // With no client message, the client branch holds the transport's only
-    // slot while it waits.
-    harness.send_frame(ServerFrame::Ping("".into())).await;
 
-    assert_eq!(
-        harness.client_frame_rx.recv().await,
-        Some(ClientFrame::Pong("".into()))
-    );
+    for round in 0..32 {
+        harness.send_frame(ServerFrame::Ping("".into())).await;
+        assert_eq!(
+            harness.client_frame_rx.recv().await,
+            Some(ClientFrame::Pong("".into())),
+            "round {round}"
+        );
+    }
     harness.send_message("after").await;
     assert_eq!(harness.client_frame_rx.recv().await, Some(sent("after")));
 }
@@ -322,16 +329,15 @@ async fn a_transport_error_is_the_session_result() {
 }
 
 #[tokio::test]
-async fn a_close_during_opening_ends_the_transport_channel() {
+async fn a_hang_up_during_opening_drops_the_transport() {
     let mut harness = Harness::spawn(None, 4, 4);
     drop(harness.client_message_tx);
 
-    // A transport that reads its channel learns of the close and sends Close
-    // after the handshake. An owner that cannot wait drops the task instead.
-    assert_eq!(harness.client_frame_rx.recv().await, None);
+    // The server holds no session yet, so the handshake is not waited for,
+    // even without a deadline.
+    harness.transport_tx.closed().await;
     assert_eq!(harness.server_message_rx.recv().await, None);
-    drop(harness.server_frame_tx);
-    let _ = harness.transport_tx.send(Ok(()));
+    assert_eq!(harness.client_frame_rx.recv().await, None);
     harness.task.await.unwrap().unwrap();
 }
 
