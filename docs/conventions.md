@@ -30,8 +30,9 @@ These are defaults. Depart from one when the design is simpler, and say why in t
 - A private helper needs only a clear name instead of a JS counterpart.
 - Name a symbol in three steps. Take the JS name, adapt it to Rust conventions, then compare it with similar names in std, the dependencies, the JS libraries, and this codebase, and pick one that stays distinct.
 - Name a module after the concept it holds, as the JS files do, rather than after one of its types.
-- Use frame for transport data, packet for a wire unit of either protocol, and message for what Engine.IO carries between the two layers. Engine sessions open and close, and namespaces connect and disconnect.
-- Name each channel's sender and receiver after the items the channel carries. When two channels carry the same item type, prefix both ends of each channel with `server_` or `client_` to identify the side that produces the items.
+- Use frame for transport data, packet for a wire unit of either protocol, and message for what Engine.IO carries between the two layers.
+- Engine sessions open and close, and namespaces connect and disconnect. Use shutdown for a component's termination, join for awaiting a task's completion, and drain for consuming the items left in a channel. These are vocabulary conventions, not a list of methods every component must expose.
+- Prefix Engine.IO message and frame types with `Client` or `Server` for the side that produces them, such as `ClientMessage` and `ServerFrame`. Name each channel's sender and receiver after the values the channel carries, such as `client_message_tx`.
 
 ## Code style
 
