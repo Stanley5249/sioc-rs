@@ -4,7 +4,7 @@
 
 `mpsc` below refers to `tokio::sync::mpsc`.
 
-- The core of a protocol layer owns every protocol decision. Its task owns the I/O and turns what the I/O yields into the core's inputs.
+- Each piece of state has one owner in one task. The protocol core owns every protocol decision and never awaits. Its task owns the I/O and turns what the I/O yields into the core's inputs. The sioc manager uses this design, and the eioc migration is tracked in #13.
 - A loop that serves several inputs never awaits inside a handler. The loop waits for each output, such as a channel permit or a timer, as its own `select!` branch beside the inputs, so a full queue holds up only the data that needs it. Prove that every branch future is safe to cancel.
 - Run independent I/O directions, such as a transport's read and write halves, in separate loops joined with `tokio::join!` when no state ties them together.
 - Shut down through half-close. A task drops its channel senders with `drop` to initiate shutdown, then waits until `mpsc::Receiver::recv` or `mpsc::UnboundedReceiver::recv` returns `None` for every input channel before finishing. Under this protocol, sends between library tasks succeed, so treat any send failure as an error. If delivery fails because the caller dropped a receiver, discard the item.
@@ -12,6 +12,7 @@
 
 ## JS parity and naming
 
+- Every type, field, variant, and public function names its JS counterpart in its doc comment, or the reason Rust needs it when JS does without. Propose each new symbol with its JS counterpart before writing the code.
 - A private helper needs only a clear name instead of a JS counterpart.
 - An item without a JS counterpart names one of four reasons, each something JS gets for free. These are a channel between tasks (JS calls a method), a bound (JS queues are unbounded), cleanup (JS has GC and a synchronous `close`), and a wait (JS writes at once). An item that fits none of these is a design to remove.
 - Name a symbol in three steps. Take the JS name, adapt it to Rust conventions, then compare it with similar names in std, the dependencies, the JS libraries, and this codebase, and pick one that stays distinct.
