@@ -1,7 +1,7 @@
 //! The lifetime of one engine, like `Manager.engine` and its subscriptions.
 //!
 //! One owner closes admission, drains the server direction and observes the
-//! connection result. Namespace backpressure applies while running; cleanup
+//! task's result. Namespace backpressure applies while running; cleanup
 //! forwards remaining messages without waiting for application capacity.
 
 use std::future::{Future, poll_fn};
@@ -14,14 +14,19 @@ use tokio_util::task::AbortOnDropHandle;
 
 use crate::error::ManagerError;
 
-/// The engine task, like `Socket.readyState` while opening or open. Rust
-/// cleanup retains a finished task's result until its incoming channel has
-/// drained, independently of when the task itself finishes.
-enum Connection {
+type EngineTask = AbortOnDropHandle<Result<(), eioc::error::Error>>;
+
+/// The engine task, like `Socket.readyState` while opening or open.
+///
+/// The manager queues CONNECT before the handshake, so an opening engine may
+/// hold a full transport channel and cannot see the manager hang up. A local
+/// close therefore aborts an opening, while an open engine finishes its
+/// accepted messages and sends Close.
+enum Task {
     /// Before the engine's Open message, like Engine.IO `"opening"`.
-    Opening(AbortOnDropHandle<Result<(), eioc::error::Error>>),
+    Opening(EngineTask),
     /// After that message, like Engine.IO `"open"`.
-    Open(AbortOnDropHandle<Result<(), eioc::error::Error>>),
+    Open(EngineTask),
     /// Its result, retained until incoming EOF. Rust cleanup.
     Finished(Result<(), ManagerError>),
 }
@@ -34,6 +39,21 @@ pub enum Drain {
     Deliver,
     /// Local close or internal failure discards remaining server messages.
     Discard,
+}
+
+/// Whether the engine takes client messages, like `engine.write` before
+/// `engine.close`.
+enum Admission {
+    /// Accepting messages.
+    Open {
+        /// `engine.write`.
+        client_message_tx: mpsc::Sender<Message>,
+        /// One immediately writable message slot. It holds a sender, so it
+        /// lives and drops with `client_message_tx`. Rust bound.
+        permit: Option<mpsc::OwnedPermit<Message>>,
+    },
+    /// Closed, with the policy for unread engine messages. Rust cleanup.
+    Closed(Drain),
 }
 
 /// An observation from the engine, like the listeners `Manager.open` installs.
@@ -53,18 +73,13 @@ pub enum EngineStep {
 /// One engine session, like `Manager.engine`. Its fields never escape the
 /// owner, so every termination uses the same polling and drain path.
 pub struct Engine {
-    /// The running or finished engine task.
-    connection: Connection,
-    /// `engine.write` until close stops admission.
-    client_message_tx: Option<mpsc::Sender<Message>>,
-    /// One immediately writable message slot. Rust bound.
-    permit: Option<mpsc::OwnedPermit<Message>>,
+    task: Task,
+    admission: Admission,
     /// The engine's data events until EOF.
     server_message_rx: mpsc::Receiver<ServerMessage>,
-    /// One message read while application delivery is full. Rust bound.
+    /// One message read while application delivery is full, so the engine's
+    /// hang-up behind it stays visible. Rust bound.
     next_server_message: Option<ServerMessage>,
-    /// How unread engine messages are reclaimed. Rust cleanup.
-    drain: Drain,
 }
 
 impl Engine {
@@ -77,28 +92,28 @@ impl Engine {
             task,
         } = engine;
         Self {
-            connection: Connection::Opening(task),
-            client_message_tx: Some(client_message_tx),
-            permit: None,
+            task: Task::Opening(task),
+            admission: Admission::Open {
+                client_message_tx,
+                permit: None,
+            },
             server_message_rx,
             next_server_message: None,
-            drain: Drain::Deliver,
         }
     }
 
-    /// Stops outgoing acceptance, like `engine.close`. A local close of an
-    /// opening aborts the task, because a handshake may have no deadline and
-    /// the engine cannot see the hang-up while the transport, which reads only
-    /// after the handshake, holds its input full.
-    /// Returns whether admission stopped in this transition.
+    /// Stops outgoing acceptance, like `engine.close`, and aborts an opening
+    /// on a discard. A discard, once asked for, stays. Returns whether
+    /// admission stopped in this transition.
     pub fn close(&mut self, drain: Drain) -> bool {
-        if matches!(drain, Drain::Discard) {
-            self.drain = Drain::Discard;
-        }
-        let changed = self.client_message_tx.take().is_some();
-        self.permit = None;
-        if matches!(drain, Drain::Discard) && matches!(self.connection, Connection::Opening(_)) {
-            self.connection = Connection::Finished(Ok(()));
+        let (changed, drain) = match (&self.admission, drain) {
+            (Admission::Open { .. }, drain) => (true, drain),
+            (Admission::Closed(Drain::Discard), _) | (_, Drain::Discard) => (false, Drain::Discard),
+            (Admission::Closed(Drain::Deliver), Drain::Deliver) => (false, Drain::Deliver),
+        };
+        self.admission = Admission::Closed(drain);
+        if matches!(drain, Drain::Discard) && matches!(self.task, Task::Opening(_)) {
+            self.task = Task::Finished(Ok(()));
         }
         changed
     }
@@ -106,27 +121,36 @@ impl Engine {
     /// Whether one message can be handed to this engine now, like an
     /// immediately writable `engine.write`.
     pub fn has_permit(&self) -> bool {
-        self.permit.is_some() && !self.server_message_rx.is_closed()
+        matches!(
+            self.admission,
+            Admission::Open {
+                permit: Some(_),
+                ..
+            }
+        ) && !self.server_message_rx.is_closed()
     }
 
     /// Takes the already reserved output slot, like `engine.write` accepting
     /// one message. The caller transfers ownership directly on that permit.
     pub fn take_permit(&mut self) -> Option<mpsc::OwnedPermit<Message>> {
-        if !self.has_permit() {
+        if self.server_message_rx.is_closed() {
             return None;
         }
-        self.permit.take()
+        match &mut self.admission {
+            Admission::Open { permit, .. } => permit.take(),
+            Admission::Closed(_) => None,
+        }
     }
 
     /// Returns an unused slot after another input won the wait. Rust wait:
     /// packet selection owns its slot so engine cleanup cannot revoke it.
-    pub fn return_permit(&mut self, permit: mpsc::OwnedPermit<Message>) {
-        if self.client_message_tx.is_some() {
+    pub fn return_permit(&mut self, returned: mpsc::OwnedPermit<Message>) {
+        if let Admission::Open { permit, .. } = &mut self.admission {
             assert!(
-                self.permit.is_none(),
+                permit.is_none(),
                 "only one output slot is reserved for packet selection"
             );
-            self.permit = Some(permit);
+            *permit = Some(returned);
         }
     }
 
@@ -138,11 +162,13 @@ impl Engine {
         can_receive_server_message: bool,
         can_reserve_client_message: bool,
     ) -> EngineStep {
-        let reservation = self
-            .client_message_tx
-            .clone()
-            .filter(|_| can_reserve_client_message && self.permit.is_none())
-            .map(mpsc::Sender::reserve_owned);
+        let reservation = match &self.admission {
+            Admission::Open {
+                client_message_tx,
+                permit: None,
+            } if can_reserve_client_message => Some(client_message_tx.clone().reserve_owned()),
+            _ => None,
+        };
         tokio::pin!(reservation);
         poll_fn(|cx| {
             self.poll_next(
@@ -168,27 +194,25 @@ impl Engine {
     ) -> Poll<EngineStep> {
         // Poll first so a task that closes its server direction and then
         // awaits our hang-up is observed in this same turn.
-        let result = match &mut self.connection {
-            Connection::Opening(task) | Connection::Open(task) => {
-                Pin::new(task).poll(cx).map(|joined| {
-                    joined.unwrap_or_else(|error| {
-                        assert!(
-                            error.is_panic(),
-                            "the engine task is aborted only when its handle drops"
-                        );
-                        std::panic::resume_unwind(error.into_panic())
-                    })
+        let result = match &mut self.task {
+            Task::Opening(task) | Task::Open(task) => Pin::new(task).poll(cx).map(|joined| {
+                joined.unwrap_or_else(|error| {
+                    assert!(
+                        error.is_panic(),
+                        "the engine task is aborted only when its handle drops"
+                    );
+                    std::panic::resume_unwind(error.into_panic())
                 })
-            }
-            Connection::Finished(_) => Poll::Pending,
+            }),
+            Task::Finished(_) => Poll::Pending,
         };
         if let Poll::Ready(result) = result {
-            let result = if self.client_message_tx.is_some() {
+            let result = if matches!(self.admission, Admission::Open { .. }) {
                 Err(ManagerError::EngineEnded)
             } else {
                 result.map_err(ManagerError::from)
             };
-            self.connection = Connection::Finished(result);
+            self.task = Task::Finished(result);
             if self.close(Drain::Deliver) {
                 return Poll::Ready(EngineStep::Progress);
             }
@@ -197,10 +221,15 @@ impl Engine {
             return Poll::Ready(EngineStep::Progress);
         }
 
-        let draining = self.client_message_tx.is_none();
+        let drain = match self.admission {
+            Admission::Open { .. } => None,
+            Admission::Closed(drain) => Some(drain),
+        };
+        let draining = drain.is_some();
+        let discards = matches!(drain, Some(Drain::Discard));
         if (can_receive_server_message || draining)
             && let Some(message) = self.next_server_message.take()
-            && (!draining || matches!(self.drain, Drain::Deliver))
+            && !discards
         {
             return Poll::Ready(EngineStep::Message { message, draining });
         }
@@ -209,14 +238,13 @@ impl Engine {
             match self.server_message_rx.poll_recv(cx) {
                 Poll::Ready(Some(message)) => {
                     if matches!(&message, ServerMessage::Open(_)) {
-                        let connection =
-                            std::mem::replace(&mut self.connection, Connection::Finished(Ok(())));
-                        self.connection = match connection {
-                            Connection::Opening(task) => Connection::Open(task),
-                            connection => connection,
+                        let task = std::mem::replace(&mut self.task, Task::Finished(Ok(())));
+                        self.task = match task {
+                            Task::Opening(task) => Task::Open(task),
+                            task => task,
                         };
                     }
-                    if draining && matches!(self.drain, Drain::Discard) {
+                    if discards {
                         return Poll::Ready(EngineStep::Progress);
                     }
                     if can_receive_server_message || draining {
@@ -227,11 +255,11 @@ impl Engine {
                 }
                 Poll::Ready(None) => {
                     self.close(Drain::Deliver);
-                    if matches!(self.connection, Connection::Finished(_)) {
-                        let Connection::Finished(result) =
-                            std::mem::replace(&mut self.connection, Connection::Finished(Ok(())))
+                    if matches!(self.task, Task::Finished(_)) {
+                        let Task::Finished(result) =
+                            std::mem::replace(&mut self.task, Task::Finished(Ok(())))
                         else {
-                            unreachable!("the connection finished before its result is taken");
+                            unreachable!("the task finished before its result is taken");
                         };
                         return Poll::Ready(EngineStep::Closed(result));
                     }
@@ -240,19 +268,19 @@ impl Engine {
             }
         }
 
-        if self.client_message_tx.is_none() {
+        let Admission::Open { permit, .. } = &mut self.admission else {
             return Poll::Pending;
-        }
+        };
         let Some(reservation) = reservation else {
             return Poll::Pending;
         };
         let Poll::Ready(result) = reservation.poll(cx) else {
             return Poll::Pending;
         };
-        if let Ok(permit) = result {
-            self.permit = Some(permit);
+        if let Ok(reserved) = result {
+            *permit = Some(reserved);
         } else {
-            self.connection = Connection::Finished(Err(ManagerError::EngineEnded));
+            self.task = Task::Finished(Err(ManagerError::EngineEnded));
             self.close(Drain::Discard);
         }
         Poll::Ready(EngineStep::Progress)
