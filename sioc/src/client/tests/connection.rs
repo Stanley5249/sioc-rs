@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use eioc::transport::TransportStrategy;
+use eioc::prelude::TransportStrategy;
 use tokio::sync::{Semaphore, mpsc};
 use url::Url;
 

@@ -10,18 +10,18 @@ use std::task::{Context, Poll};
 
 use eioc::prelude::{Message, ServerMessage};
 use tokio::sync::mpsc;
-use tracing::instrument::Instrumented;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::error::ManagerError;
 
-/// The Engine.IO attempt, like `Socket.readyState` while opening or open.
-/// Rust cleanup retains a completed future's result until its incoming channel
-/// has drained, independently of when the connection itself finishes.
-enum Connection<Fut> {
+/// The engine task, like `Socket.readyState` while opening or open. Rust
+/// cleanup retains a finished task's result until its incoming channel has
+/// drained, independently of when the task itself finishes.
+enum Connection {
     /// Before the engine's Open message, like Engine.IO `"opening"`.
-    Opening(Pin<Box<Instrumented<Fut>>>),
+    Opening(AbortOnDropHandle<Result<(), eioc::error::Error>>),
     /// After that message, like Engine.IO `"open"`.
-    Open(Pin<Box<Instrumented<Fut>>>),
+    Open(AbortOnDropHandle<Result<(), eioc::error::Error>>),
     /// Its result, retained until incoming EOF. Rust cleanup.
     Finished(Result<(), ManagerError>),
 }
@@ -46,15 +46,15 @@ pub enum EngineStep {
     /// A permit, early server message or close transition became ready.
     /// Rust wait: every ownership change wakes the caller before waiting again.
     Progress,
-    /// The connection future and its server direction have both finished.
+    /// The engine task and its server direction have both finished.
     Closed(Result<(), ManagerError>),
 }
 
 /// One engine session, like `Manager.engine`. Its fields never escape the
 /// owner, so every termination uses the same polling and drain path.
-pub struct Engine<Fut> {
-    /// The owned opening, established or completed connection.
-    connection: Connection<Fut>,
+pub struct Engine {
+    /// The running or finished engine task.
+    connection: Connection,
     /// `engine.write` until close stops admission.
     client_message_tx: Option<mpsc::Sender<Message>>,
     /// One immediately writable message slot. Rust bound.
@@ -67,19 +67,17 @@ pub struct Engine<Fut> {
     drain: Drain,
 }
 
-impl<Fut> Engine<Fut>
-where
-    Fut: Future<Output = Result<(), eioc::error::Error>>,
-{
+impl Engine {
     /// Takes all ends of a new session, like `Manager.open` installing its
     /// engine and listeners.
-    pub fn new(
-        future: Instrumented<Fut>,
-        client_message_tx: mpsc::Sender<Message>,
-        server_message_rx: mpsc::Receiver<ServerMessage>,
-    ) -> Self {
+    pub fn new(engine: eioc::engine::Engine) -> Self {
+        let eioc::engine::Engine {
+            client_message_tx,
+            server_message_rx,
+            task,
+        } = engine;
         Self {
-            connection: Connection::Opening(Box::pin(future)),
+            connection: Connection::Opening(task),
             client_message_tx: Some(client_message_tx),
             permit: None,
             server_message_rx,
@@ -88,8 +86,10 @@ where
         }
     }
 
-    /// Stops outgoing acceptance, like `engine.close`. Opening is cancellable
-    /// by dropping its future, even when the handshake has no deadline.
+    /// Stops outgoing acceptance, like `engine.close`. A local close of an
+    /// opening aborts the task, because a handshake may have no deadline and
+    /// the engine cannot see the hang-up while the transport, which reads only
+    /// after the handshake, holds its input full.
     /// Returns whether admission stopped in this transition.
     pub fn close(&mut self, drain: Drain) -> bool {
         if matches!(drain, Drain::Discard) {
@@ -166,10 +166,20 @@ where
         >,
         cx: &mut Context<'_>,
     ) -> Poll<EngineStep> {
-        // Poll first so a connection that closes its server direction and
-        // then awaits our hang-up is observed in this same turn.
+        // Poll first so a task that closes its server direction and then
+        // awaits our hang-up is observed in this same turn.
         let result = match &mut self.connection {
-            Connection::Opening(future) | Connection::Open(future) => future.as_mut().poll(cx),
+            Connection::Opening(task) | Connection::Open(task) => {
+                Pin::new(task).poll(cx).map(|joined| {
+                    joined.unwrap_or_else(|error| {
+                        assert!(
+                            error.is_panic(),
+                            "the engine task is aborted only when its handle drops"
+                        );
+                        std::panic::resume_unwind(error.into_panic())
+                    })
+                })
+            }
             Connection::Finished(_) => Poll::Pending,
         };
         if let Poll::Ready(result) = result {
@@ -202,7 +212,7 @@ where
                         let connection =
                             std::mem::replace(&mut self.connection, Connection::Finished(Ok(())));
                         self.connection = match connection {
-                            Connection::Opening(future) => Connection::Open(future),
+                            Connection::Opening(task) => Connection::Open(task),
                             connection => connection,
                         };
                     }
@@ -251,26 +261,26 @@ where
 
 #[cfg(test)]
 mod tests {
-    use tracing::Instrument;
+    use tokio_util::task::AbortOnDropHandle;
 
     use super::*;
 
     #[tokio::test]
     async fn opening_failure_keeps_its_error_while_the_input_drains() {
-        let (server_tx, server_rx) = mpsc::channel(1);
-        let (client_tx, mut client_rx) = mpsc::channel(1);
-        let future = async move {
+        let (server_message_tx, server_message_rx) = mpsc::channel(1);
+        let (client_message_tx, mut client_message_rx) = mpsc::channel(1);
+        let task = tokio::spawn(async move {
             // An Engine.IO failure ends its server direction, then accepts
             // client input until the manager observes the half-close.
-            drop(server_tx);
-            while client_rx.recv().await.is_some() {}
+            drop(server_message_tx);
+            while client_message_rx.recv().await.is_some() {}
             Err(eioc::error::EngineError::HandshakeTimeout.into())
-        };
-        let mut engine = Engine::new(
-            future.instrument(tracing::Span::none()),
-            client_tx,
-            server_rx,
-        );
+        });
+        let mut engine = Engine::new(eioc::engine::Engine {
+            client_message_tx,
+            server_message_rx,
+            task: AbortOnDropHandle::new(task),
+        });
         loop {
             if let EngineStep::Closed(result) = engine.next(false, false).await {
                 assert!(matches!(

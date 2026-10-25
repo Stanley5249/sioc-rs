@@ -46,14 +46,10 @@ async fn emits_while_handling_a_server_flood() {
 
     let (connect_request_tx, connect_request_rx) = mpsc::channel(4);
     let (session_tx, mut session_rx) = mpsc::channel(1);
-    let connect_engine = move |server_message_tx, client_message_rx| {
-        let session_tx = session_tx.clone();
-        run_session(server_message_tx, client_message_rx, session_tx)
-    };
+    let connect_engine = move || spawn_session(ChannelConfig::from(2), session_tx.clone());
     let task = tokio::spawn(crate::manager::actor::run(
         connect_request_rx,
         connect_engine,
-        ChannelConfig::from(2),
         None,
     ));
     let TestSession {

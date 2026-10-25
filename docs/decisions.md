@@ -20,7 +20,7 @@ Each section covers one area or component. A rejected approach records why it fa
 - A cancelled output reservation is restarted, because the engine is the channel's only writer. Storing the pending future separately added state without another responsibility.
 - One owner closes admission, drains the incoming direction, and collects the result, for normal closure, failure, and shutdown alike. Cancelling an opening drops its future, because a handshake may have no deadline.
 - Packet selection keeps its output permit until the event is handed off. A readiness snapshot let engine polling revoke the permit after the event left its inbox, so cleanup discarded an unsent event.
-- A local cancel of an opening drops the connection future, but a peer-side failure keeps polling it after closing admission, so the original error survives.
+- A local cancel of an opening aborts the engine task, but a peer-side failure keeps polling it after closing admission, so the original error survives. The engine cannot see a hang-up during opening once its transport channel is full, because the transport reads it only after the handshake.
 - Peer closure processes the final control packets and discards later overflow, and local closure discards unread messages. Cleanup never waits for application capacity.
 - One task owns the manager's state, and a synchronous core decides every transition. Two loops that shared namespace state behind a `Mutex` each saw half of every transition, which needed a three-step confirmation state and an unbounded event channel between them.
 - A namespace's channel is its only send buffer, and the actor reads it only when the packet can go to the engine at once. Reading every packet into a second buffer in the core needed a semaphore to bound it, a disconnecting state to flush it, and per-event ack bookkeeping, and hiding the channel until the buffer had room hid its end, so an unconfirmed namespace never closed.
@@ -75,6 +75,13 @@ Each section covers one area or component. A rejected approach records why it fa
 - A failed WebSocket upgrade falls back to long polling. Failing the session on upgrade errors dropped connections that polling could serve.
 - Out-of-place Open, Pong, and Upgrade packets are logged and ignored, like the JS client. Failing the session on them was stricter than the JS client and ended working sessions.
 - Packets batched after the polling handshake reach the engine. They were dropped, but engine.io-client decodes the handshake response as a payload, so a server may batch packets after Open.
+- A synchronous core decides the session rules, and the engine task only moves items between bounded channels. The two protocol loops that awaited each send could not answer the heartbeat deadline while blocked on a full manager channel, so a stalled manager kept the session open forever.
+- The engine reads a server frame before it holds a manager permit and keeps only that frame's message, so pings ahead of the next message are answered while the manager is full. A ping behind an undelivered message still waits, so a manager that stalls for a whole ping window times the session out.
+- The transport stays its own future behind bounded channels, and the engine polls it by reference. Folding the polling and WebSocket loops into the engine task was rejected, because it moved transport concurrency and the upgrade into the engine and let unrelated branches cancel a request in flight.
+- The boundary channels carry `ServerFrame` and `ClientFrame`, which cannot hold Close, Upgrade, or the probe, so the transport owns those packets by type. A shared `Frame` channel let the engine receive Close and needed a runtime check.
+- The handshake travels as the first server frame. A separate oneshot gave an opening a second end signal beside the channel's end.
+- A local close discards the message waiting for the manager, and only a peer end delivers it, because the manager that closed no longer reads for it.
+- A WebSocket local close sends the Close packet and a close frame without waiting for the server's reply, like the JS client. Waiting let a silent server hold the close open.
 
 ## Configuration
 

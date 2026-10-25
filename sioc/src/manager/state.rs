@@ -104,7 +104,7 @@ enum ReadyState {
     Flushing,
     /// The engine was asked to close and its resources are still owned. Rust
     /// wait: JS `engine.close()` returns immediately; this actor waits for the
-    /// connection future and channels to finish before opening a successor.
+    /// engine task and channels to finish before opening a successor.
     Closing {
         /// Whether the next engine waits for the backoff delay, unlike
         /// `skipReconnect`.

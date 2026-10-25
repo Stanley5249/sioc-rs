@@ -5,7 +5,7 @@ pub mod engine;
 pub mod error;
 pub mod packet;
 mod polling;
-pub mod transport;
+mod transport;
 mod websocket;
 
 /// The Engine.IO protocol version implemented by this crate (`EIO` query

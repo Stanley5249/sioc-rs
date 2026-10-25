@@ -1,15 +1,53 @@
-//! Engine.IO protocol task.
+//! The Engine.IO session, like engine.io-client's `Socket`.
 //!
-//! [`session`] runs one session: the `protocol` loops beside the transport,
-//! with a `heartbeat` deadline on server pings.
+//! [`open`] spawns one task per session. Inside it, `EngineCore` owns every
+//! session rule and never awaits, and `actor::run` carries data between four
+//! bounded channels and polls the transport future, which owns its own I/O,
+//! concurrency, and upgrade:
+//!
+//! ```text
+//!  manager --Message---------> run --ClientFrame--> transport (polling, websocket)
+//!  manager <--ServerMessage--- run <--ServerFrame-- transport
+//!                               |
+//!                          EngineCore
+//! ```
+//!
+//! Invariants:
+//!
+//! - Each direction takes its destination's permit before it reads, except
+//!   server frames, which are read first so pings ahead of the next message are
+//!   answered while the manager is full. That frame's message is the one item
+//!   the task holds, and no frame is read until it is delivered. A ping behind
+//!   an undelivered message waits, so a manager that stalls for a whole ping
+//!   window times the session out.
+//! - The deadline is its own branch, so it fires while either direction waits
+//!   for capacity.
+//! - Messages sent before the handshake wait in the transport channel, like
+//!   `writeBuffer`, because a transport reads that channel only after the
+//!   handshake.
+//! - The transport checks that the first frame is Open, and ends the server
+//!   direction at the server's Close packet, which `ServerFrame` cannot hold.
+//!   `ClientFrame` holds only what the engine sends, because the transport owns
+//!   Close, Upgrade, and the probe. The end of a channel is the only close
+//!   signal.
+//! - No wait cycle: the manager and this task each serve their inputs from one
+//!   `select!` and never await in a handler, and the transport runs each
+//!   direction on its own loop. When the transport ends the server direction,
+//!   the task drops its transport sender, which the transport waits for. The
+//!   task drops its manager sender before it waits for the manager to hang up,
+//!   which the manager does at that end.
+//! - Only a peer end delivers the last message. A local close or a failure
+//!   discards it, and a cancelled opening or a failure drops the transport
+//!   future, because the server has no session yet or no longer answers.
 //!
 //! JavaScript reference: [engine.io-client 6.6.7's `Socket`].
 //!
 //! [engine.io-client 6.6.7's `Socket`]: https://github.com/socketio/socket.io/blob/11a6f561a757264c3231c3383c4cdbf37bcf52de/packages/engine.io-client/lib/socket.ts
 
-mod heartbeat;
-mod protocol;
-pub mod session;
+mod actor;
+mod state;
 
 #[cfg(test)]
 mod tests;
+
+pub use actor::{Engine, EngineOptions, open};

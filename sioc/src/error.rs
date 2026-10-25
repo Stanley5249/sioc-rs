@@ -364,7 +364,6 @@ impl ManagerError {
 #[cfg(test)]
 mod tests {
     use eioc::error::EngineError;
-    use tokio::sync::mpsc;
 
     use super::*;
 
@@ -384,9 +383,7 @@ mod tests {
     #[test]
     fn manager_error_channel_failures_are_internal() {
         let errors = [
-            ManagerError::Engine(
-                EngineError::ClientFrame(mpsc::error::SendError(Bytes::new().into())).into(),
-            ),
+            ManagerError::Engine(EngineError::ServerMessageClosed.into()),
             ManagerError::EngineEnded,
         ];
         for error in errors {
