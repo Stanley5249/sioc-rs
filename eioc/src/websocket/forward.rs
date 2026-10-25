@@ -9,20 +9,28 @@ use tokio_util::sync::CancellationToken;
 
 use crate::connector::WebSocketStream;
 use crate::error::{TransportError, WebSocketError};
-use crate::packet::{Frame, Packet};
+use crate::packet::Packet;
+use crate::transport::{ClientFrame, ServerFrame};
 
-/// Forwards server frames to the engine until the stream ends.
+/// Forwards server frames to the engine until the server's Close packet or
+/// the end of the stream.
 ///
 /// Returning drops `server_frame_tx`, which tells the engine the transport has
 /// finished.
 pub async fn forward_server_frames(
     mut stream: SplitStream<WebSocketStream>,
-    server_frame_tx: mpsc::Sender<Frame>,
+    server_frame_tx: mpsc::Sender<ServerFrame>,
     stream_closed: CancellationToken,
 ) -> Result<(), TransportError> {
     let _guard = stream_closed.drop_guard();
 
     while let Some(frame) = crate::websocket::message::next_frame(&mut stream).await? {
+        let Some(frame) = ServerFrame::from_frame(frame) else {
+            tracing::debug!("server closed");
+
+            return Ok(());
+        };
+
         server_frame_tx.send(frame).await?;
     }
 
@@ -38,7 +46,7 @@ pub async fn forward_server_frames(
 /// `client_frame_rx`, because the closed socket cannot send them.
 pub async fn forward_client_frames(
     mut sink: SplitSink<WebSocketStream, WebSocketMessage>,
-    mut client_frame_rx: mpsc::Receiver<Frame>,
+    mut client_frame_rx: mpsc::Receiver<ClientFrame>,
     stream_closed: CancellationToken,
 ) -> Result<(), TransportError> {
     loop {
@@ -53,7 +61,7 @@ pub async fn forward_client_frames(
                     break;
                 };
 
-                let message = crate::websocket::message::encode_frame(frame);
+                let message = crate::websocket::message::encode_frame(frame.into());
                 if !finish_write(sink.send(message).await)? {
                     break;
                 }

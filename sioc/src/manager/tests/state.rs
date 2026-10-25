@@ -51,6 +51,22 @@ fn connect_goes_first_and_events_keep_order_per_namespace() {
 }
 
 #[test]
+fn connect_waits_for_the_engine_handshake() {
+    let mut rig = Rig::new();
+    rig.connect("/", "{}", 32);
+    rig.effects();
+
+    // Like `Socket.connect` waiting for the manager's "open" event, nothing
+    // reaches an engine whose handshake has not completed.
+    assert_eq!(rig.messages(), Vec::<String>::new());
+    rig.connect("/a", "{}", 32);
+    assert_eq!(rig.messages(), Vec::<String>::new());
+
+    rig.handshake();
+    assert_eq!(rig.messages(), ["0{}", "0/a,{}"]);
+}
+
+#[test]
 fn a_packet_in_flight_holds_back_every_namespace() {
     let mut rig = Rig::new();
     rig.connected("/");

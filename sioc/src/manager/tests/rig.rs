@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use bytestring::ByteString;
-use eioc::prelude::{Handshake, Message, ServerMessage};
+use eioc::prelude::{ClientMessage, Handshake, ServerMessage};
 use tokio::sync::oneshot;
 
 use crate::manager::backoff::Backoff;
@@ -76,8 +76,8 @@ impl Rig {
         while self.core.has_message() {
             let message = self.core.next_message().expect("has_message promised one");
             messages.push(match message {
-                Message::Text(text) => text.to_string(),
-                Message::Binary(bytes) => format!("bin:{}", String::from_utf8_lossy(&bytes)),
+                ClientMessage::Text(text) => text.to_string(),
+                ClientMessage::Binary(bytes) => format!("bin:{}", String::from_utf8_lossy(&bytes)),
             });
         }
         messages

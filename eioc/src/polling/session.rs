@@ -1,14 +1,15 @@
 //! One polling session, from the handshake to the end or an upgrade.
 
 use reqwest::Client;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use url::Url;
 
 use crate::connector::WebSocketConnector;
 use crate::error::TransportError;
-use crate::packet::{Frame, Handshake, Packet};
+use crate::packet::{Frame, Packet};
+use crate::transport::{ClientFrame, ServerFrame};
 
 /// Runs the full polling transport lifecycle: handshake, GET/POST loops, and
 /// optional WebSocket upgrade.
@@ -30,9 +31,8 @@ pub async fn run<C>(
     client: Client,
     base_url: Url,
     connector: C,
-    handshake_tx: oneshot::Sender<Handshake>,
-    server_frame_tx: mpsc::Sender<Frame>,
-    mut client_frame_rx: mpsc::Receiver<Frame>,
+    server_frame_tx: mpsc::Sender<ServerFrame>,
+    mut client_frame_rx: mpsc::Receiver<ClientFrame>,
 ) -> Result<(), TransportError>
 where
     C: WebSocketConnector,
@@ -50,9 +50,8 @@ where
     let first = frames
         .next()
         .expect("a decoded payload holds at least one frame");
-    let handshake = match first {
-        Frame::Packet(Packet::Open(handshake)) => handshake,
-        frame => return Err(TransportError::Open(frame)),
+    let Frame::Packet(Packet::Open(handshake)) = &first else {
+        return Err(TransportError::Open(first));
     };
 
     url.query_pairs_mut().append_pair("sid", &handshake.sid);
@@ -60,10 +59,7 @@ where
     let sid = handshake.sid.clone();
     let max_payload = handshake.max_payload;
 
-    handshake_tx
-        .send(handshake)
-        .map_err(TransportError::Handshake)?;
-
+    let frames = std::iter::once(first).chain(frames);
     let stream = if crate::polling::forward::send_server_frames(frames, &server_frame_tx).await? {
         None
     } else if can_upgrade {
@@ -95,7 +91,7 @@ where
     if let Some(stream) = stream {
         tracing::debug!("paused polling transport");
 
-        return crate::websocket::session::run(stream, None, server_frame_tx, client_frame_rx)
+        return crate::websocket::session::run(stream, false, server_frame_tx, client_frame_rx)
             .await;
     }
 

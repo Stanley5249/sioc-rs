@@ -4,23 +4,29 @@ Mistakes this project already made and approaches the project rejected, each wit
 
 Write each entry in one or two sentences: what went wrong or was rejected, then what replaced it and why. Name behavior and symptoms, and leave private type and field names to the module docs. Keep the entries of one area in a tight list.
 
+Each section covers one area or component. A rejected approach records why it failed there, not a ban elsewhere. Entries under Async and shutdown hold for every component.
+
 ## Async and shutdown
 
-- Actor select handlers apply I/O results synchronously and yield only protocol inputs. A separate step enum and interpreter repeated outcomes the handlers had already decided.
-- After a packet input, the actor hands off the message the core produced. Recomputing the read policy in the actor repeated a decision the core had already made.
-- A cancelled output reservation is restarted, because the engine is the channel's only writer. Storing the pending future separately added state without another responsibility.
-- One owner closes admission, drains the incoming direction, and collects the result, for normal closure, failure, and shutdown alike. Cancelling an opening drops its future, because a handshake may have no deadline.
-- Packet selection keeps its output permit until the event is handed off. A readiness snapshot let engine polling revoke the permit after the event left its inbox, so cleanup discarded an unsent event.
-- A local cancel of an opening drops the connection future, but a peer-side failure keeps polling it after closing admission, so the original error survives.
-- Peer closure processes the final control packets and discards later overflow, and local closure discards unread messages. Cleanup never waits for application capacity.
 - A loop never awaits a send while it has other inputs to serve. One loop that served both directions stalled the heartbeat and deadlocked the engine and the manager once both inboxes filled, and the same loop deadlocked a caller that emits while handling events under a server flood.
 - After a failure, the failing side keeps accepting input until the other side hangs up. Stopping at once made the other side fail with a closed-channel error, which replaced the root error.
 - The end of a channel is the only close signal between tasks. Forwarding the Engine.IO `Close` packet as well gave two signals for one state, so every side had to handle both.
 - Channels the server can fill are bounded, because an unbounded control channel queued a message for every repeated CONNECT or unknown DISCONNECT, so a server could grow it without limit.
+
+## Manager actor
+
+- Actor select handlers apply I/O results synchronously and yield only protocol inputs. A separate step enum and interpreter repeated outcomes the handlers had already decided.
+- After a packet input, the actor hands off the message the core produced. Recomputing the read policy in the actor repeated a decision the core had already made.
+- A cancelled output reservation is restarted, because the engine is the channel's only writer. Storing the pending future separately added state without another responsibility.
+- One owner closes admission, drains the incoming direction, and collects the result, for normal closure, failure, and shutdown alike.
+- Packet selection keeps its output permit until the event is handed off. A readiness snapshot let engine polling revoke the permit after the event left its inbox, so cleanup discarded an unsent event.
+- The core sends nothing before the engine's handshake, like `Socket.connect` waiting for the manager's `"open"` event, so closing admission also ends an opening. Sending CONNECT before Open filled the transport channel while the transport could not read it yet, so the engine never saw the manager hang up, and the manager had to abort the task by tracking whether Open had arrived.
+- When the engine ends first, the manager still processes its final control packets and discards later overflow. When the manager closes the engine, it discards unread messages. Cleanup never waits for application capacity.
 - One task owns the manager's state, and a synchronous core decides every transition. Two loops that shared namespace state behind a `Mutex` each saw half of every transition, which needed a three-step confirmation state and an unbounded event channel between them.
 - A namespace's channel is its only send buffer, and the actor reads it only when the packet can go to the engine at once. Reading every packet into a second buffer in the core needed a semaphore to bound it, a disconnecting state to flush it, and per-event ack bookkeeping, and hiding the channel until the buffer had room hid its end, so an unconfirmed namespace never closed.
 - A server packet held for a full receiver never hides the engine's hang-up. The actor kept sending events into a session that only drained, which lost them, and an empty closed server direction blocked the engine's cleanup.
 - Every sender of a namespace's channel is a `SocketSender`, whose `DropGuard` cancels the token when the last one drops. The actor leaves an unconfirmed channel unread, so a raw sender dropped without the token left the namespace open forever.
+- The engine task's own error always becomes the session result, and success before the manager closed admission is the only internal error. Replacing the result whenever the engine ended while admission was open hid the engine's real failure, and a separate state that remembered which side stopped first only classified an engine that broke its own contract.
 - Rejected: one input channel shared by all sources. The shared channel loses per-namespace EOF and backpressure, starves control behind data, and needs a forwarding task for engine messages.
 - Rejected: generation counters or incarnation ids to tell old work from new. Old work is isolated by ownership and finished cleanup instead.
 
@@ -70,6 +76,16 @@ Write each entry in one or two sentences: what went wrong or was rejected, then 
 - A failed WebSocket upgrade falls back to long polling. Failing the session on upgrade errors dropped connections that polling could serve.
 - Out-of-place Open, Pong, and Upgrade packets are logged and ignored, like the JS client. Failing the session on them was stricter than the JS client and ended working sessions.
 - Packets batched after the polling handshake reach the engine. They were dropped, but engine.io-client decodes the handshake response as a payload, so a server may batch packets after Open.
+- A synchronous core decides the session rules, and the engine task only moves items between bounded channels. The two protocol loops that awaited each send could not answer the heartbeat deadline while blocked on a full manager channel, so a stalled manager kept the session open forever.
+- The engine reads a server frame before it holds a manager permit and keeps only that frame's message, so pings ahead of the next message are answered while the manager is full. A ping behind an undelivered message still waits, so a manager that stalls for a whole ping window times the session out.
+- The transport stays its own future behind bounded channels, and the engine polls it by reference. Folding the polling and WebSocket loops into the engine task was rejected, because it moved transport concurrency and the upgrade into the engine and let unrelated branches cancel a request in flight.
+- The boundary channels carry `ServerFrame` and `ClientFrame`, which cannot hold Close, Upgrade, or the probe, so the transport owns those packets by type. A shared `Frame` channel let the engine receive Close and needed a runtime check.
+- The handshake travels as the first server frame. A separate oneshot gave an opening a second end signal beside the channel's end.
+- When the manager hangs up, the engine discards the message waiting for it, because the manager no longer reads. When the transport ends or the deadline fails, the message already received is still delivered.
+- A WebSocket local close sends the Close packet and a close frame without waiting for the server's reply, like the JS client. Waiting let a silent server hold the close open.
+- The session state says only whether the session is opening, open, or closed, a deadline failure returns as an `Err`, and the task keeps the first failure in one `Result` during cleanup. A close reason that also stored the failure needed a separate step to extract it and mixed who closed the session with how it ended.
+- A closed session has no deadline, and the transport bounds its own close, which for polling means the HTTP client's timeout. Reusing the last ping window for a normal close reported a heartbeat timeout that never happened.
+- A hang-up during opening drops the transport, because the server holds no session yet, and the engine reads that from the session state instead of a close reason. Waiting for the handshake instead held a cancelled opening open when the handshake had no deadline.
 
 ## Configuration
 

@@ -3,9 +3,10 @@
 use std::time::Duration;
 
 use bytestring::ByteString;
-use eioc::prelude::{Handshake, Message, ServerMessage};
+use eioc::prelude::{ClientMessage, Handshake, ServerMessage};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::client::{SocketReceiver, SocketSender};
 use crate::config::ChannelConfig;
@@ -19,7 +20,7 @@ pub const CONNECT_RESPONSE: &str = "0{\"sid\":\"test\"}";
 /// The engine end of one session, which a test plays.
 pub struct TestSession {
     pub server_message_tx: mpsc::Sender<ServerMessage>,
-    pub client_message_rx: mpsc::Receiver<Message>,
+    pub client_message_rx: mpsc::Receiver<ClientMessage>,
     /// Finishes the engine; dropping it finishes the engine without an error.
     pub result_tx: oneshot::Sender<Result<(), eioc::error::Error>>,
 }
@@ -29,7 +30,7 @@ impl TestSession {
     /// takes client messages until the manager hangs up, then finishes.
     ///
     /// Returns the client messages that were still queued.
-    pub async fn end(self) -> Vec<Message> {
+    pub async fn close(self) -> Vec<ClientMessage> {
         let Self {
             server_message_tx,
             mut client_message_rx,
@@ -88,14 +89,10 @@ impl TestManager {
     pub async fn spawn_with_channels(backoff: Option<Backoff>, channels: ChannelConfig) -> Self {
         let (connect_request_tx, connect_request_rx) = mpsc::channel(32);
         let (session_tx, mut session_rx) = mpsc::channel(1);
-        let connect_engine = move |server_message_tx, client_message_rx| {
-            let session_tx = session_tx.clone();
-            run_session(server_message_tx, client_message_rx, session_tx)
-        };
+        let connect_engine = move || spawn_session(channels, session_tx.clone());
         let task = tokio::spawn(crate::manager::actor::run(
             connect_request_rx,
             connect_engine,
-            channels,
             backoff,
         ));
         let session = session_rx.recv().await;
@@ -143,7 +140,7 @@ impl TestManager {
 
     pub async fn recv_client_text(&mut self) -> ByteString {
         match self.session().client_message_rx.recv().await {
-            Some(Message::Text(text)) => text,
+            Some(ClientMessage::Text(text)) => text,
             other => panic!("expected text, got {other:?}"),
         }
     }
@@ -153,7 +150,7 @@ impl TestManager {
     ///
     /// A manager that stops instead of reconnecting ends with the session; one
     /// that reconnects ends once its namespaces are gone.
-    pub async fn finish(self) -> Result<(), ManagerError> {
+    pub async fn join(self) -> Result<(), ManagerError> {
         let Self {
             connect_request_tx,
             session,
@@ -162,9 +159,29 @@ impl TestManager {
         } = self;
         drop(connect_request_tx);
         if let Some(session) = session {
-            session.end().await;
+            session.close().await;
         }
         task.await.unwrap()
+    }
+}
+
+/// Starts a fake engine task with the channel capacities the client gives a
+/// real one.
+pub fn spawn_session(
+    channels: ChannelConfig,
+    session_tx: mpsc::Sender<TestSession>,
+) -> eioc::engine::Engine {
+    let (server_message_tx, server_message_rx) = mpsc::channel(channels.manager);
+    let (client_message_tx, client_message_rx) = mpsc::channel(channels.engine);
+    let task = tokio::spawn(run_session(
+        server_message_tx,
+        client_message_rx,
+        session_tx,
+    ));
+    eioc::engine::Engine {
+        client_message_tx,
+        server_message_rx,
+        task: AbortOnDropHandle::new(task),
     }
 }
 
@@ -173,7 +190,7 @@ impl TestManager {
 /// as the real protocol drops its server sender before draining client input.
 pub async fn run_session(
     server_message_tx: mpsc::Sender<ServerMessage>,
-    client_message_rx: mpsc::Receiver<Message>,
+    client_message_rx: mpsc::Receiver<ClientMessage>,
     session_tx: mpsc::Sender<TestSession>,
 ) -> Result<(), eioc::error::Error> {
     let (peer_tx, mut peer_rx) = mpsc::channel(32);

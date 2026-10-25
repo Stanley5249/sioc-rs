@@ -18,8 +18,9 @@ pub fn bytestring_from_utf8_bytes(utf8: Utf8Bytes) -> ByteString {
 
 /// Reads the next frame, skipping WebSocket control messages.
 ///
-/// Returns `None` at the server's `Close` packet or the peer's close frame,
-/// so the transport stops before it sends into a closing socket.
+/// Returns `None` at the peer's close frame or the end of the stream. The
+/// server's Close packet is returned like any other frame, for the caller to
+/// end its direction.
 pub async fn next_frame<S>(stream: &mut S) -> Result<Option<Frame>, WebSocketError>
 where
     S: Stream<Item = Result<WebSocketMessage, TungsteniteError>> + Unpin,
@@ -31,14 +32,7 @@ where
 
                 let bytes = bytestring_from_utf8_bytes(text);
 
-                return match Packet::decode(&bytes)? {
-                    Packet::Close => {
-                        tracing::debug!("server closed");
-
-                        Ok(None)
-                    }
-                    packet => Ok(Some(Frame::Packet(packet))),
-                };
+                return Ok(Some(Frame::Packet(Packet::decode(&bytes)?)));
             }
             WebSocketMessage::Binary(binary) => {
                 tracing::trace!(bytes = binary.len(), "received binary frame");

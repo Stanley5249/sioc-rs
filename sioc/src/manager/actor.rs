@@ -2,15 +2,12 @@
 //! and the channels of every namespace's handles. It turns what they yield
 //! into [`ManagerInput`]s and carries out the [`ManagerOutput`]s.
 
-use std::future::{Future, poll_fn};
+use std::future::poll_fn;
 use std::pin::Pin;
 
-use eioc::prelude::{Message, ServerMessage};
 use tokio::sync::mpsc;
 use tokio::time::Sleep;
-use tracing::Instrument;
 
-use crate::config::ChannelConfig;
 use crate::error::ManagerError;
 use crate::manager::backoff::Backoff;
 use crate::manager::connect_request::ConnectRequest;
@@ -24,15 +21,13 @@ use crate::manager::state::{ManagerCore, ManagerInput, ManagerOutput};
 /// # Errors
 ///
 /// Returns an internal error, which is a library bug.
-pub async fn run<F, Fut>(
+pub async fn run<F>(
     connect_request_rx: mpsc::Receiver<ConnectRequest>,
     connect_engine: F,
-    channels: ChannelConfig,
     backoff: Option<Backoff>,
 ) -> Result<(), ManagerError>
 where
-    F: FnMut(mpsc::Sender<ServerMessage>, mpsc::Receiver<Message>) -> Fut,
-    Fut: Future<Output = Result<(), eioc::error::Error>>,
+    F: FnMut() -> eioc::engine::Engine,
 {
     let mut actor = ManagerActor {
         core: ManagerCore::new(backoff, fastrand::Rng::new()),
@@ -42,17 +37,16 @@ where
         engine: None,
         sleep: None,
         connect_engine,
-        channels,
     };
 
     let result = actor.drive().await;
-    actor.finish(result.is_err()).await;
+    actor.shutdown(result.is_err()).await;
     result
 }
 
 /// The one owner of the manager's I/O. Rust channel: the JS `Manager` is
 /// called directly, while here every source is a channel this task reads.
-struct ManagerActor<F, Fut> {
+struct ManagerActor<F> {
     /// The manager's state, like the fields of `Manager`.
     core: ManagerCore,
     /// Requests of [`Client::connect`](crate::client::Client::connect), like
@@ -65,19 +59,17 @@ struct ManagerActor<F, Fut> {
     /// together take turns. Rust wait: JS writes each packet at once.
     next_namespace_input: usize,
     /// The running engine, like `Manager.engine`.
-    engine: Option<Engine<Fut>>,
+    engine: Option<Engine>,
     /// The reconnection delay, like the timer in `Manager.reconnect`.
     sleep: Option<Pin<Box<Sleep>>>,
-    /// Starts one engine, like the `Engine` constructor in `Manager.open`.
+    /// Starts one engine with new channels, like the `Engine` constructor in
+    /// `Manager.open`.
     connect_engine: F,
-    /// The channel capacities, like the `opts` of `Manager`.
-    channels: ChannelConfig,
 }
 
-impl<F, Fut> ManagerActor<F, Fut>
+impl<F> ManagerActor<F>
 where
-    F: FnMut(mpsc::Sender<ServerMessage>, mpsc::Receiver<Message>) -> Fut,
-    Fut: Future<Output = Result<(), eioc::error::Error>>,
+    F: FnMut() -> eioc::engine::Engine,
 {
     /// Feeds the core until the client and every namespace are gone, or the
     /// core reports an internal error.
@@ -150,12 +142,7 @@ where
             "the core opens an engine only after the last one closed"
         );
 
-        let (server_message_tx, server_message_rx) = mpsc::channel(self.channels.manager);
-        let (client_message_tx, client_message_rx) = mpsc::channel(self.channels.engine);
-        let future = (self.connect_engine)(server_message_tx, client_message_rx)
-            .instrument(tracing::info_span!("engine"));
-
-        self.engine = Some(Engine::new(future, client_message_tx, server_message_rx));
+        self.engine = Some(Engine::new((self.connect_engine)()));
     }
 
     /// Sends one waiting message on the held permit, like `engine.write`.
@@ -245,11 +232,11 @@ where
                 } else {
                     ManagerInput::Message(message)
                 }),
-                EngineStep::Closed(result) => {
+                EngineStep::Closed => {
                     // Complete session reclamation before the core can open
                     // its successor. Persistent event inboxes stay owned here.
                     client_message_permit = None;
-                    *engine = None;
+                    let result = engine.take().expect("the guard checked the engine").into_result();
                     for buffer in namespace_inputs {
                         buffer.ack_packet_rx = None;
                     }
@@ -278,24 +265,20 @@ where
 
     /// Releases every resource. After an internal error, ends every namespace
     /// without waiting for the application: dropping the channels fails
-    /// blocked sends. Then finishes the engine, reading what the server still
-    /// sends, so it never sees a failed send.
-    async fn finish(mut self, failed: bool) {
+    /// blocked sends. Then closes the engine and waits for its task, reading
+    /// what the server still sends, so it never sees a failed send.
+    async fn shutdown(mut self, failed: bool) {
         self.connect_request_rx = None;
         self.namespace_inputs.clear();
         if failed {
             self.core.shutdown();
         }
         tracing::debug!("client ended");
-        if let Some(engine) = &mut self.engine {
+        if let Some(mut engine) = self.engine.take() {
             engine.close(Drain::Discard);
-            loop {
-                if let EngineStep::Closed(result) = engine.next(false, false).await {
-                    if let Err(error) = result {
-                        tracing::warn!(%error, "engine failed");
-                    }
-                    break;
-                }
+            while !matches!(engine.next(false, false).await, EngineStep::Closed) {}
+            if let Err(error) = engine.into_result() {
+                tracing::warn!(%error, "engine failed");
             }
         }
     }

@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use bytestring::ByteString;
-use eioc::prelude::{Message, ServerMessage};
+use eioc::prelude::{ClientMessage, ServerMessage};
 use tokio::sync::mpsc;
 
 use super::harness::*;
@@ -46,14 +46,10 @@ async fn emits_while_handling_a_server_flood() {
 
     let (connect_request_tx, connect_request_rx) = mpsc::channel(4);
     let (session_tx, mut session_rx) = mpsc::channel(1);
-    let connect_engine = move |server_message_tx, client_message_rx| {
-        let session_tx = session_tx.clone();
-        run_session(server_message_tx, client_message_rx, session_tx)
-    };
+    let connect_engine = move || spawn_session(ChannelConfig::from(2), session_tx.clone());
     let task = tokio::spawn(crate::manager::actor::run(
         connect_request_rx,
         connect_engine,
-        ChannelConfig::from(2),
         None,
     ));
     let TestSession {
@@ -72,7 +68,7 @@ async fn emits_while_handling_a_server_flood() {
         let mut events = 0;
         while events < FLOOD {
             match client_message_rx.recv().await {
-                Some(Message::Text(text)) if text.starts_with('2') => events += 1,
+                Some(ClientMessage::Text(text)) if text.starts_with('2') => events += 1,
                 Some(_) => {}
                 None => panic!("the manager closed the engine during the flood"),
             }
@@ -209,7 +205,7 @@ async fn unconfirmed_namespace_applies_backpressure_and_flushes_in_order() {
     sent.unwrap();
     assert!(matches!(rx.recv().await, Some(ServerPacket::Connect(_))));
     tx.disconnect();
-    manager.finish().await.unwrap();
+    manager.join().await.unwrap();
 }
 
 #[tokio::test(start_paused = true)]
@@ -238,7 +234,7 @@ async fn full_unconfirmed_buffer_does_not_block_other_namespaces() {
     tx.disconnect();
     assert!(matches!(pending.await, Err(SocketError::Closed)));
     other_tx.disconnect();
-    manager.finish().await.unwrap();
+    manager.join().await.unwrap();
 }
 
 #[tokio::test(start_paused = true)]
@@ -249,7 +245,7 @@ async fn dropping_last_sender_releases_a_full_unconfirmed_buffer() {
         tx.send(event(r#"["queued"]"#, None)).await.unwrap();
     }
     drop(tx);
-    tokio::time::timeout(Duration::from_secs(1), manager.finish())
+    tokio::time::timeout(Duration::from_secs(1), manager.join())
         .await
         .expect("dropping the final sender releases buffered work")
         .unwrap();

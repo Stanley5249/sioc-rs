@@ -3,7 +3,7 @@
 use std::future::Future;
 
 use bytestring::ByteString;
-use eioc::prelude::Message;
+use eioc::prelude::ClientMessage;
 use futures_util::FutureExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -135,7 +135,7 @@ async fn queued_and_blocked_replies_end_with_their_engine_while_events_survive()
                 .await
                 .is_pending()
         );
-        let messages = within("old engine EOF", old.end()).await;
+        let messages = within("old engine EOF", old.close()).await;
         within("blocked ACK released", blocked).await.unwrap();
         messages
     };
@@ -152,7 +152,7 @@ async fn queued_and_blocked_replies_end_with_their_engine_while_events_survive()
         .iter()
         .filter(|message| {
             matches!(message,
-                Message::Text(text) if text == r#"2["queued"]"#
+                ClientMessage::Text(text) if text == r#"2["queued"]"#
             )
         })
         .count();
@@ -177,7 +177,7 @@ async fn queued_and_blocked_replies_end_with_their_engine_while_events_survive()
     tx.send(ack(1000)).await.unwrap();
     assert_eq!(&*manager.recv_client_text().await, "31000[]");
     tx.disconnect();
-    within("final manager cleanup", manager.finish())
+    within("final manager cleanup", manager.join())
         .await
         .unwrap();
 }
@@ -193,13 +193,13 @@ async fn replies_while_unconfirmed_are_discarded_instead_of_buffered() {
         tx.send(event(r#"["confirmed"]"#, None)).await.unwrap();
         assert_eq!(&*manager.recv_client_text().await, r#"2["confirmed"]"#);
         if id == 1 {
-            manager.session.take().unwrap().end().await;
+            manager.session.take().unwrap().close().await;
             manager.session = manager.session_rx.recv().await;
             assert!(manager.recv_client_text().await.starts_with('0'));
         }
     }
     tx.disconnect();
-    manager.finish().await.unwrap();
+    manager.join().await.unwrap();
 }
 
 #[tokio::test]
@@ -225,7 +225,7 @@ async fn local_disconnect_drains_replies_before_releasing_the_name() {
     let text: Vec<_> = messages
         .into_iter()
         .map(|message| {
-            let Message::Text(text) = message else {
+            let ClientMessage::Text(text) = message else {
                 panic!("these packets have no binary attachments");
             };
             text
@@ -234,7 +234,7 @@ async fn local_disconnect_drains_replies_before_releasing_the_name() {
     assert_eq!(text.last().map(|text| &**text), Some("1"));
     assert!(text.iter().any(|text| text == "37[]"));
     assert!(text.iter().any(|text| text == r#"2["last"]"#));
-    manager.finish().await.unwrap();
+    manager.join().await.unwrap();
 }
 
 async fn within<T>(stage: &str, future: impl Future<Output = T>) -> T {

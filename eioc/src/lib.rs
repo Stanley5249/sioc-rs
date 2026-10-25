@@ -5,7 +5,7 @@ pub mod engine;
 pub mod error;
 pub mod packet;
 mod polling;
-pub mod transport;
+mod transport;
 mod websocket;
 
 /// The Engine.IO protocol version implemented by this crate (`EIO` query
@@ -15,6 +15,6 @@ pub const ENGINE_IO_VERSION: &str = "4";
 /// Convenience re-exports for common usage.
 pub mod prelude {
     pub use crate::connector::{WebSocketConnector, WebSocketStream};
-    pub use crate::packet::{Frame, Handshake, Message, Packet, ServerMessage};
+    pub use crate::packet::{ClientMessage, Frame, Handshake, Packet, ServerMessage};
     pub use crate::transport::TransportStrategy;
 }

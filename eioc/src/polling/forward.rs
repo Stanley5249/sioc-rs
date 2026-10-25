@@ -11,6 +11,7 @@ use url::Url;
 use crate::connector::WebSocketStream;
 use crate::error::{TransportError, WebSocketError};
 use crate::packet::{Frame, Packet};
+use crate::transport::{ClientFrame, ServerFrame};
 
 /// Why a polling loop stopped.
 pub enum Stop {
@@ -33,7 +34,7 @@ pub enum Stop {
 pub async fn forward_client_frames(
     client: &Client,
     url: &Url,
-    client_frame_rx: &mut mpsc::Receiver<Frame>,
+    client_frame_rx: &mut mpsc::Receiver<ClientFrame>,
     pause: &CancellationToken,
     max_payload: u64,
 ) -> Result<Stop, TransportError> {
@@ -49,7 +50,7 @@ pub async fn forward_client_frames(
                     tracing::debug!("paused polling post");
                     return Ok(Stop::Paused);
                 }
-                frame = client_frame_rx.recv() => frame,
+                frame = client_frame_rx.recv() => frame.map(Frame::from),
             }
         };
 
@@ -67,7 +68,7 @@ pub async fn forward_client_frames(
             if pause.is_cancelled() {
                 None
             } else {
-                client_frame_rx.try_recv().ok()
+                client_frame_rx.try_recv().ok().map(Frame::from)
             }
         });
         let (buffer, remainder) = crate::polling::payload::take_batch(first, ready, max_payload);
@@ -84,14 +85,14 @@ pub async fn forward_client_frames(
 /// what tells the engine the session is over.
 pub async fn send_server_frames(
     frames: impl IntoIterator<Item = Frame>,
-    server_frame_tx: &mpsc::Sender<Frame>,
+    server_frame_tx: &mpsc::Sender<ServerFrame>,
 ) -> Result<bool, TransportError> {
     for frame in frames {
-        if frame == Frame::Packet(Packet::Close) {
+        let Some(frame) = ServerFrame::from_frame(frame) else {
             tracing::debug!("server closed");
 
             return Ok(true);
-        }
+        };
 
         server_frame_tx.send(frame).await?;
     }
@@ -105,7 +106,7 @@ pub async fn send_server_frames(
 pub async fn forward_server_frames(
     client: &Client,
     url: &Url,
-    server_frame_tx: &mpsc::Sender<Frame>,
+    server_frame_tx: &mpsc::Sender<ServerFrame>,
     pause: &CancellationToken,
 ) -> Result<Stop, TransportError> {
     // Pause only between requests, because the server answers the GET in
@@ -127,8 +128,8 @@ pub async fn forward_server_frames(
 pub async fn forward_frames(
     client: &Client,
     url: &Url,
-    server_frame_tx: &mpsc::Sender<Frame>,
-    client_frame_rx: &mut mpsc::Receiver<Frame>,
+    server_frame_tx: &mpsc::Sender<ServerFrame>,
+    client_frame_rx: &mut mpsc::Receiver<ClientFrame>,
     pause: &CancellationToken,
     max_payload: u64,
 ) -> Result<Stop, TransportError> {
@@ -163,8 +164,8 @@ pub async fn forward_frames(
 pub async fn forward_frames_until_upgrade(
     client: &Client,
     url: &Url,
-    server_frame_tx: &mpsc::Sender<Frame>,
-    client_frame_rx: &mut mpsc::Receiver<Frame>,
+    server_frame_tx: &mpsc::Sender<ServerFrame>,
+    client_frame_rx: &mut mpsc::Receiver<ClientFrame>,
     upgrade: impl Future<Output = Result<WebSocketStream, WebSocketError>>,
     max_payload: u64,
 ) -> Result<Option<WebSocketStream>, TransportError> {

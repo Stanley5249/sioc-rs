@@ -5,14 +5,14 @@ use std::time::Duration;
 use reqwest::Client;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::error::WebSocketError;
-use crate::packet::{Frame, Packet};
+use crate::error::{TransportError, WebSocketError};
 use crate::polling::forward::Stop;
+use crate::transport::{ClientFrame, ServerFrame};
 
 #[tokio::test]
 async fn forward_client_frames_respects_limit_and_closes_last() {
@@ -32,9 +32,7 @@ async fn forward_client_frames_respects_limit_and_closes_last() {
     });
     let (tx, mut rx) = mpsc::channel(4);
     for payload in ["aaaa", "bbbb", "cccc"] {
-        tx.send(Packet::Message(payload.into()).into())
-            .await
-            .unwrap();
+        tx.send(ClientFrame::Message(payload.into())).await.unwrap();
     }
     drop(tx);
     crate::polling::forward::forward_client_frames(
@@ -159,7 +157,7 @@ async fn forward_server_frames_finishes_get_in_flight_when_paused() {
     assert!(matches!(stop, Stop::Paused));
     assert!(matches!(
         server_frame_rx.recv().await.unwrap(),
-        Frame::Packet(Packet::Message(m)) if m == "data"
+        ServerFrame::Message(m) if m == "data"
     ));
 }
 
@@ -170,22 +168,23 @@ async fn transport_forwards_packets_batched_with_handshake() {
         "4data"
     )).await;
     server.respond.cancel();
-    let (handshake_tx, handshake_rx) = oneshot::channel();
     let (server_frame_tx, mut server_frame_rx) = mpsc::channel(4);
     let (_client_frame_tx, client_frame_rx) = mpsc::channel(4);
     let task = tokio::spawn(crate::polling::session::run(
         Client::new(),
         server.url.clone(),
         (),
-        handshake_tx,
         server_frame_tx,
         client_frame_rx,
     ));
 
-    assert_eq!(handshake_rx.await.unwrap().sid, "s");
     assert!(matches!(
         server_frame_rx.recv().await.unwrap(),
-        Frame::Packet(Packet::Message(m)) if m == "data"
+        ServerFrame::Open(handshake) if handshake.sid == "s"
+    ));
+    assert!(matches!(
+        server_frame_rx.recv().await.unwrap(),
+        ServerFrame::Message(m) if m == "data"
     ));
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
@@ -255,4 +254,24 @@ async fn failed_upgrade_falls_back_to_long_polling() {
     .unwrap();
     assert!(stream.is_none());
     server_frame_rx.try_recv().unwrap_err();
+}
+
+#[tokio::test]
+async fn transport_rejects_a_first_frame_other_than_open() {
+    let server = http_server("4data").await;
+    server.respond.cancel();
+    let (server_frame_tx, mut server_frame_rx) = mpsc::channel(4);
+    let (_client_frame_tx, client_frame_rx) = mpsc::channel(4);
+
+    let result = Box::pin(crate::polling::session::run(
+        Client::new(),
+        server.url.clone(),
+        (),
+        server_frame_tx,
+        client_frame_rx,
+    ))
+    .await;
+
+    assert!(matches!(result, Err(TransportError::Open(_))));
+    assert_eq!(server_frame_rx.recv().await, None);
 }

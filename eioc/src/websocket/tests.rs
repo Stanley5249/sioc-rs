@@ -3,14 +3,15 @@
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{Error as TungsteniteError, Message as WsMsg};
 use tokio_tungstenite::{MaybeTlsStream, accept_async, client_async};
 use tokio_util::sync::CancellationToken;
 
 use crate::connector::WebSocketStream;
 use crate::error::{TransportError, WebSocketError};
-use crate::packet::{Frame, Handshake, Packet};
+use crate::packet::{Frame, Packet};
+use crate::transport::{ClientFrame, ServerFrame};
 
 #[tokio::test]
 async fn next_frame_skips_control_messages() {
@@ -63,7 +64,7 @@ async fn forward_client_frames_drains_after_peer_close() {
     // reaches the writer. A queued frame must still finish gracefully.
     let (client_frame_tx, client_frame_rx) = mpsc::channel(1);
     client_frame_tx
-        .send(Packet::Message("late".into()).into())
+        .send(ClientFrame::Message("late".into()))
         .await
         .unwrap();
     drop(client_frame_tx);
@@ -118,15 +119,27 @@ async fn next_frame_ends_at_peer_close_frame() {
 }
 
 #[tokio::test]
-async fn next_frame_ends_at_close_packet() {
-    let (mut client, mut server) = ws_pair().await;
-    server.send(WsMsg::text("1")).await.unwrap();
-    assert!(
-        crate::websocket::message::next_frame(&mut client)
-            .await
-            .unwrap()
-            .is_none()
+async fn forward_server_frames_ends_at_close_packet() {
+    let (client, mut server) = ws_pair().await;
+    let (_sink, stream) = client.split();
+    for text in ["4before", "1", "4after"] {
+        server.send(WsMsg::text(text)).await.unwrap();
+    }
+    let (server_frame_tx, mut server_frame_rx) = mpsc::channel(4);
+
+    crate::websocket::forward::forward_server_frames(
+        stream,
+        server_frame_tx,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        server_frame_rx.recv().await,
+        Some(ServerFrame::Message("before".into()))
     );
+    assert_eq!(server_frame_rx.recv().await, None);
 }
 
 #[tokio::test]
@@ -206,8 +219,8 @@ async fn run_no_handshake_sends_upgrade() {
         while let Some(Ok(_)) = server.next().await {}
     });
     let (server_frame_tx, _) = mpsc::channel(4);
-    let (_, client_frame_rx) = mpsc::channel::<Frame>(4);
-    crate::websocket::session::run(client, None, server_frame_tx, client_frame_rx)
+    let (_, client_frame_rx) = mpsc::channel::<ClientFrame>(4);
+    crate::websocket::session::run(client, false, server_frame_tx, client_frame_rx)
         .await
         .unwrap();
     server_task.await.unwrap();
@@ -221,14 +234,17 @@ async fn run_with_handshake_reads_open_packet() {
         server.send(WsMsg::text(open_text)).await.unwrap();
         while let Some(Ok(_)) = server.next().await {}
     });
-    let (handshake_tx, handshake_rx) = oneshot::channel();
-    let (server_frame_tx, _) = mpsc::channel(4);
-    let (client_frame_tx, client_frame_rx) = mpsc::channel::<Frame>(4);
+    let (server_frame_tx, mut server_frame_rx) = mpsc::channel(4);
+    let (client_frame_tx, client_frame_rx) = mpsc::channel::<ClientFrame>(4);
     drop(client_frame_tx);
-    crate::websocket::session::run(client, Some(handshake_tx), server_frame_tx, client_frame_rx)
+    crate::websocket::session::run(client, true, server_frame_tx, client_frame_rx)
         .await
         .unwrap();
-    assert_eq!(&*handshake_rx.await.unwrap().sid, "abc");
+    assert!(matches!(
+        server_frame_rx.recv().await,
+        Some(ServerFrame::Open(handshake)) if handshake.sid == "abc"
+    ));
+    assert!(server_frame_rx.recv().await.is_none());
     server_task.await.unwrap();
 }
 
@@ -239,40 +255,28 @@ async fn run_with_handshake_non_open_is_error() {
         server.send(WsMsg::text("4hello")).await.unwrap();
         while let Some(Ok(_)) = server.next().await {}
     });
-    let (handshake_tx, _) = oneshot::channel();
-    let (server_frame_tx, _) = mpsc::channel(4);
-    let (_, client_frame_rx) = mpsc::channel::<Frame>(4);
-    let result = crate::websocket::session::run(
-        client,
-        Some(handshake_tx),
-        server_frame_tx,
-        client_frame_rx,
-    )
-    .await;
+    let (server_frame_tx, _server_frame_rx) = mpsc::channel(4);
+    let (_, client_frame_rx) = mpsc::channel::<ClientFrame>(4);
+    let result =
+        crate::websocket::session::run(client, true, server_frame_tx, client_frame_rx).await;
     assert!(matches!(result, Err(TransportError::Open(_))));
     let _ = server_task.await;
 }
 
 #[tokio::test]
-async fn run_with_handshake_dropped_receiver_is_error() {
+async fn run_with_handshake_dropped_engine_is_error() {
     let open_text = r#"0{"sid":"abc","upgrades":[],"pingInterval":25000,"pingTimeout":5000,"maxPayload":1000000}"#;
     let (client, mut server) = ws_pair().await;
     let server_task = tokio::spawn(async move {
         server.send(WsMsg::text(open_text)).await.unwrap();
         while let Some(Ok(_)) = server.next().await {}
     });
-    let (handshake_tx, handshake_rx) = oneshot::channel::<Handshake>();
-    drop(handshake_rx);
-    let (server_frame_tx, _) = mpsc::channel(4);
-    let (_, client_frame_rx) = mpsc::channel::<Frame>(4);
-    let result = crate::websocket::session::run(
-        client,
-        Some(handshake_tx),
-        server_frame_tx,
-        client_frame_rx,
-    )
-    .await;
-    assert!(matches!(result, Err(TransportError::Handshake(_))));
+    let (server_frame_tx, server_frame_rx) = mpsc::channel(4);
+    drop(server_frame_rx);
+    let (_, client_frame_rx) = mpsc::channel::<ClientFrame>(4);
+    let result =
+        crate::websocket::session::run(client, true, server_frame_tx, client_frame_rx).await;
+    assert!(matches!(result, Err(TransportError::ServerFrameClosed)));
     let _ = server_task.await;
 }
 
@@ -286,15 +290,15 @@ async fn run_forwards_server_frame_to_engine() {
         while let Some(Ok(_)) = server.next().await {}
     });
     let (server_frame_tx, mut server_frame_rx) = mpsc::channel(4);
-    let (client_frame_tx, client_frame_rx) = mpsc::channel::<Frame>(4);
+    let (client_frame_tx, client_frame_rx) = mpsc::channel::<ClientFrame>(4);
     let transport = tokio::spawn(crate::websocket::session::run(
         client,
-        None,
+        false,
         server_frame_tx,
         client_frame_rx,
     ));
     let action = server_frame_rx.recv().await.unwrap();
-    assert!(matches!(action, Frame::Packet(Packet::Message(m)) if m == "data"));
+    assert!(matches!(action, ServerFrame::Message(m) if m == "data"));
     drop(client_frame_tx);
     transport.await.unwrap().unwrap();
     server_task.await.unwrap();
@@ -309,16 +313,16 @@ async fn run_discards_client_frames_after_server_close() {
         while let Some(Ok(_)) = server.next().await {}
     });
     let (server_frame_tx, mut server_frame_rx) = mpsc::channel(4);
-    let (client_frame_tx, client_frame_rx) = mpsc::channel::<Frame>(4);
+    let (client_frame_tx, client_frame_rx) = mpsc::channel::<ClientFrame>(4);
     let transport = tokio::spawn(crate::websocket::session::run(
         client,
-        None,
+        false,
         server_frame_tx,
         client_frame_rx,
     ));
     assert!(server_frame_rx.recv().await.is_none());
     client_frame_tx
-        .send(Frame::Packet(Packet::Close))
+        .send(ClientFrame::Message("late".into()))
         .await
         .unwrap();
     drop(client_frame_tx);
@@ -330,10 +334,10 @@ async fn run_discards_client_frames_after_server_close() {
 async fn run_sends_client_frames_while_engine_is_full() {
     let (client, mut server) = ws_pair().await;
     let (server_frame_tx, mut server_frame_rx) = mpsc::channel(1);
-    let (client_frame_tx, client_frame_rx) = mpsc::channel::<Frame>(4);
+    let (client_frame_tx, client_frame_rx) = mpsc::channel::<ClientFrame>(4);
     let transport = tokio::spawn(crate::websocket::session::run(
         client,
-        None,
+        false,
         server_frame_tx,
         client_frame_rx,
     ));
@@ -342,7 +346,7 @@ async fn run_sends_client_frames_while_engine_is_full() {
         server.send(WsMsg::text(text)).await.unwrap();
     }
     client_frame_tx
-        .send(Frame::Packet(Packet::Message("out".into())))
+        .send(ClientFrame::Message("out".into()))
         .await
         .unwrap();
     let msg = tokio::time::timeout(std::time::Duration::from_secs(5), server.next())
@@ -355,7 +359,7 @@ async fn run_sends_client_frames_while_engine_is_full() {
     for text in ["fills", "blocks"] {
         assert!(matches!(
             server_frame_rx.recv().await,
-            Some(Frame::Packet(Packet::Message(m))) if m == text
+            Some(ServerFrame::Message(m)) if m == text
         ));
     }
     assert!(server_frame_rx.recv().await.is_none());
@@ -379,14 +383,39 @@ async fn run_forwards_client_frame_to_server() {
         while let Some(Ok(_)) = server.next().await {}
     });
     let (server_frame_tx, _) = mpsc::channel(4);
-    let (client_frame_tx, client_frame_rx) = mpsc::channel::<Frame>(4);
+    let (client_frame_tx, client_frame_rx) = mpsc::channel::<ClientFrame>(4);
     client_frame_tx
-        .send(Frame::Packet(Packet::Message("out".into())))
+        .send(ClientFrame::Message("out".into()))
         .await
         .unwrap();
     drop(client_frame_tx);
-    crate::websocket::session::run(client, None, server_frame_tx, client_frame_rx)
+    crate::websocket::session::run(client, false, server_frame_tx, client_frame_rx)
         .await
         .unwrap();
     server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn local_close_does_not_wait_for_a_silent_server() {
+    let (client, mut server) = ws_pair().await;
+    let (server_frame_tx, _server_frame_rx) = mpsc::channel(4);
+    let (client_frame_tx, client_frame_rx) = mpsc::channel::<ClientFrame>(4);
+    let transport = tokio::spawn(crate::websocket::session::run(
+        client,
+        false,
+        server_frame_tx,
+        client_frame_rx,
+    ));
+    let msg = server.next().await.unwrap().unwrap();
+    assert_eq!(msg.to_text().unwrap(), "5");
+
+    // The server stays connected but never reads or answers again.
+    drop(client_frame_tx);
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), transport)
+        .await
+        .expect("the close finishes without the server's reply")
+        .unwrap()
+        .unwrap();
+    drop(server);
 }

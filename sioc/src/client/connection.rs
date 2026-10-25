@@ -5,8 +5,8 @@
 use std::time::Duration;
 
 use bytestring::ByteString;
-use eioc::connector::WebSocketConnector;
-use eioc::transport::TransportStrategy;
+use eioc::engine::EngineOptions;
+use eioc::prelude::{TransportStrategy, WebSocketConnector};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use url::Url;
@@ -76,6 +76,12 @@ where
     }
 
     /// Override the HTTP client used for polling.
+    ///
+    /// Closing a polling session waits for the server to answer the Close
+    /// request, unlike the JS client, which does not wait. The default client
+    /// has no timeout, so a server that accepts the request and never answers
+    /// holds the close, and [`Client::join`], open. Set a timeout on this
+    /// client to bound it.
     pub fn http_client(mut self, client: reqwest::Client) -> Self {
         self.http_client = Some(client);
         self
@@ -206,24 +212,23 @@ where
         let (connect_request_tx, connect_request_rx) = mpsc::channel(channels.manager);
 
         // Each engine gets its own connector.
-        let connect_engine = move |server_message_tx, client_message_rx| {
-            eioc::engine::session::connect(
-                url.clone(),
-                http_client.clone(),
-                websocket_connector.clone(),
-                transport_strategy,
-                server_message_tx,
-                client_message_rx,
-                timeout,
-                channels.engine,
-                channels.transport,
-            )
+        let connect_engine = move || {
+            eioc::engine::open(EngineOptions {
+                url: url.clone(),
+                http_client: http_client.clone(),
+                websocket_connector: websocket_connector.clone(),
+                transport: transport_strategy,
+                handshake_timeout: timeout,
+                server_message_capacity: channels.manager,
+                client_message_capacity: channels.engine,
+                server_frame_capacity: channels.engine,
+                client_frame_capacity: channels.transport,
+            })
         };
 
         let task = tokio::spawn(crate::manager::actor::run(
             connect_request_rx,
             connect_engine,
-            channels,
             backoff,
         ));
 

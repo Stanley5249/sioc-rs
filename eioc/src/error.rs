@@ -3,9 +3,10 @@
 use bytestring::ByteString;
 use miette::Diagnostic;
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
-use crate::packet::{Frame, Handshake, ServerMessage};
+use crate::packet::Frame;
+use crate::transport::ServerFrame;
 
 /// Top-level error aggregator for `eioc`.
 #[derive(Debug, Error, Diagnostic)]
@@ -33,12 +34,8 @@ impl Error {
             )
             | Self::Engine(EngineError::HeartbeatTimeout | EngineError::HandshakeTimeout) => false,
 
-            Self::Transport(TransportError::ServerFrame(_) | TransportError::Handshake(_))
-            | Self::Engine(
-                EngineError::ClientFrame(_)
-                | EngineError::ServerMessage(_)
-                | EngineError::Handshake(_),
-            ) => true,
+            Self::Transport(TransportError::ServerFrameClosed)
+            | Self::Engine(EngineError::ServerMessageClosed) => true,
         }
     }
 }
@@ -46,28 +43,19 @@ impl Error {
 /// Errors that occur during an active Engine.IO session.
 #[derive(Debug, Error, Diagnostic)]
 pub enum EngineError {
-    /// Sending a client frame to the transport task failed because the channel
-    /// is closed.
-    #[error("client frame channel closed")]
-    #[diagnostic(code(eioc::engine::client_frame), help("library bug, please report"))]
-    ClientFrame(#[from] mpsc::error::SendError<Frame>),
-
-    /// Delivering a server message to the upper layer failed because its
-    /// receiver is gone.
+    /// Delivering a server message to the upper layer failed because it
+    /// dropped its receiver before the engine hung up.
     #[error("server message channel closed")]
     #[diagnostic(code(eioc::engine::server_message), help("library bug, please report"))]
-    ServerMessage(#[from] mpsc::error::SendError<ServerMessage>),
-
-    /// The handshake oneshot channel was dropped before the server responded.
-    #[error("failed to receive Engine.IO handshake")]
-    #[diagnostic(code(eioc::engine::handshake), help("library bug, please report"))]
-    Handshake(#[from] oneshot::error::RecvError),
+    ServerMessageClosed,
 
     /// The server stopped sending heartbeat pings within the expected window.
     #[error("heartbeat timeout")]
     #[diagnostic(
         code(eioc::engine::heartbeat_timeout),
-        help("the server stopped responding; check the network or server load")
+        help(
+            "the server stopped responding, or the application did not read events for a whole ping window; check the network, server load, or the receive loop"
+        )
     )]
     HeartbeatTimeout,
 
@@ -94,19 +82,14 @@ pub enum TransportError {
     #[diagnostic(transparent)]
     Polling(#[from] PollingError),
 
-    /// Sending a server frame to the engine task failed because the channel is
-    /// closed.
+    /// Sending a server frame to the engine failed because it dropped its
+    /// receiver before the transport ended.
     #[error("server frame channel closed")]
     #[diagnostic(
         code(eioc::transport::server_frame),
         help("library bug, please report")
     )]
-    ServerFrame(#[from] mpsc::error::SendError<Frame>),
-
-    /// Handshake data could not be forwarded to the engine task.
-    #[error("failed to send handshake to engine task")]
-    #[diagnostic(code(eioc::transport::handshake), help("library bug, please report"))]
-    Handshake(Handshake),
+    ServerFrameClosed,
 
     /// The first frame received was not an Open packet.
     #[error("expected Open packet as first frame")]
@@ -117,6 +100,12 @@ pub enum TransportError {
         )
     )]
     Open(Frame),
+}
+
+impl From<mpsc::error::SendError<ServerFrame>> for TransportError {
+    fn from(_: mpsc::error::SendError<ServerFrame>) -> Self {
+        Self::ServerFrameClosed
+    }
 }
 
 /// Errors specific to the WebSocket transport.
@@ -234,25 +223,11 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn channel_failures_are_internal() {
-        let (handshake_tx, handshake_rx) = oneshot::channel::<Handshake>();
-        drop(handshake_tx);
-        let handshake = Handshake {
-            sid: "sid".into(),
-            upgrades: vec![],
-            ping_interval: 25_000,
-            ping_timeout: 5_000,
-            max_payload: 1_000_000,
-        };
-
-        let errors: [Error; 5] = [
-            TransportError::ServerFrame(mpsc::error::SendError(frame())).into(),
-            TransportError::Handshake(handshake).into(),
-            EngineError::ClientFrame(mpsc::error::SendError(frame())).into(),
-            EngineError::ServerMessage(mpsc::error::SendError(ServerMessage::Text("".into())))
-                .into(),
-            EngineError::Handshake(handshake_rx.await.unwrap_err()).into(),
+    #[test]
+    fn channel_failures_are_internal() {
+        let errors: [Error; 2] = [
+            TransportError::ServerFrameClosed.into(),
+            EngineError::ServerMessageClosed.into(),
         ];
         for error in errors {
             assert!(error.is_internal(), "{error:?}");
