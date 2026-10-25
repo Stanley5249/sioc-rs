@@ -13,7 +13,7 @@ use crate::error::SocketError;
 use crate::manager::connect_request::ConnectRequest;
 use crate::packet::ServerPacket;
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn emits_flow_while_receiver_is_full() {
     let mut manager = TestManager::spawn().await;
     let (client_packet_tx, mut server_packet_rx) =
@@ -40,7 +40,7 @@ async fn emits_flow_while_receiver_is_full() {
 
 /// The application emits once per server event while the server floods and
 /// every queue holds two items, the deadlock that `44b0c3f` fixed.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn emits_while_handling_a_server_flood() {
     const FLOOD: usize = 2000;
 
@@ -126,7 +126,7 @@ async fn emits_while_handling_a_server_flood() {
 /// A full receiver holds one packet, which stops reading the engine. The
 /// engine's hang-up must still close it, so an event emitted afterwards waits
 /// for the next engine instead of going into the session that only drains.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn held_packet_keeps_later_events_for_the_next_engine() {
     let mut manager = TestManager::spawn_reconnecting().await;
     let (tx, mut rx) = manager.open_with("/", ByteString::new(), 1).await;
@@ -241,7 +241,7 @@ async fn full_unconfirmed_buffer_does_not_block_other_namespaces() {
     manager.finish().await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn dropping_last_sender_releases_a_full_unconfirmed_buffer() {
     let mut manager = TestManager::spawn().await;
     let (tx, _rx) = manager.open("/").await;

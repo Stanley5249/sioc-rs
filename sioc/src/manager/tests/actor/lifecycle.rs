@@ -26,7 +26,7 @@ async fn closes_when_client_handle_drops_with_no_namespace() {
     task.await.unwrap().unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn closes_after_client_handle_and_last_namespace_drop() {
     let mut manager = TestManager::spawn().await;
     let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
@@ -80,7 +80,7 @@ async fn closed_engine_channel_is_error() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn internal_send_failure_releases_a_full_retained_receiver() {
     let mut manager = TestManager::spawn().await;
     let (tx, _rx) = manager.open_with("/", ByteString::new(), 1).await;
@@ -101,7 +101,7 @@ async fn internal_send_failure_releases_a_full_retained_receiver() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn local_disconnect_finishes_with_a_full_retained_receiver() {
     let mut manager = TestManager::spawn().await;
     let (tx, mut rx) = manager.open_with("/", ByteString::new(), 1).await;
