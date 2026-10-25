@@ -15,9 +15,7 @@ interface ClientToServer {
   kick: () => void;
   ask: (n: number) => void;
   close_engine: () => void;
-  close_engine_later: (ack: (count: number) => void) => void;
   hang_up: (ack: (count: number) => void) => void;
-  engines: (ack: (count: number) => void) => void;
 }
 
 interface ServerToClient {
@@ -47,12 +45,6 @@ sio.of("/once").use((socket, next) => {
   }
   tokens.add(token);
   next();
-});
-
-// Counts Engine.IO sessions, so a test can tell whether the client reconnected.
-let engines = 0;
-sio.engine.on("connection", () => {
-  engines++;
 });
 
 const observers = sio.of("/observe");
@@ -99,20 +91,9 @@ sio.on("connection", (socket) => {
     socket.conn.close();
   });
 
-  // Acks with the number of Engine.IO sessions so far, so the client can
-  // leave the namespace after the server handled the event.
-  socket.on("close_engine_later", (ack) => {
-    setTimeout(() => socket.conn.close(), 100);
-    ack(engines);
-  });
-
   // Ends the Engine.IO session without answering the ack.
   socket.on("hang_up", () => {
     socket.conn.close();
-  });
-
-  socket.on("engines", (ack) => {
-    ack(engines);
   });
 
   socket.on("disconnect", () => {

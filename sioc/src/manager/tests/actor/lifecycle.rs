@@ -140,6 +140,30 @@ async fn peer_close_drains_final_messages_without_an_application_consumer() {
     assert!(rx.recv().await.is_none());
 }
 
+/// A session that drops with no open namespace is not reopened until a
+/// namespace opens, however long the clock runs.
+#[tokio::test(start_paused = true)]
+async fn no_session_reopens_without_namespaces_until_one_opens() {
+    let mut manager = TestManager::spawn_reconnecting().await;
+    let (tx, rx) = manager.open("/").await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    tx.disconnect();
+    drop(rx);
+    manager.session.take().unwrap().end().await;
+
+    let reopened = tokio::time::timeout(Duration::from_secs(3600), manager.session_rx.recv()).await;
+    assert!(reopened.is_err(), "no namespace needs a new session");
+
+    let (connect_request, _handles) = ConnectRequest::new("/".into(), ByteString::new(), 32, 32);
+    manager
+        .connect_request_tx
+        .send(connect_request)
+        .await
+        .unwrap();
+    let reopened = tokio::time::timeout(Duration::from_secs(1), manager.session_rx.recv()).await;
+    assert!(matches!(reopened, Ok(Some(_))));
+}
+
 /// Aborting the manager task ends every handle instead of leaving it waiting.
 #[tokio::test]
 async fn aborting_the_manager_ends_the_handles() {
