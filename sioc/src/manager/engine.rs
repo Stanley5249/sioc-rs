@@ -14,12 +14,13 @@ use tracing::instrument::Instrumented;
 
 use crate::error::ManagerError;
 
-/// The future while opening, established, or completed. Rust cleanup: JS
-/// opening and closing are synchronous, while Rust must reclaim the future.
+/// The Engine.IO attempt, like `Socket.readyState` while opening or open.
+/// Rust cleanup retains a completed future's result until its incoming channel
+/// has drained, independently of when the connection itself finishes.
 enum Connection<Fut> {
-    /// `Manager.open` before the engine's Open message.
+    /// Before the engine's Open message, like Engine.IO `"opening"`.
     Opening(Pin<Box<Instrumented<Fut>>>),
-    /// The established `Manager.engine` future.
+    /// After that message, like Engine.IO `"open"`.
     Open(Pin<Box<Instrumented<Fut>>>),
     /// Its result, retained until incoming EOF. Rust cleanup.
     Finished(Result<(), ManagerError>),

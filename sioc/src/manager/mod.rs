@@ -61,6 +61,9 @@
 //! - [`socket.ts`]: `Socket.onopen`, `onclose`, `_clearAcks`, and
 //!   `emitBuffered`.
 //! - [`backo2.ts`]: `Backoff.duration`, which [`backoff`] follows.
+//! - [`engineSocket.ts`]: Engine.IO client 6.6.7's `Socket.readyState` and
+//!   `close`, which may defer transport closure for buffered writes or an
+//!   upgrade.
 //!
 //! Each engine gets new channels, because the socket.io 4.8.4 server closes
 //! the whole connection when a packet other than CONNECT arrives for a
@@ -69,6 +72,7 @@
 //! [`manager.ts`]: https://github.com/socketio/socket.io/blob/socket.io-client@4.8.4/packages/socket.io-client/lib/manager.ts
 //! [`socket.ts`]: https://github.com/socketio/socket.io/blob/socket.io-client@4.8.4/packages/socket.io-client/lib/socket.ts
 //! [`backo2.ts`]: https://github.com/socketio/socket.io/blob/socket.io-client@4.8.4/packages/socket.io-client/lib/contrib/backo2.ts
+//! [`engineSocket.ts`]: https://github.com/socketio/socket.io/blob/11a6f561a757264c3231c3383c4cdbf37bcf52de/packages/engine.io-client/lib/socket.ts
 //! [`client.ts`]: https://github.com/socketio/socket.io/blob/socket.io@4.8.4/packages/socket.io/lib/client.ts
 
 pub mod actor;

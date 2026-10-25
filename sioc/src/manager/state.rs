@@ -101,8 +101,9 @@ enum ReadyState {
     /// An engine runs that no namespace needs. It closes once its write
     /// buffer empties, like `Manager._destroy` after the last DISCONNECT.
     Flushing,
-    /// The engine was asked to close and has not finished. Rust wait: JS
-    /// `engine.close` is synchronous.
+    /// The engine was asked to close and its resources are still owned. Rust
+    /// wait: JS `engine.close()` returns immediately; this actor waits for the
+    /// connection future and channels to finish before opening a successor.
     Closing {
         /// Whether the next engine waits for the backoff delay, unlike
         /// `skipReconnect`.
@@ -313,7 +314,7 @@ impl ManagerCore {
 
     /// Ends every namespace without waiting for the application, after an
     /// internal error. The caller then closes the engine itself. Rust cleanup:
-    /// the JS `Manager` never stops.
+    /// task termination must close handles that the application still owns.
     pub fn shutdown(&mut self) {
         for namespace in self.namespaces.values_mut() {
             namespace.shutdown();
@@ -325,7 +326,8 @@ impl ManagerCore {
     }
 
     /// Returns whether every namespace is inactive and no engine runs. Rust
-    /// cleanup: the JS `Manager` never stops.
+    /// wait: the actor needs a completion point for `Client::join`; the JS
+    /// manager is an event emitter rather than a joinable task.
     #[must_use]
     pub fn is_idle(&self) -> bool {
         self.ready_state == ReadyState::Closed

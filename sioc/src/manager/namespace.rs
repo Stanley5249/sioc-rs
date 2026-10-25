@@ -360,8 +360,8 @@ impl Namespace {
         }
     }
 
-    /// Ends the namespace for good, because the manager stops. Rust cleanup:
-    /// the JS `Manager` never stops.
+    /// Ends the namespace when the manager task terminates. Rust cleanup:
+    /// application-owned handles must close when their actor is gone.
     pub fn shutdown(&mut self) {
         *self = Self {
             next_ack_id: self.next_ack_id,
