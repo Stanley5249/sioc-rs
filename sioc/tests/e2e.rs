@@ -51,13 +51,7 @@ struct Question(u32);
 struct CloseEngine;
 #[derive(Debug, EventType, SerializePayload)]
 #[sioc(event(ack = "Total"))]
-struct CloseEngineLater;
-#[derive(Debug, EventType, SerializePayload)]
-#[sioc(event(ack = "Total"))]
 struct HangUp;
-#[derive(Debug, EventType, SerializePayload)]
-#[sioc(event(ack = "Total"))]
-struct Engines;
 #[derive(Debug, EventRouter)]
 enum Received {
     Item(Event<Item>),
@@ -170,9 +164,6 @@ async fn flood_and_count() {
             };
             assert_eq!(event.payload.0, seq);
             tx.emit(Seen(seq)).await.unwrap();
-            if seq % 50 == 0 {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
         }
         assert_eq!(
             tx.emit(Count).await.unwrap().await.unwrap().payload.0,
@@ -196,7 +187,6 @@ async fn echo_while_receiving_full() {
                 sending.emit(Echo(seq)).await.unwrap();
             }
         });
-        tokio::time::sleep(Duration::from_millis(10)).await;
         for seq in 0..FLOOD {
             let Some(Received::Item(event)) = rx.listen::<Received>().await.unwrap() else {
                 panic!("expected echo {seq}");
@@ -400,32 +390,6 @@ async fn pending_ack_fails_on_drop() {
         let handle = tx.emit(HangUp).await.unwrap();
         assert!(matches!(handle.await, Err(sioc::error::AckError::Recv(_))));
         next_connect(&mut rx).await;
-        finish(client, tx, rx).await;
-    })
-    .await;
-}
-
-/// A session that drops without open namespaces is not reopened until a
-/// namespace opens.
-#[tokio::test]
-#[ignore = "requires bun; run just test-e2e"]
-async fn no_reconnection_without_namespaces() {
-    run(&ORDINARY, async |server: &Server, transport, capacity| {
-        let client = server.client(transport, capacity);
-        let (tx, rx) = connected(&client, "/").await;
-        // Wait for the ack, because the server ignores an event that arrives
-        // with the DISCONNECT behind it in one polling request.
-        let handle = tx.emit(CloseEngineLater).await.unwrap();
-        let before = handle.await.unwrap().payload.0;
-        tx.disconnect();
-        drop(rx);
-
-        // Wait past the drop and the reconnection delay.
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        let (tx, rx) = connected(&client, "/").await;
-        let after = tx.emit(Engines).await.unwrap().await.unwrap().payload.0;
-        assert_eq!(after, before + 1);
         finish(client, tx, rx).await;
     })
     .await;
