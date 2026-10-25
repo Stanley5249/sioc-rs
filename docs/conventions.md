@@ -33,13 +33,23 @@
 - **Component tests:** Put them in the submodule's `tests.rs`, or in a `tests/` directory split by scenario group.
 - **End-to-end and derive macro tests:** Put them in `sioc/tests/`.
 
-Test each behavior at the layer that decides it:
+Each test protects a contract and catches a bug you can name. Assert the whole outcome the test controls, including order and the absence of extra outputs, so a regression cannot pass by adding or reordering packets.
 
-- **Core tests:** Every protocol rule, such as ordering, acks, reconnection, namespace lifecycle, and binary packets, is a plain `#[test]` on the core. It sends inputs and asserts outputs and queries, using builders only.
-- **Task tests:** Cover only what the core cannot see: cancel safety, permits and backpressure, hang-up detection, and cleanup that never waits on the application. Use a small fake peer.
+Test each behavior at the layer that decides it. Add a test at a higher layer only for what the lower one cannot see.
+
+- **Core tests:** Every protocol rule, such as ordering, acks, reconnection, namespace lifecycle, and binary packets, is a plain `#[test]` on the core. It sends inputs and asserts outputs and queries, using builders only. `sioc/src/manager/tests/state.rs` shows the shape.
+- **Task tests:** Cover only what the core cannot see, which is cancel safety, permits and backpressure, hang-up detection, and cleanup that never waits on the application. Use a small fake peer, such as the harness in `sioc/src/manager/tests/actor/`, or bare channels for a client handle, as `sioc/src/client/tests/` does.
 - **End-to-end tests:** Check the wiring against the reference servers, one scenario per feature.
 
-A test that needs time runs on Tokio's paused clock with `#[tokio::test(start_paused = true)]`. An end-to-end test waits for the server's next event instead of a fixed delay.
+Under backpressure, test safety and progress apart. Safety means a full queue loses and reorders nothing, and a core test checks it. Progress means a full queue holds up only the data that needs it, and only a task test can check it, as `emits_flow_while_receiver_is_full` does.
+
+Synchronize a test on an explicit event, such as a message, a channel end, or the virtual clock, because a fixed wait fails on a slow machine, and a check that something did not happen still passes when it happens after the wait.
+
+- A test that needs time runs on Tokio's paused clock with `#[tokio::test(start_paused = true)]`.
+- Check that nothing happened in a core test, where an empty output needs no wait.
+- An end-to-end test waits for the server's next event. A real-time timeout there only guards against a hang.
+
+Name a test after its condition and expected behavior, such as `dropping_the_ack_handle_keeps_the_event`. When patches have hidden what a test checks, rewrite the test or its group and keep the guarantees it protected.
 
 ## Changes that go together
 
