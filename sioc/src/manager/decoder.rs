@@ -28,7 +28,7 @@ pub enum Decoded {
 pub struct Decoder {
     /// The binary packet awaiting attachments, like
     /// `Decoder.reconstructor`.
-    reconstructor: Option<Ns<BinaryPacket>>,
+    reconstructor: Option<Reconstruction>,
 }
 
 impl Decoder {
@@ -68,12 +68,29 @@ impl Decoder {
             }
             Packet::BinaryEvent { payload, id, count } => {
                 validate_placeholders(&payload, count)?;
-                self.reconstructor = Some(Ns(ns, BinaryPacket::event(payload, id, count)));
+                self.reconstructor = Some(Reconstruction {
+                    packet: Some(Ns(
+                        ns,
+                        Decoded::Packet(ServerPacket::Event(DynEvent::new(payload, id))),
+                    )),
+                    remaining: count,
+                    attachments: Vec::new(),
+                });
                 return Ok(None);
             }
             Packet::BinaryAck { payload, id, count } => {
                 validate_placeholders(&payload, count)?;
-                self.reconstructor = Some(Ns(ns, BinaryPacket::ack(payload, id, count)));
+                self.reconstructor = Some(Reconstruction {
+                    packet: Some(Ns(
+                        ns,
+                        Decoded::Ack {
+                            id,
+                            ack: DynAck::new(payload),
+                        },
+                    )),
+                    remaining: count,
+                    attachments: Vec::new(),
+                });
                 return Ok(None);
             }
         };
@@ -91,52 +108,55 @@ impl Decoder {
     pub fn add_binary(&mut self, bytes: Bytes) -> Result<Option<Ns<Decoded>>, ManagerError> {
         let length = bytes.len();
 
-        let Some(Ns(ns, mut packet)) = self.reconstructor.take() else {
+        let Some(reconstruction) = &mut self.reconstructor else {
             return Err(ManagerError::UnexpectedBinary(bytes));
         };
-
-        packet.attach(bytes);
-
-        if !packet.is_complete() {
+        if reconstruction.packet.is_some() {
+            reconstruction.attachments.push(bytes);
+        }
+        reconstruction.remaining -= 1;
+        if reconstruction.remaining != 0 {
             tracing::trace!(length, status = "pending", "received attachment");
-            self.reconstructor = Some(Ns(ns, packet));
             return Ok(None);
         }
 
-        tracing::trace!(%ns, length, status = "complete", "received attachment");
-
-        let decoded = match packet {
-            BinaryPacket::Event {
-                payload,
-                id,
-                attachments,
-                ..
-            } => {
-                let event = DynEvent {
-                    id,
-                    ..DynEvent::new(payload, None)
-                }
-                .with_attachments(attachments);
-                Decoded::Packet(ServerPacket::Event(event))
-            }
-            BinaryPacket::Ack {
-                payload,
-                id,
-                attachments,
-                ..
-            } => Decoded::Ack {
-                id,
-                ack: DynAck::new(payload).with_attachments(attachments),
-            },
+        let reconstruction = self
+            .reconstructor
+            .take()
+            .expect("the final frame completes a reconstruction");
+        let Some(Ns(ns, mut packet)) = reconstruction.packet else {
+            return Ok(None);
         };
-
-        Ok(Some(Ns(ns, decoded)))
+        match &mut packet {
+            Decoded::Packet(ServerPacket::Event(event)) => {
+                event.attachments = Some(reconstruction.attachments);
+            }
+            Decoded::Ack { ack, .. } => ack.attachments = Some(reconstruction.attachments),
+            Decoded::Packet(_) => unreachable!("only binary events and acks start reconstruction"),
+        }
+        tracing::trace!(%ns, length, status = "complete", "received attachment");
+        Ok(Some(Ns(ns, packet)))
     }
 
     /// Forgets the pending binary packet, because its attachments came with
     /// the engine that is gone. Like `Decoder.destroy`.
     pub fn reset(&mut self) {
         self.reconstructor = None;
+    }
+
+    /// Detaches a namespace's partial packet while consuming its remaining
+    /// attachments. Rust cleanup: reuse cannot inherit the old reconstruction,
+    /// and the current engine still needs its binary frame alignment.
+    pub fn disconnect(&mut self, ns: &str) {
+        if let Some(reconstruction) = &mut self.reconstructor
+            && reconstruction
+                .packet
+                .as_ref()
+                .is_some_and(|Ns(pending, _)| pending == ns)
+        {
+            reconstruction.packet = None;
+            reconstruction.attachments.clear();
+        }
     }
 }
 
@@ -173,63 +193,17 @@ fn validate_placeholder_value(value: &serde_json::Value, count: usize) -> Result
     Ok(())
 }
 
-/// A binary packet and the attachments that arrived so far, like
-/// `BinaryReconstructor.reconPack`.
+/// The packet and buffers of JS `BinaryReconstructor`. The existing decoded
+/// packet already distinguishes event ids from ACK ids, so reconstruction only
+/// owns their shared frame accounting.
 #[derive(Debug)]
-enum BinaryPacket {
-    /// A `BINARY_EVENT`, with its optional ack id.
-    Event {
-        payload: ByteString,
-        id: Option<u64>,
-        attachments: Vec<Bytes>,
-        count: usize,
-    },
-    /// A `BINARY_ACK` answering event `id`.
-    Ack {
-        payload: ByteString,
-        id: u64,
-        attachments: Vec<Bytes>,
-        count: usize,
-    },
-}
-
-impl BinaryPacket {
-    fn event(payload: ByteString, id: Option<u64>, count: usize) -> Self {
-        Self::Event {
-            payload,
-            id,
-            attachments: Vec::new(),
-            count,
-        }
-    }
-
-    fn ack(payload: ByteString, id: u64, count: usize) -> Self {
-        Self::Ack {
-            payload,
-            id,
-            attachments: Vec::new(),
-            count,
-        }
-    }
-
-    fn attach(&mut self, bytes: Bytes) {
-        match self {
-            Self::Event { attachments, .. } | Self::Ack { attachments, .. } => {
-                attachments.push(bytes);
-            }
-        }
-    }
-
-    fn is_complete(&self) -> bool {
-        match self {
-            Self::Event {
-                attachments, count, ..
-            }
-            | Self::Ack {
-                attachments, count, ..
-            } => attachments.len() == *count,
-        }
-    }
+struct Reconstruction {
+    /// `BinaryReconstructor.reconPack`, detached when its namespace ends.
+    packet: Option<Ns<Decoded>>,
+    /// Frames still required to complete or discard the packet.
+    remaining: usize,
+    /// `BinaryReconstructor.buffers`, released when the packet is detached.
+    attachments: Vec<Bytes>,
 }
 
 #[cfg(test)]
@@ -273,5 +247,46 @@ mod tests {
             decoder.add_binary(Bytes::new()),
             Err(ManagerError::UnexpectedBinary(_))
         ));
+    }
+
+    #[test]
+    fn namespace_cleanup_discards_partial_attachments_without_losing_alignment() {
+        for header in [
+            r#"53-/old,["e",{"_placeholder":true,"num":0},{"_placeholder":true,"num":1},{"_placeholder":true,"num":2}]"#,
+            r#"63-/old,7[{"_placeholder":true,"num":0},{"_placeholder":true,"num":1},{"_placeholder":true,"num":2}]"#,
+        ] {
+            let mut decoder = Decoder::default();
+            decoder.add_text(header.into()).unwrap();
+            assert!(
+                decoder
+                    .add_binary(Bytes::from_static(b"first"))
+                    .unwrap()
+                    .is_none()
+            );
+            decoder.disconnect("/old");
+            decoder.disconnect("/old");
+            assert!(
+                decoder
+                    .add_binary(Bytes::from_static(b"second"))
+                    .unwrap()
+                    .is_none()
+            );
+            decoder.disconnect("/other");
+            assert!(
+                decoder
+                    .add_binary(Bytes::from_static(b"third"))
+                    .unwrap()
+                    .is_none()
+            );
+            let Ns(ns, Decoded::Packet(ServerPacket::Event(event))) = decoder
+                .add_text(r#"2/new,["fresh"]"#.into())
+                .unwrap()
+                .unwrap()
+            else {
+                panic!("the next packet decodes after the discarded frames");
+            };
+            assert_eq!(&*ns, "/new");
+            assert_eq!(&*event.payload, r#"["fresh"]"#);
+        }
     }
 }

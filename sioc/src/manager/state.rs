@@ -4,6 +4,9 @@
 //! [`ManagerCore`] never awaits and spawns nothing. It touches the
 //! application's channels only through `try_send`, `oneshot::Sender::send`,
 //! and permits its caller hands in, so plain `#[test]`s drive it.
+//! Engine and namespace transitions remain together because their ordering is
+//! the core's contract; route ownership and wire reconstruction live in
+//! [`super::namespace`] and [`super::decoder`].
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
@@ -17,7 +20,7 @@ use crate::error::ManagerError;
 use crate::manager::backoff::Backoff;
 use crate::manager::connect_request::ConnectRequest;
 use crate::manager::decoder::{Decoded, Decoder};
-use crate::manager::namespace::{Namespace, Read};
+use crate::manager::namespace::{Delivery, Namespace, Read};
 use crate::packet::{ClientPacket, ServerPacket};
 use crate::parser::packet::{Ns, Packet};
 
@@ -41,6 +44,9 @@ pub enum ManagerInput {
     /// The engine delivered a message, like `Manager.onopen` and `ondata`.
     /// The caller passes none while [`ManagerCore::held_sender`] is `Some`.
     Message(ServerMessage),
+    /// Remaining engine messages during reclamation. Rust cleanup: processing
+    /// final control packets must not await an application's full receiver.
+    Drain(ServerMessage),
     /// The engine finished, like `Manager.onclose`.
     Closed(Result<(), ManagerError>),
     /// The reconnection delay is over, like the timer in `Manager.reconnect`.
@@ -63,18 +69,26 @@ pub enum ManagerOutput {
     Schedule(Duration),
     /// Stop waiting, like clearing that timer in `Manager._destroy`.
     Cancel,
-    /// Read the handles' channel of a namespace that became active, as
+    /// Read the event input of a namespace that became active, as
     /// [`ManagerCore::read`] says, and pass its end as
     /// [`ManagerInput::Disconnect`]. Rust channel: JS handles call the
     /// `Socket` directly.
     Listen {
         /// The namespace the channel belongs to.
         ns: ByteString,
-        /// What the handles send, like `Socket.sendBuffer`.
+        /// Events emitted by the handles, like `Socket.sendBuffer`.
         client_packet_rx: mpsc::Receiver<ClientPacket>,
         /// Cancelled once the handles leave or the namespace ends, which turns
         /// [`Read::Wait`] into [`Read::Discard`].
         closed: CancellationToken,
+    },
+    /// Installs one confirmed engine's reply input. Rust channel: JS sends
+    /// ACK replies directly rather than buffering them across connections.
+    ListenAcks {
+        /// The connected namespace, like `Socket.nsp`.
+        ns: ByteString,
+        /// Replies for this engine only, discarded when it ends.
+        ack_packet_rx: mpsc::Receiver<ClientPacket>,
     },
 }
 
@@ -88,8 +102,9 @@ enum ReadyState {
     /// An engine runs that no namespace needs. It closes once its write
     /// buffer empties, like `Manager._destroy` after the last DISCONNECT.
     Flushing,
-    /// The engine was asked to close and has not finished. Rust wait: JS
-    /// `engine.close` is synchronous.
+    /// The engine was asked to close and its resources are still owned. Rust
+    /// wait: JS `engine.close()` returns immediately; this actor waits for the
+    /// connection future and channels to finish before opening a successor.
     Closing {
         /// Whether the next engine waits for the backoff delay, unlike
         /// `skipReconnect`.
@@ -131,7 +146,7 @@ pub struct ManagerCore {
     decoder: Decoder,
     /// One server packet whose receiver is full. Rust bound: JS emits
     /// synchronously.
-    held_packet: Option<Ns<ServerPacket>>,
+    held_packet: Option<Delivery>,
     /// Messages waiting for the engine, like the engine's `writeBuffer`: the
     /// CONNECT and DISCONNECT packets and the attachments of the one packet
     /// in flight. Packets of the handles wait in their channels instead.
@@ -172,25 +187,45 @@ impl ManagerCore {
     /// Panics if a server message arrives while the core holds a packet, which
     /// the caller rules out.
     pub fn handle(&mut self, input: ManagerInput) -> Result<(), ManagerError> {
+        let release = matches!(input, ManagerInput::Disconnect(_) | ManagerInput::Release);
         match input {
             ManagerInput::Connect(request) => {
                 let ns = request.ns.clone();
                 tracing::debug!(%ns, "namespace opening");
-                self.namespaces.entry(ns).or_default().open(request);
+                let engine_runs = self.engine_runs();
+                let namespace = self.namespaces.entry(ns.clone()).or_default();
+                if namespace.is_inactive() {
+                    self.decoder.disconnect(&ns);
+                }
+                if let Some(auth) = namespace.open(request)
+                    && engine_runs
+                {
+                    self.write_buffer.push_back(Write::Connect { ns, auth });
+                }
             }
             ManagerInput::Packet { ns, packet } => self.send(&ns, packet),
             ManagerInput::Disconnect(ns) => self.disconnect(&ns),
-            ManagerInput::Message(message) => self.message(message),
+            ManagerInput::Message(message) => {
+                assert!(
+                    self.held_packet.is_none(),
+                    "the caller waits for the held delivery before reading more data"
+                );
+                self.message(message);
+            }
+            ManagerInput::Drain(message) => self.message(message),
             ManagerInput::Closed(result) => {
                 // After an internal error the caller shuts down, so no engine
                 // opens.
                 self.finish_engine(result)?;
             }
             ManagerInput::Reconnect => self.reconnect(),
-            ManagerInput::Release => self.release(),
+            ManagerInput::Release => {}
         }
 
         self.settle();
+        if release {
+            self.release();
+        }
         Ok(())
     }
 
@@ -199,12 +234,19 @@ impl ManagerCore {
     pub fn next_output(&mut self) -> Option<ManagerOutput> {
         self.outputs.pop_front().or_else(|| {
             self.namespaces.iter_mut().find_map(|(ns, namespace)| {
-                let (client_packet_rx, closed) = namespace.take_listen()?;
-                Some(ManagerOutput::Listen {
-                    ns: ns.clone(),
-                    client_packet_rx,
-                    closed,
-                })
+                if let Some((client_packet_rx, closed)) = namespace.take_listen() {
+                    return Some(ManagerOutput::Listen {
+                        ns: ns.clone(),
+                        client_packet_rx,
+                        closed,
+                    });
+                }
+                namespace
+                    .take_acks()
+                    .map(|ack_packet_rx| ManagerOutput::ListenAcks {
+                        ns: ns.clone(),
+                        ack_packet_rx,
+                    })
             })
         })
     }
@@ -245,8 +287,9 @@ impl ManagerCore {
     /// packet for a full receiver. Rust bound: JS emits synchronously.
     #[must_use]
     pub fn held_sender(&self) -> Option<mpsc::Sender<ServerPacket>> {
-        let Ns(ns, _) = self.held_packet.as_ref()?;
-        self.namespaces.get(ns)?.server_packet_tx()
+        self.held_packet
+            .as_ref()
+            .map(|delivery| delivery.sender.clone())
     }
 
     /// Sends the held packet through the reserved slot, or discards it if the
@@ -255,10 +298,15 @@ impl ManagerCore {
         &mut self,
         permit: Result<mpsc::OwnedPermit<ServerPacket>, mpsc::error::SendError<()>>,
     ) {
-        let Some(Ns(ns, packet)) = self.held_packet.take() else {
+        let Some(Delivery {
+            ns, packet, closed, ..
+        }) = self.held_packet.take()
+        else {
             return;
         };
-        if let Ok(permit) = permit {
+        if let Ok(permit) = permit
+            && !closed.is_cancelled()
+        {
             permit.send(packet);
         } else {
             tracing::debug!(%ns, "discarded server packet for a dropped receiver");
@@ -267,7 +315,7 @@ impl ManagerCore {
 
     /// Ends every namespace without waiting for the application, after an
     /// internal error. The caller then closes the engine itself. Rust cleanup:
-    /// the JS `Manager` never stops.
+    /// task termination must close handles that the application still owns.
     pub fn shutdown(&mut self) {
         for namespace in self.namespaces.values_mut() {
             namespace.shutdown();
@@ -279,7 +327,8 @@ impl ManagerCore {
     }
 
     /// Returns whether every namespace is inactive and no engine runs. Rust
-    /// cleanup: the JS `Manager` never stops.
+    /// wait: the actor needs a completion point for `Client::join`; the JS
+    /// manager is an event emitter rather than a joinable task.
     #[must_use]
     pub fn is_idle(&self) -> bool {
         self.ready_state == ReadyState::Closed
@@ -353,6 +402,7 @@ impl ManagerCore {
 
     fn disconnect(&mut self, ns: &ByteString) {
         tracing::debug!(%ns, "client closed");
+        self.decoder.disconnect(ns);
         let namespace = self
             .namespaces
             .get_mut(ns)
@@ -368,18 +418,34 @@ impl ManagerCore {
                 |write| !matches!(write, Write::Connect { ns: queued, .. } if queued == ns),
             );
         }
-        self.release();
     }
 
     /// Runs after every transition: drops a held packet whose namespace ended,
     /// gives an engine to namespaces that need one, and queues CONNECT for
     /// namespaces that became active, like `Socket.connect`.
     fn settle(&mut self) {
-        if let Some(Ns(ns, _)) = &self.held_packet
-            && !self.namespaces.get(ns).is_some_and(Namespace::is_active)
+        if let Some(delivery) = &self.held_packet
+            && delivery.closed.is_cancelled()
         {
-            tracing::debug!(%ns, "discarded held server packet for a closed namespace");
+            tracing::debug!(ns = %delivery.ns, "discarded held server packet for a closed namespace");
             self.held_packet = None;
+        }
+
+        // Reopening is a core transition after old delivery cleanup, never a
+        // side effect of a namespace cleanup helper.
+        let engine_runs = self.engine_runs();
+        for (ns, namespace) in &mut self.namespaces {
+            if let Some(request) = namespace.take_reopen() {
+                self.decoder.disconnect(ns);
+                if let Some(auth) = namespace.open(request)
+                    && engine_runs
+                {
+                    self.write_buffer.push_back(Write::Connect {
+                        ns: ns.clone(),
+                        auth,
+                    });
+                }
+            }
         }
 
         if self.needs_engine() {
@@ -390,18 +456,6 @@ impl ManagerCore {
                 }
                 ReadyState::Flushing => self.ready_state = ReadyState::Open,
                 ReadyState::Open | ReadyState::Closing { .. } | ReadyState::Reconnecting => {}
-            }
-        }
-
-        let engine_runs = self.engine_runs();
-        for (ns, namespace) in &mut self.namespaces {
-            if let Some(auth) = namespace.take_connect()
-                && engine_runs
-            {
-                self.write_buffer.push_back(Write::Connect {
-                    ns: ns.clone(),
-                    auth,
-                });
             }
         }
     }
@@ -446,8 +500,7 @@ impl ManagerCore {
         self.ready_state = ReadyState::Open;
         self.outputs.push_back(ManagerOutput::Open);
 
-        for (ns, namespace) in &mut self.namespaces {
-            namespace.take_connect();
+        for (ns, namespace) in &self.namespaces {
             if let Some(auth) = namespace.auth() {
                 self.write_buffer.push_back(Write::Connect {
                     ns: ns.clone(),
@@ -464,10 +517,6 @@ impl ManagerCore {
     }
 
     fn message(&mut self, message: ServerMessage) {
-        assert!(
-            self.held_packet.is_none(),
-            "the caller reads no engine message while a server packet is held"
-        );
         if !self.engine_runs() {
             tracing::debug!("discarded server message for a closing engine");
             return;
@@ -486,7 +535,7 @@ impl ManagerCore {
         };
 
         match decoded {
-            Ok(Some(Ns(ns, decoded))) => self.receive(ns, decoded),
+            Ok(Some(Ns(ns, decoded))) => self.receive(&ns, decoded),
             Ok(None) => {}
             Err(error) => {
                 // The server's fault, not a library bug, so the client
@@ -499,14 +548,14 @@ impl ManagerCore {
     }
 
     /// Routes one decoded server packet, like `Socket.onpacket`.
-    fn receive(&mut self, ns: ByteString, decoded: Decoded) {
-        let Some(namespace) = self.namespaces.get_mut(&ns) else {
+    fn receive(&mut self, ns: &ByteString, decoded: Decoded) {
+        let Some(namespace) = self.namespaces.get_mut(ns) else {
             tracing::debug!(%ns, "discarded server packet for an unknown namespace");
             return;
         };
 
         let packet = match decoded {
-            Decoded::Ack { id, ack } => return namespace.resolve_ack(&ns, id, ack),
+            Decoded::Ack { id, ack } => return namespace.resolve_ack(ns, id, ack),
             Decoded::Packet(packet) => packet,
         };
 
@@ -518,15 +567,22 @@ impl ManagerCore {
             ServerPacket::Disconnect | ServerPacket::ConnectError(_) => {
                 tracing::debug!(%ns, %packet, "namespace ended by the server");
                 // The server refused the namespace or left it, so both end it.
-                namespace.end(&ns, Some(packet));
+                namespace.end(ns, Some(packet));
                 return;
             }
             ServerPacket::Event(_) => {}
         }
 
-        if let Some(packet) = namespace.deliver(&ns, packet) {
-            tracing::debug!(%ns, "holding server packet for a full receiver");
-            self.held_packet = Some(Ns(ns, packet));
+        if let Some(delivery) = namespace.deliver(ns, packet) {
+            if self.held_packet.is_none() {
+                tracing::debug!(%ns, "holding server packet for a full receiver");
+                self.held_packet = Some(delivery);
+            } else {
+                // Only Drain inputs can reach a full receiver while another
+                // packet is held. Keep that original delivery, and reclaim
+                // later overflow without waiting for the application.
+                tracing::debug!(%ns, "discarded overflow during engine cleanup");
+            }
         }
     }
 
@@ -546,8 +602,8 @@ impl ManagerCore {
         self.ready_state = ReadyState::Closed;
         self.decoder.reset();
         self.write_buffer.clear();
-        for namespace in self.namespaces.values_mut() {
-            namespace.engine_closed();
+        for (ns, namespace) in &mut self.namespaces {
+            namespace.engine_closed(ns);
         }
 
         match result {

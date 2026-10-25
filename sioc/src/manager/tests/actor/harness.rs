@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use bytestring::ByteString;
-use eioc::prelude::{Message, ServerMessage};
+use eioc::prelude::{Handshake, Message, ServerMessage};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -55,12 +55,6 @@ pub struct TestManager {
     pub task: JoinHandle<Result<(), ManagerError>>,
 }
 
-/// Asserts that nothing reaches the engine for a short while.
-pub async fn assert_quiet(client_message_rx: &mut mpsc::Receiver<Message>) {
-    let result = tokio::time::timeout(Duration::from_millis(50), client_message_rx.recv()).await;
-    assert!(result.is_err(), "unexpected message {result:?}");
-}
-
 pub fn event(payload: &'static str, ack_tx: Option<oneshot::Sender<DynAck>>) -> ClientPacket {
     ClientPacket::Event {
         payload: ByteString::from_static(payload),
@@ -96,19 +90,7 @@ impl TestManager {
         let (session_tx, mut session_rx) = mpsc::channel(1);
         let connect_engine = move |server_message_tx, client_message_rx| {
             let session_tx = session_tx.clone();
-            async move {
-                let (result_tx, result_rx) = oneshot::channel();
-                let session = TestSession {
-                    server_message_tx,
-                    client_message_rx,
-                    result_tx,
-                };
-                // A finished test takes no more sessions.
-                if session_tx.send(session).await.is_err() {
-                    return Ok(());
-                }
-                result_rx.await.unwrap_or(Ok(()))
-            }
+            run_session(server_message_tx, client_message_rx, session_tx)
         };
         let task = tokio::spawn(crate::manager::actor::run(
             connect_request_rx,
@@ -184,4 +166,39 @@ impl TestManager {
         }
         task.await.unwrap()
     }
+}
+
+/// Models an engine's owned server direction separately from peer injection.
+/// Closing the peer input is observed while the engine future is polled, just
+/// as the real protocol drops its server sender before draining client input.
+pub async fn run_session(
+    server_message_tx: mpsc::Sender<ServerMessage>,
+    client_message_rx: mpsc::Receiver<Message>,
+    session_tx: mpsc::Sender<TestSession>,
+) -> Result<(), eioc::error::Error> {
+    let (peer_tx, mut peer_rx) = mpsc::channel(32);
+    let (result_tx, result_rx) = oneshot::channel();
+    server_message_tx
+        .send(ServerMessage::Open(Handshake {
+            sid: "engine".into(),
+            upgrades: Vec::new(),
+            ping_interval: 25_000,
+            ping_timeout: 20_000,
+            max_payload: 1_000_000,
+        }))
+        .await
+        .unwrap();
+    let session = TestSession {
+        server_message_tx: peer_tx,
+        client_message_rx,
+        result_tx,
+    };
+    if session_tx.send(session).await.is_err() {
+        return Ok(());
+    }
+    while let Some(message) = peer_rx.recv().await {
+        server_message_tx.send(message).await.unwrap();
+    }
+    drop(server_message_tx);
+    result_rx.await.unwrap_or(Ok(()))
 }

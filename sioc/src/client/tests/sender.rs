@@ -127,11 +127,19 @@ async fn emit_returns_error_on_closed_channel() {
 
 #[tokio::test]
 async fn acknowledge_sends_ack_packet_with_correct_id() {
-    let (sender, mut rx) = socket_sender();
+    let (mut request, handles) = ConnectRequest::new("/".into(), "".into(), 8, 8);
+    let (ack_packet_tx, mut ack_packet_rx) = mpsc::channel(8);
+    // Publish the separate route that manager confirmation installs.
+    request.ack_route_tx.send_replace(Some(ack_packet_tx));
+    let (sender, _receiver, _reply) = handles.into_socket();
     let id = HasAck::<()>::parse(Some(5)).unwrap();
     sender.acknowledge(id, ()).await.unwrap();
-    let ClientPacket::Ack { id, .. } = rx.try_recv().unwrap() else {
+    let ClientPacket::Ack { id, .. } = ack_packet_rx.try_recv().unwrap() else {
         panic!("expected Ack packet");
     };
     assert_eq!(id, 5);
+    assert!(matches!(
+        request.client_packet_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
 }

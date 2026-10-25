@@ -19,6 +19,7 @@ pub enum Effect {
     Schedule(Duration),
     Cancel,
     Listen { ns: ByteString },
+    ListenAcks { ns: ByteString },
 }
 
 pub fn listen(ns: &str) -> Effect {
@@ -58,6 +59,7 @@ impl Rig {
                 ManagerOutput::Schedule(delay) => Effect::Schedule(delay),
                 ManagerOutput::Cancel => Effect::Cancel,
                 ManagerOutput::Listen { ns, .. } => Effect::Listen { ns },
+                ManagerOutput::ListenAcks { ns, .. } => Effect::ListenAcks { ns },
             })
             .collect()
     }

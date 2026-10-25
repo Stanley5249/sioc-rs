@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::ack::Acknowledge;
@@ -24,7 +24,7 @@ impl ConnectHandles {
         oneshot::Receiver<Result<(), SocketError>>,
     ) {
         (
-            SocketSender::new(self.client_packet_tx, self.closed),
+            SocketSender::with_ack_channel(self.client_packet_tx, self.closed, self.ack_route_rx),
             SocketReceiver {
                 server_packet_rx: self.server_packet_rx,
                 terminal_packet_rx: Some(self.terminal_packet_rx),
@@ -44,17 +44,24 @@ impl ConnectHandles {
 pub struct SocketSender {
     /// Carries packets to the manager task, which encodes and sends them.
     client_packet_tx: mpsc::Sender<ClientPacket>,
+    /// The confirmed engine's bounded reply input. Rust channel: JS
+    /// `Socket.ack` writes at once and discards replies while unconfirmed.
+    ack_route_rx: watch::Receiver<Option<mpsc::Sender<ClientPacket>>>,
     closed: CancellationToken,
     // Last-handle drop also wakes a namespace whose send buffer is full.
     _closed: Arc<DropGuard>,
 }
 
 impl SocketSender {
-    /// Wraps the channel to a namespace and the token that marks it closed.
-    #[must_use]
-    fn new(client_packet_tx: mpsc::Sender<ClientPacket>, closed: CancellationToken) -> Self {
+    /// Wraps the event input, current ACK route, and shared close token.
+    fn with_ack_channel(
+        client_packet_tx: mpsc::Sender<ClientPacket>,
+        closed: CancellationToken,
+        ack_route_rx: watch::Receiver<Option<mpsc::Sender<ClientPacket>>>,
+    ) -> Self {
         Self {
             client_packet_tx,
+            ack_route_rx,
             _closed: Arc::new(closed.clone().drop_guard()),
             closed,
         }
@@ -85,10 +92,25 @@ impl SocketSender {
             }
         }
 
-        self.client_packet_tx
-            .send(packet)
-            .await
-            .map_err(|_| SocketError::Closed)
+        if matches!(&packet, ClientPacket::Ack { .. }) {
+            // Capture the route before waiting for capacity. A queued or
+            // blocked reply stays with that engine, never its successor.
+            let sender = self.ack_route_rx.borrow().clone();
+            if let Some(sender) = sender
+                && sender.send(packet).await.is_err()
+            {
+                if self.closed.is_cancelled() || self.client_packet_tx.is_closed() {
+                    return Err(SocketError::Closed);
+                }
+                tracing::debug!("discarded ack for an ended engine");
+            }
+            Ok(())
+        } else {
+            self.client_packet_tx
+                .send(packet)
+                .await
+                .map_err(|_| SocketError::Closed)
+        }
     }
 }
 
@@ -120,6 +142,10 @@ impl SocketSender {
     }
 
     /// Acknowledges a received event.
+    ///
+    /// Replies use the currently confirmed engine's bounded channel. Replies
+    /// made while unconfirmed are discarded, and queued replies are discarded
+    /// when that engine ends. They do not survive reconnection with events.
     ///
     /// # Errors
     ///

@@ -66,9 +66,12 @@ impl Backoff {
             return None;
         }
 
-        // The cap is reached long before the exponent overflows `f64`.
-        let exponent = i32::try_from(self.attempts).unwrap_or(i32::MAX).min(64);
-        let millis = self.delay.as_secs_f64() * 1000.0 * 2_f64.powi(exponent);
+        // Keep both operands finite: zero delay stays zero, and subtractive
+        // jitter never subtracts infinity from infinity. Saturated positive
+        // delays still exceed every Duration cap after jitter.
+        let exponent = i32::try_from(self.attempts).unwrap_or(i32::MAX);
+        let multiplier = 2_f64.powi(exponent).min(f64::MAX);
+        let millis = (self.delay.as_secs_f64() * 1000.0 * multiplier).min(f64::MAX);
 
         self.attempts = self.attempts.saturating_add(1);
 
@@ -83,10 +86,14 @@ impl Backoff {
         };
 
         let max_millis = self.delay_max.as_secs_f64() * 1000.0;
-
-        Some(Duration::from_secs_f64(
-            millis.clamp(0.0, max_millis).floor() / 1000.0,
-        ))
+        let seconds = millis.clamp(0.0, max_millis).floor() / 1000.0;
+        // The configured cap is exact; its floating representation may round
+        // beyond Duration::MAX, so keep the original value at the ceiling.
+        Some(if seconds >= self.delay_max.as_secs_f64() {
+            self.delay_max
+        } else {
+            Duration::from_secs_f64(seconds)
+        })
     }
 
     /// Starts counting attempts from zero again, like `Backoff.reset`.
@@ -178,5 +185,54 @@ mod tests {
             backoff.next_delay(&mut fastrand::Rng::new()),
             Some(Duration::from_secs(5))
         );
+    }
+
+    #[test]
+    fn maximum_duration_stays_within_the_configured_cap() {
+        let near_max = Duration::MAX.checked_sub(Duration::from_secs(1)).unwrap();
+        for (cap, expected) in [
+            (Duration::MAX, Duration::MAX),
+            (near_max, near_max),
+            (Duration::from_micros(2500), Duration::from_millis(2)),
+        ] {
+            let mut backoff = Backoff::new(Duration::MAX, cap, 0.0, None);
+            let mut rng = fastrand::Rng::with_seed(7);
+            assert_eq!(backoff.next_delay(&mut rng), Some(expected));
+        }
+    }
+
+    #[test]
+    fn delays_keep_growing_after_sixty_four_attempts() {
+        let mut backoff = Backoff::new(Duration::from_nanos(1), Duration::MAX, 0.0, None);
+        backoff.attempts = 64;
+        let mut rng = fastrand::Rng::with_seed(7);
+        let first = backoff.next_delay(&mut rng).unwrap();
+        let second = backoff.next_delay(&mut rng).unwrap();
+        assert!(second > first);
+    }
+
+    #[test]
+    fn enormous_attempt_counts_preserve_zero_delays_and_caps() {
+        let fractional_cap = Duration::from_micros(2500);
+        for (delay, cap, expected) in [
+            (Duration::ZERO, fractional_cap, Duration::ZERO),
+            (Duration::ZERO, Duration::MAX, Duration::ZERO),
+            (
+                Duration::from_nanos(1),
+                fractional_cap,
+                Duration::from_millis(2),
+            ),
+            (Duration::from_nanos(1), Duration::MAX, Duration::MAX),
+            (Duration::MAX, fractional_cap, Duration::from_millis(2)),
+            (Duration::MAX, Duration::MAX, Duration::MAX),
+        ] {
+            for jitter in [0.0, 0.5, 1.0] {
+                let mut backoff = Backoff::new(delay, cap, jitter, None);
+                backoff.attempts = u32::MAX - 1;
+                let mut rng = fastrand::Rng::with_seed(7);
+                let delays: [_; 3] = std::array::from_fn(|_| backoff.next_delay(&mut rng));
+                assert_eq!(delays, [Some(expected); 3]);
+            }
+        }
     }
 }

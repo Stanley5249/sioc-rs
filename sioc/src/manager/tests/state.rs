@@ -179,7 +179,7 @@ fn dropping_the_ack_handle_keeps_the_event() {
 }
 
 #[test]
-fn ack_replies_wait_for_the_next_confirmation() {
+fn a_reply_requires_the_current_engine_confirmation() {
     let mut rig = Rig::reconnecting();
     rig.connect("/", "{}", 32);
     rig.handshake();
@@ -193,7 +193,8 @@ fn ack_replies_wait_for_the_next_confirmation() {
     rig.send("/", ack(6));
     assert_eq!(rig.messages(), ["36[]"]);
 
-    // A reply the engine never took waits for the next confirmation.
+    // A newly submitted reply needs current confirmation. The actor owns
+    // old session inputs, which are tested separately from this send rule.
     rig.step(ManagerInput::Closed(Ok(())));
     assert_eq!(rig.core.read("/", true), Read::Wait);
     rig.step(ManagerInput::Reconnect);
@@ -321,14 +322,17 @@ fn engine_loss_before_a_disconnect_drains_ends_the_namespace_without_reconnectin
     handles.closed.cancel();
 
     let effects = rig.step(ManagerInput::Closed(Ok(())));
-    assert_eq!(effects, [Effect::Schedule(Duration::ZERO)]);
+    assert_eq!(effects, []);
+    // A retry timer winning before inbox EOF must not start an unwanted
+    // successor for participation that has already stopped accepting work.
+    assert_eq!(rig.step(ManagerInput::Reconnect), []);
     // The unsent event keeps its waiter until the handles drain.
     assert_eq!(ack.try_recv().unwrap_err(), TryRecvError::Empty);
 
     assert_eq!(rig.core.read("/", true), Read::Discard);
     assert_eq!(rig.step(packet("/", unsent_packet)), []);
     assert_eq!(ack.try_recv().unwrap_err(), TryRecvError::Closed);
-    assert_eq!(rig.step(disconnect("/")), [Effect::Cancel]);
+    assert_eq!(rig.step(disconnect("/")), []);
     assert!(rig.core.is_idle());
 }
 
@@ -451,6 +455,23 @@ fn release_with_no_namespace_closes_the_first_engine() {
 }
 
 #[test]
+fn release_keeps_the_engine_until_the_last_namespace_disconnects() {
+    let mut rig = Rig::new();
+    let handles = rig.connected("/");
+
+    assert_eq!(rig.step(ManagerInput::Release), []);
+    assert_eq!(rig.messages(), Vec::<String>::new());
+    assert_eq!(rig.core.read("/", true), Read::Send);
+
+    handles.closed.cancel();
+    assert_eq!(rig.step(disconnect("/")), []);
+    assert_eq!(rig.messages(), ["1"]);
+    assert_eq!(rig.effects(), [Effect::Close]);
+    assert_eq!(rig.step(ManagerInput::Closed(Ok(()))), []);
+    assert!(rig.core.is_idle());
+}
+
+#[test]
 fn no_engine_opens_while_one_runs_or_closes() {
     let mut rig = Rig::reconnecting();
     rig.connect("/", "{}", 32);
@@ -488,6 +509,21 @@ fn a_namespace_opened_while_the_client_closes_the_engine_opens_the_next_at_once(
     assert_eq!(rig.step(ManagerInput::Closed(Ok(()))), [Effect::Open]);
     rig.handshake();
     assert_eq!(rig.messages(), ["0/b,{}"]);
+}
+
+#[test]
+fn a_namespace_activated_while_flushing_uses_the_same_engine_once() {
+    let mut rig = Rig::new();
+    let old = rig.connected("/");
+    old.closed.cancel();
+    assert_eq!(rig.step(disconnect("/")), []);
+    // DISCONNECT has not been handed off, so this engine is still flushing.
+    let mut new = rig.connect("/new", "{}", 32);
+    new.reply_rx.try_recv().unwrap().unwrap();
+    assert_eq!(rig.effects(), [listen("/new")]);
+    assert_eq!(rig.messages(), ["1", "0/new,{}"]);
+    assert_eq!(rig.step(ManagerInput::Release), []);
+    assert_eq!(rig.messages(), Vec::<String>::new());
 }
 
 #[test]

@@ -1,10 +1,13 @@
 //! One namespace name and everything the manager keeps for it.
+//!
+//! The state and its transitions stay together so participation ownership,
+//! input handoff and termination can be reviewed against the same resources.
 
 use std::collections::HashMap;
 
 use bytestring::ByteString;
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::SocketError;
@@ -18,17 +21,9 @@ pub struct Namespace {
     /// The next ack id, like `Socket.ids`. It never restarts, so a late ack
     /// for a closed namespace never answers an event of the reopened one.
     next_ack_id: u64,
-    /// Waiters of events the engine took, like `Socket.acks`.
-    acks: HashMap<u64, oneshot::Sender<DynAck>>,
-    /// What the handles send, like `Socket.sendBuffer`, until the actor takes
-    /// it to read. Packets wait here until they can go to the engine.
-    client_packet_rx: Option<mpsc::Receiver<ClientPacket>>,
     /// A request to open the name again once its old handles finish. Rust
     /// cleanup: JS reuses the one `Socket` at once.
     reopen: Option<ConnectRequest>,
-    /// Whether the namespace became active and its CONNECT is not queued yet,
-    /// like `Socket.connect` waiting for `onopen`.
-    connect_due: bool,
     /// Where the namespace is in its life, like `Socket.active`.
     state: NamespaceState,
 }
@@ -50,6 +45,17 @@ enum NamespaceState {
 /// active `Socket`.
 #[derive(Debug)]
 struct Active {
+    /// Waiters of events this participation sent, like `Socket.acks`.
+    acks: HashMap<u64, oneshot::Sender<DynAck>>,
+    /// The inbox until ownership transfers to the actor's `NamespaceInputs`,
+    /// like `Socket.sendBuffer`. Only its owner drains it.
+    client_packet_rx: Option<mpsc::Receiver<ClientPacket>>,
+    /// The confirmed engine's ACK route, like `Socket.ack`. Rust channel.
+    ack_route_tx: watch::Sender<Option<mpsc::Sender<ClientPacket>>>,
+    /// The reply input until the actor takes ownership. Rust channel.
+    ack_packet_rx: Option<mpsc::Receiver<ClientPacket>>,
+    /// Per-engine reply capacity, matching the event inbox. Rust bound.
+    ack_capacity: usize,
     /// The JSON auth payload, sent with the CONNECT of every engine, like
     /// `Socket.auth`.
     auth: ByteString,
@@ -87,6 +93,21 @@ pub enum Read {
     Wait,
 }
 
+/// A delivery waiting for its original receiver, like `Socket.emitEvent`.
+/// Rust bound: JS listeners never fill. Owning the route prevents namespace
+/// reuse from redirecting the packet to replacement handles.
+#[derive(Debug)]
+pub struct Delivery {
+    /// The original `Socket.nsp`, used only for cleanup and diagnostics.
+    pub ns: ByteString,
+    /// The packet waiting for `Socket.emitEvent`.
+    pub packet: ServerPacket,
+    /// The original receiver's channel, the Rust equivalent of its listeners.
+    pub sender: mpsc::Sender<ServerPacket>,
+    /// Cancels this delivery when its participation ends. Rust cleanup.
+    pub closed: CancellationToken,
+}
+
 impl Namespace {
     /// Opens the namespace and reports the result to the caller, like
     /// `Socket.connect`. Returns the auth payload if it became active.
@@ -117,6 +138,7 @@ impl Namespace {
         let ConnectRequest {
             payload,
             client_packet_rx,
+            ack_route_tx,
             closed,
             server_packet_tx,
             terminal_packet_tx,
@@ -127,9 +149,12 @@ impl Namespace {
         // The caller may have cancelled connect while the request was queued.
         let _ = reply_tx.send(Ok(()));
 
-        self.client_packet_rx = Some(client_packet_rx);
-        self.connect_due = true;
         self.state = NamespaceState::Active(Active {
+            acks: HashMap::new(),
+            ack_capacity: client_packet_rx.max_capacity(),
+            client_packet_rx: Some(client_packet_rx),
+            ack_route_tx,
+            ack_packet_rx: None,
             auth: payload.clone(),
             server_packet_tx,
             terminal_packet_tx: Some(terminal_packet_tx),
@@ -142,19 +167,20 @@ impl Namespace {
     /// Takes the channel and token of handles that just became active. Rust
     /// channel: JS handles call the `Socket` directly.
     pub fn take_listen(&mut self) -> Option<(mpsc::Receiver<ClientPacket>, CancellationToken)> {
-        let NamespaceState::Active(active) = &self.state else {
+        let NamespaceState::Active(active) = &mut self.state else {
             return None;
         };
-        Some((self.client_packet_rx.take()?, active.closed.clone()))
+        Some((active.client_packet_rx.take()?, active.closed.clone()))
     }
 
-    /// Takes the auth payload of a namespace that became active since the
-    /// last call, so its CONNECT is queued once, like `Socket.connect`.
-    pub fn take_connect(&mut self) -> Option<ByteString> {
-        if !std::mem::take(&mut self.connect_due) {
+    /// Hands the actor the confirmed engine's reply input. Rust channel:
+    /// `Socket.ack` writes directly in JS, while queued Rust replies need a
+    /// session-local owner that can discard them on engine end.
+    pub fn take_acks(&mut self) -> Option<mpsc::Receiver<ClientPacket>> {
+        let NamespaceState::Active(active) = &mut self.state else {
             return None;
-        }
-        self.auth().cloned()
+        };
+        active.ack_packet_rx.take()
     }
 
     /// Returns whether the namespace has live handles that still need an
@@ -186,14 +212,18 @@ impl Namespace {
     /// running once connected.
     #[must_use]
     pub fn read(&self, engine_ready: bool) -> Read {
-        match &self.state {
-            NamespaceState::Active(active) if active.connected && engine_ready => Read::Send,
-            NamespaceState::Active(active) if active.connected || !active.closed.is_cancelled() => {
-                Read::Wait
-            }
-            NamespaceState::Active(_) | NamespaceState::Inactive | NamespaceState::Draining => {
-                Read::Discard
-            }
+        let NamespaceState::Active(active) = &self.state else {
+            return Read::Discard;
+        };
+        if active.connected {
+            // Confirmed participation flushes accepted packets before local
+            // disconnect; closure stops admission without cancelling that work.
+            return if engine_ready { Read::Send } else { Read::Wait };
+        }
+        if active.closed.is_cancelled() {
+            Read::Discard
+        } else {
+            Read::Wait
         }
     }
 
@@ -210,18 +240,24 @@ impl Namespace {
     /// Reclaims waiters whose handles were dropped or timed out first, so
     /// unanswered requests do not accumulate.
     pub fn register_ack(&mut self, ack_tx: oneshot::Sender<DynAck>) -> u64 {
-        self.acks.retain(|_, ack_tx| !ack_tx.is_closed());
+        let NamespaceState::Active(active) = &mut self.state else {
+            unreachable!("only an active namespace registers an ack");
+        };
+        active.acks.retain(|_, ack_tx| !ack_tx.is_closed());
 
         let id = self.next_ack_id;
         self.next_ack_id += 1;
-        self.acks.insert(id, ack_tx);
+        active.acks.insert(id, ack_tx);
         id
     }
 
     /// Completes the waiter of an ack, like `Socket.onack`. Removes it first,
     /// so each ack arrives at most once and an unknown id completes nothing.
     pub fn resolve_ack(&mut self, ns: &str, id: u64, ack: DynAck) {
-        let Some(ack_tx) = self.acks.remove(&id) else {
+        let NamespaceState::Active(active) = &mut self.state else {
+            return;
+        };
+        let Some(ack_tx) = active.acks.remove(&id) else {
             tracing::debug!(%ns, id, "discarded ack with no pending handle");
             return;
         };
@@ -232,7 +268,12 @@ impl Namespace {
 
     /// Records the server's CONNECT, like `Socket.onconnect`.
     pub fn confirm(&mut self) {
-        if let NamespaceState::Active(active) = &mut self.state {
+        if let NamespaceState::Active(active) = &mut self.state
+            && !active.connected
+        {
+            let (tx, rx) = mpsc::channel(active.ack_capacity);
+            active.ack_route_tx.send_replace(Some(tx));
+            active.ack_packet_rx = Some(rx);
             active.connected = true;
         }
     }
@@ -242,7 +283,7 @@ impl Namespace {
     ///
     /// Packets for a namespace the client left, or for a dropped receiver,
     /// are discarded, because the server may still send them.
-    pub fn deliver(&self, ns: &str, packet: ServerPacket) -> Option<ServerPacket> {
+    pub fn deliver(&self, ns: &ByteString, packet: ServerPacket) -> Option<Delivery> {
         let NamespaceState::Active(active) = &self.state else {
             tracing::debug!(%ns, "discarded server packet for a closed namespace");
             return None;
@@ -250,21 +291,16 @@ impl Namespace {
 
         match active.server_packet_tx.try_send(packet) {
             Ok(()) => None,
-            Err(TrySendError::Full(packet)) => Some(packet),
+            Err(TrySendError::Full(packet)) => Some(Delivery {
+                ns: ns.clone(),
+                packet,
+                sender: active.server_packet_tx.clone(),
+                closed: active.closed.clone(),
+            }),
             Err(TrySendError::Closed(_)) => {
                 tracing::debug!(%ns, "discarded server packet for a dropped receiver");
                 None
             }
-        }
-    }
-
-    /// Returns a sender to the receiver, to reserve a slot for a held packet.
-    /// Rust bound: JS listeners never fill.
-    #[must_use]
-    pub fn server_packet_tx(&self) -> Option<mpsc::Sender<ServerPacket>> {
-        match &self.state {
-            NamespaceState::Active(active) => Some(active.server_packet_tx.clone()),
-            NamespaceState::Inactive | NamespaceState::Draining => None,
         }
     }
 
@@ -274,8 +310,13 @@ impl Namespace {
     /// Delivers `terminal` on its own channel, so it arrives even when the
     /// receiver is full, and fails every waiter.
     pub fn end(&mut self, ns: &str, terminal: Option<ServerPacket>) {
-        let NamespaceState::Active(mut active) = std::mem::take(&mut self.state) else {
+        // Repeated termination preserves the draining participation and its
+        // waiting reopen. Only the actor's inbox EOF finishes that ownership.
+        if !self.is_active() {
             return;
+        }
+        let NamespaceState::Active(mut active) = std::mem::take(&mut self.state) else {
+            unreachable!("the active state was checked before taking it");
         };
 
         if let (Some(packet), Some(terminal_packet_tx)) =
@@ -284,14 +325,9 @@ impl Namespace {
         {
             tracing::debug!(%ns, "discarded terminal packet for a dropped receiver");
         }
-        drop(active);
-        self.acks.clear();
-
         // A channel the actor never took has no old handles to drain, so the
         // name is free at once.
-        if self.client_packet_rx.take().is_some() {
-            self.become_inactive();
-        } else {
+        if active.client_packet_rx.is_none() {
             self.state = NamespaceState::Draining;
         }
     }
@@ -303,23 +339,29 @@ impl Namespace {
     pub fn disconnect(&mut self) -> bool {
         let connected = self.is_connected();
         self.state = NamespaceState::Inactive;
-        self.acks.clear();
-        self.become_inactive();
         connected
     }
 
     /// Handles the end of an engine, like `Socket.onclose`: fails the waiters
     /// of events the engine took, which is `_clearAcks`. Packets the engine
     /// never took stay in the channel.
-    pub fn engine_closed(&mut self) {
-        self.acks.clear();
+    pub fn engine_closed(&mut self, ns: &str) {
+        if matches!(&self.state, NamespaceState::Active(active) if active.closed.is_cancelled()) {
+            // The old engine can no longer flush this participation. Finish
+            // admission before retry decisions; only inbox reclamation remains.
+            self.end(ns, None);
+            return;
+        }
         if let NamespaceState::Active(active) = &mut self.state {
+            active.acks.clear();
+            active.ack_route_tx.send_replace(None);
+            active.ack_packet_rx = None;
             active.connected = false;
         }
     }
 
-    /// Ends the namespace for good, because the manager stops. Rust cleanup:
-    /// the JS `Manager` never stops.
+    /// Ends the namespace when the manager task terminates. Rust cleanup:
+    /// application-owned handles must close when their actor is gone.
     pub fn shutdown(&mut self) {
         *self = Self {
             next_ack_id: self.next_ack_id,
@@ -327,12 +369,10 @@ impl Namespace {
         };
     }
 
-    /// Leaves for `Inactive`, then opens the waiting request, if any.
-    fn become_inactive(&mut self) {
-        self.state = NamespaceState::Inactive;
-        if let Some(request) = self.reopen.take() {
-            self.open(request);
-        }
+    /// Takes a waiting request only after old participation has finished.
+    /// Rust cleanup: the core opens it after reclaiming the old deliveries.
+    pub fn take_reopen(&mut self) -> Option<ConnectRequest> {
+        self.is_inactive().then(|| self.reopen.take()).flatten()
     }
 }
 
@@ -341,8 +381,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reads_follow_confirmation_closure_and_engine_capacity() {
+        for (confirmed, closed, engine_ready, expected) in [
+            (false, false, false, Read::Wait),
+            (false, false, true, Read::Wait),
+            (false, true, false, Read::Discard),
+            (false, true, true, Read::Discard),
+            (true, false, false, Read::Wait),
+            (true, false, true, Read::Send),
+            (true, true, false, Read::Wait),
+            (true, true, true, Read::Send),
+        ] {
+            let mut namespace = Namespace::default();
+            let (request, handles) = ConnectRequest::new("/".into(), "{}".into(), 1, 1);
+            namespace.open(request);
+            if confirmed {
+                namespace.confirm();
+            }
+            if closed {
+                handles.closed.cancel();
+            }
+            assert_eq!(
+                namespace.read(engine_ready),
+                expected,
+                "confirmed={confirmed}, closed={closed}, engine_ready={engine_ready}"
+            );
+        }
+    }
+
+    #[test]
+    fn inactive_and_draining_participation_discards_packets() {
+        let mut namespace = Namespace::default();
+        for ready in [false, true] {
+            assert_eq!(namespace.read(ready), Read::Discard);
+        }
+        let (request, _handles) = ConnectRequest::new("/".into(), "{}".into(), 1, 1);
+        namespace.open(request);
+        let _actor_inputs = namespace.take_listen().unwrap();
+        namespace.end("/", None);
+        for ready in [false, true] {
+            assert_eq!(namespace.read(ready), Read::Discard);
+        }
+    }
+
+    #[test]
     fn registering_an_ack_reclaims_dropped_waiters() {
         let mut namespace = Namespace::default();
+        let (request, _handles) = ConnectRequest::new("/".into(), "{}".into(), 1, 1);
+        namespace.open(request);
         let (live_tx, _live_rx) = oneshot::channel();
         namespace.register_ack(live_tx);
         for _ in 0..100 {
@@ -350,10 +436,16 @@ mod tests {
             namespace.register_ack(ack_tx);
             drop(ack_rx);
         }
-        assert_eq!(namespace.acks.len(), 2);
+        let NamespaceState::Active(active) = &namespace.state else {
+            unreachable!()
+        };
+        assert_eq!(active.acks.len(), 2);
 
         let (ack_tx, _ack_rx) = oneshot::channel();
         assert_eq!(namespace.register_ack(ack_tx), 101);
-        assert_eq!(namespace.acks.len(), 2);
+        let NamespaceState::Active(active) = &namespace.state else {
+            unreachable!()
+        };
+        assert_eq!(active.acks.len(), 2);
     }
 }

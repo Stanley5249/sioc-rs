@@ -3,11 +3,13 @@
 //!
 //! [`state::ManagerCore`] owns all namespace, ack, and reconnection state and
 //! never awaits. [`actor::run`] is the one task that owns the I/O around it:
-//! the engine, the reconnection timer, and the channel of every namespace's
-//! handles. Each scope takes one kind of input and talks in two directions:
+//! the engine, the reconnection timer, and the input channels of every
+//! namespace's handles. Each scope takes one kind of input and talks in two
+//! directions:
 //!
 //! ```text
-//!  SocketSender --ClientPacket--> channel (= Socket.sendBuffer) --+
+//!  SocketSender --events--> event input (= Socket.sendBuffer) ----+
+//!  SocketSender --ACK replies--> engine input (= Socket.ack) ------+
 //!  Client::connect --ConnectRequest-------------------------------+--> actor
 //!  engine --ServerMessage-----------------------------------------+     |
 //!                                                     ManagerInput |     v
@@ -26,11 +28,31 @@
 //!   held alone, and the actor reads at most one more engine message, to see
 //!   the engine hang up, until it is delivered.
 //! - An ack waiter is registered when its event goes to the engine, so an
-//!   engine's end fails exactly the waiters of events it took.
+//!   engine's end fails exactly the waiters of events it took. Packet selection
+//!   owns the output permit through the synchronous header handoff, so
+//!   concurrent engine polling cannot revoke a slot after an event leaves its
+//!   inbox. Unused selection permits return to the same engine.
+//! - Event inboxes survive engine loss. Each confirmed engine publishes a
+//!   separate bounded ACK reply input. Senders capture that route before
+//!   waiting for capacity, and the actor drops all old reply inputs at engine
+//!   completion before starting a successor. Each input has
+//!   `ChannelConfig::manager` slots. Local namespace cleanup drains both
+//!   directions before releasing the name; server termination discards them.
 //! - An engine closes for the core only after its future finished and its
 //!   server direction ended, and each engine gets new channels.
+//!   [`engine::Engine`] owns that completion and uses one reclamation path.
+//!   Peer closure processes final control packets without awaiting application
+//!   capacity; local closure discards unread server messages. An existing held
+//!   delivery keeps its original destination, while later overflow during
+//!   reclamation is discarded. Opening cancellation drops the connection future
+//!   before a successful handshake, even without a deadline.
 //! - Ending a namespace never waits on the application: its token closes the
 //!   channel, which the actor reads to the end.
+//! - A held delivery owns its original receiver and cancellation token. The
+//!   core reopens a name only after old inbox EOF and delivery cleanup. ACK
+//!   waiters belong to that active participation; only the per-name ID counter
+//!   survives it. An ended binary reconstruction consumes its remaining frames
+//!   without retaining or delivering the old payload.
 //!
 //! The behavior follows socket.io-client 4.8.4:
 //!
@@ -39,6 +61,9 @@
 //! - [`socket.ts`]: `Socket.onopen`, `onclose`, `_clearAcks`, and
 //!   `emitBuffered`.
 //! - [`backo2.ts`]: `Backoff.duration`, which [`backoff`] follows.
+//! - [`engineSocket.ts`]: Engine.IO client 6.6.7's `Socket.readyState` and
+//!   `close`, which may defer transport closure for buffered writes or an
+//!   upgrade.
 //!
 //! Each engine gets new channels, because the socket.io 4.8.4 server closes
 //! the whole connection when a packet other than CONNECT arrives for a
@@ -47,14 +72,16 @@
 //! [`manager.ts`]: https://github.com/socketio/socket.io/blob/socket.io-client@4.8.4/packages/socket.io-client/lib/manager.ts
 //! [`socket.ts`]: https://github.com/socketio/socket.io/blob/socket.io-client@4.8.4/packages/socket.io-client/lib/socket.ts
 //! [`backo2.ts`]: https://github.com/socketio/socket.io/blob/socket.io-client@4.8.4/packages/socket.io-client/lib/contrib/backo2.ts
+//! [`engineSocket.ts`]: https://github.com/socketio/socket.io/blob/11a6f561a757264c3231c3383c4cdbf37bcf52de/packages/engine.io-client/lib/socket.ts
 //! [`client.ts`]: https://github.com/socketio/socket.io/blob/socket.io@4.8.4/packages/socket.io/lib/client.ts
 
 pub mod actor;
 pub mod backoff;
 pub mod connect_request;
 pub mod decoder;
+pub mod engine;
 pub mod namespace;
-pub mod send_buffer;
+pub mod namespace_inputs;
 pub mod state;
 
 #[cfg(test)]
