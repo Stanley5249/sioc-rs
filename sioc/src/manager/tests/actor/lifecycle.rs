@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use bytestring::ByteString;
-use eioc::prelude::Message;
+use eioc::prelude::ClientMessage;
 
 use super::harness::*;
 use crate::error::{ManagerError, SocketError};
@@ -22,7 +22,7 @@ async fn closes_when_client_handle_drops_with_no_namespace() {
     let mut session = session.unwrap();
     drop(connect_request_tx);
     assert!(session.client_message_rx.recv().await.is_none());
-    session.end().await;
+    session.close().await;
     task.await.unwrap().unwrap();
 }
 
@@ -44,10 +44,10 @@ async fn closes_after_client_handle_and_last_namespace_drop() {
     drop(client_packet_tx);
     assert!(matches!(
         session.client_message_rx.recv().await,
-        Some(Message::Text(text)) if text == "1"
+        Some(ClientMessage::Text(text)) if text == "1"
     ));
     assert!(session.client_message_rx.recv().await.is_none());
-    session.end().await;
+    session.close().await;
     task.await.unwrap().unwrap();
 }
 
@@ -89,7 +89,7 @@ async fn internal_send_failure_releases_a_full_retained_receiver() {
     manager.send_server_message(r#"2["blocked"]"#).await;
     manager.session().client_message_rx.close();
     tx.send(event(r#"["fails"]"#, None)).await.unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(1), manager.finish())
+    let result = tokio::time::timeout(Duration::from_secs(1), manager.join())
         .await
         .expect("a broken engine must release blocked delivery");
     // The manager sees the closed receiver on its next send, the engine
@@ -110,7 +110,7 @@ async fn local_disconnect_finishes_with_a_full_retained_receiver() {
     manager.send_server_message(r#"2["blocked"]"#).await;
     tx.disconnect();
 
-    tokio::time::timeout(Duration::from_secs(1), manager.finish())
+    tokio::time::timeout(Duration::from_secs(1), manager.join())
         .await
         .expect("disconnect must release blocked delivery")
         .unwrap();
@@ -129,7 +129,7 @@ async fn peer_close_drains_final_messages_without_an_application_consumer() {
     for message in [r#"2["held"]"#, r#"2["overflow"]"#, "1"] {
         manager.send_server_message(message).await;
     }
-    tokio::time::timeout(Duration::from_secs(1), manager.finish())
+    tokio::time::timeout(Duration::from_secs(1), manager.join())
         .await
         .expect("engine cleanup drains without application consumption")
         .unwrap();
@@ -149,7 +149,7 @@ async fn no_session_reopens_without_namespaces_until_one_opens() {
     manager.send_server_message(CONNECT_RESPONSE).await;
     tx.disconnect();
     drop(rx);
-    manager.session.take().unwrap().end().await;
+    manager.session.take().unwrap().close().await;
 
     let reopened = tokio::time::timeout(Duration::from_secs(3600), manager.session_rx.recv()).await;
     assert!(reopened.is_err(), "no namespace needs a new session");

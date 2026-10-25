@@ -26,6 +26,7 @@ Each section covers one area or component. A rejected approach records why it fa
 - A namespace's channel is its only send buffer, and the actor reads it only when the packet can go to the engine at once. Reading every packet into a second buffer in the core needed a semaphore to bound it, a disconnecting state to flush it, and per-event ack bookkeeping, and hiding the channel until the buffer had room hid its end, so an unconfirmed namespace never closed.
 - A server packet held for a full receiver never hides the engine's hang-up. The actor kept sending events into a session that only drained, which lost them, and an empty closed server direction blocked the engine's cleanup.
 - Every sender of a namespace's channel is a `SocketSender`, whose `DropGuard` cancels the token when the last one drops. The actor leaves an unconfirmed channel unread, so a raw sender dropped without the token left the namespace open forever.
+- The engine task's own error always becomes the session result, and an engine that stops early without an error is the only internal error. Replacing the result whenever the engine ended while admission was open hid the engine's real failure.
 - Rejected: one input channel shared by all sources. The shared channel loses per-namespace EOF and backpressure, starves control behind data, and needs a forwarding task for engine messages.
 - Rejected: generation counters or incarnation ids to tell old work from new. Old work is isolated by ownership and finished cleanup instead.
 
@@ -82,6 +83,9 @@ Each section covers one area or component. A rejected approach records why it fa
 - The handshake travels as the first server frame. A separate oneshot gave an opening a second end signal beside the channel's end.
 - A local close discards the message waiting for the manager, and only a peer end delivers it, because the manager that closed no longer reads for it.
 - A WebSocket local close sends the Close packet and a close frame without waiting for the server's reply, like the JS client. Waiting let a silent server hold the close open.
+- The session state says only whether the session is opening, open, or closed, a deadline failure returns as an `Err`, and the task keeps the first failure in one `Result` during cleanup. A close reason that also stored the failure needed a separate step to extract it and mixed who closed the session with how it ended.
+- A closed session has no deadline, and the transport bounds its own close. Reusing the last ping window for a normal close reported a heartbeat timeout that never happened.
+- A hang-up during opening closes the session like any other, and an owner that cannot wait for the handshake drops the task. A separate cancelled reason that dropped the transport duplicated the manager's abort.
 
 ## Configuration
 

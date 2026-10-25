@@ -6,42 +6,24 @@ use bytestring::ByteString;
 use tokio::time::Instant;
 
 use crate::error::EngineError;
-use crate::packet::{Message, ServerMessage};
+use crate::packet::{ClientMessage, ServerMessage};
 use crate::transport::{ClientFrame, ServerFrame};
 
-/// The session's stage, like `Socket.readyState`.
+/// What the session can do, like `Socket.readyState`.
 #[derive(Debug)]
-enum ReadyState {
-    /// Before the Open packet, like `"opening"`. The deadline is the
-    /// handshake timeout, like the `timeout` option.
+enum SessionState {
+    /// Waiting for the Open packet. The deadline is the handshake timeout,
+    /// like the `timeout` option of socket.io-client's `Manager`.
     Opening { deadline: Option<Instant> },
-    /// After it, like `"open"`. The deadline ends the ping window, like
-    /// `_pingTimeoutTimer`.
+    /// Running. The deadline ends the ping window, like `_pingTimeoutTimer`.
     Open {
         ping_window: Duration,
         deadline: Instant,
     },
-    /// The manager hung up, and the transport is sending its last frames and
-    /// the Close packet, like `"closing"`. The last ping window still bounds
-    /// the close. Rust cleanup: JS closes the transport synchronously.
-    Closing { deadline: Instant },
-    /// The session ended, like `"closed"`.
-    Closed(CloseReason),
-}
-
-/// Why the session ended, like the reason of `Socket.onClose`.
-#[derive(Debug)]
-pub enum CloseReason {
-    /// The manager hung up before the Open packet, like `Socket.close` while
-    /// opening. The opening is dropped, because a handshake may have no
-    /// deadline.
-    Cancelled,
-    /// The manager hung up, like `Socket.close`.
-    Local,
-    /// The transport ended the server direction, like `"transport close"`.
-    Peer,
-    /// The core failed the session, like `"ping timeout"`.
-    Failed(EngineError),
+    /// Over: frames are discarded, messages refused, and nothing times out.
+    /// The transport may still be sending the Close packet, which only it can
+    /// bound, so no heartbeat deadline applies to it.
+    Closed,
 }
 
 /// The Engine.IO session state, like engine.io-client's `Socket` without its
@@ -49,7 +31,7 @@ pub enum CloseReason {
 /// channel permit is in hand, and sends the returned output on that permit.
 #[derive(Debug)]
 pub struct EngineCore {
-    state: ReadyState,
+    state: SessionState,
     /// The pong owed to the server's last ping. A later ping replaces it,
     /// because the server needs one pong within its window, not one per ping.
     /// Rust bound: JS writes each pong at once.
@@ -61,7 +43,7 @@ impl EngineCore {
     #[must_use]
     pub fn new(handshake_timeout: Option<Duration>, now: Instant) -> Self {
         Self {
-            state: ReadyState::Opening {
+            state: SessionState::Opening {
                 deadline: handshake_timeout.map(|timeout| now + timeout),
             },
             pong: None,
@@ -70,8 +52,8 @@ impl EngineCore {
 
     /// Handles one server frame, like `Socket._onPacket`, and returns the
     /// message to deliver. A valid frame out of place is ignored, like the JS
-    /// client does, so a quirky server cannot end the session. After a local
-    /// close, frames are discarded.
+    /// client does, so a quirky server cannot end the session. After the
+    /// session closed, frames are discarded.
     pub fn on_frame(&mut self, frame: ServerFrame, now: Instant) -> Option<ServerMessage> {
         match &frame {
             ServerFrame::Binary(bytes) => {
@@ -81,11 +63,11 @@ impl EngineCore {
         }
 
         match (&mut self.state, frame) {
-            (ReadyState::Opening { .. }, ServerFrame::Open(handshake)) => {
+            (SessionState::Opening { .. }, ServerFrame::Open(handshake)) => {
                 tracing::debug!(sid = %handshake.sid, "received handshake");
 
                 let ping_window = handshake.ping_window();
-                self.state = ReadyState::Open {
+                self.state = SessionState::Open {
                     ping_window,
                     deadline: now + ping_window,
                 };
@@ -93,7 +75,7 @@ impl EngineCore {
                 Some(ServerMessage::Open(handshake))
             }
             (
-                ReadyState::Open {
+                SessionState::Open {
                     ping_window,
                     deadline,
                 },
@@ -104,15 +86,14 @@ impl EngineCore {
 
                 None
             }
-            (ReadyState::Open { .. }, ServerFrame::Message(payload)) => {
+            (SessionState::Open { .. }, ServerFrame::Message(payload)) => {
                 Some(ServerMessage::Text(payload))
             }
-            (ReadyState::Open { .. }, ServerFrame::Binary(bytes)) => {
+            (SessionState::Open { .. }, ServerFrame::Binary(bytes)) => {
                 Some(ServerMessage::Binary(bytes))
             }
-            (ReadyState::Open { .. }, ServerFrame::Noop)
-            | (ReadyState::Closing { .. } | ReadyState::Closed(_), _) => None,
-            (ReadyState::Opening { .. } | ReadyState::Open { .. }, frame) => {
+            (SessionState::Open { .. }, ServerFrame::Noop) | (SessionState::Closed, _) => None,
+            (SessionState::Opening { .. } | SessionState::Open { .. }, frame) => {
                 tracing::warn!(?frame, "ignored out-of-place packet");
 
                 None
@@ -122,67 +103,54 @@ impl EngineCore {
 
     /// Encodes one manager message, like `Socket.write`. During opening, the
     /// frame waits in the transport channel, which the transport reads only
-    /// after the handshake, like `writeBuffer`. After the session ended, the
+    /// after the handshake, like `writeBuffer`. After the session closed, the
     /// message is discarded.
-    pub fn on_message(&mut self, message: Message) -> Option<ClientFrame> {
-        if !self.sends() {
+    pub fn on_message(&mut self, message: ClientMessage) -> Option<ClientFrame> {
+        if self.is_closed() {
             return None;
         }
 
         let frame = match message {
-            Message::Text(payload) => ClientFrame::Message(payload),
-            Message::Binary(bytes) => ClientFrame::Binary(bytes),
+            ClientMessage::Text(payload) => ClientFrame::Message(payload),
+            ClientMessage::Binary(bytes) => ClientFrame::Binary(bytes),
         };
         tracing::trace!(?frame, "sent packet");
 
         Some(frame)
     }
 
-    /// The transport ended the server direction, like `Socket._onClose` on
-    /// `"transport close"`. A repeated report is accepted.
-    pub fn on_transport_ended(&mut self) {
-        self.pong = None;
-        self.state = match std::mem::replace(&mut self.state, ReadyState::Closed(CloseReason::Peer))
-        {
-            ReadyState::Opening { .. } | ReadyState::Open { .. } => {
-                tracing::debug!("transport finished");
-
-                ReadyState::Closed(CloseReason::Peer)
-            }
-            ReadyState::Closing { .. } => ReadyState::Closed(CloseReason::Local),
-            closed @ ReadyState::Closed(_) => closed,
-        };
-    }
-
-    /// The manager hung up, like `Socket.close`. A repeated report is accepted.
-    pub fn on_client_closed(&mut self) {
-        tracing::debug!("client closed");
-
-        // The server needs no pong after the Close packet.
-        self.pong = None;
-        self.state =
-            match std::mem::replace(&mut self.state, ReadyState::Closed(CloseReason::Local)) {
-                ReadyState::Opening { .. } => ReadyState::Closed(CloseReason::Cancelled),
-                ReadyState::Open { deadline, .. } => ReadyState::Closing { deadline },
-                state @ (ReadyState::Closing { .. } | ReadyState::Closed(_)) => state,
-            };
-    }
-
-    /// Fails the session once its deadline has passed, like the timer of
-    /// `_resetPingTimeout` or of the `timeout` option.
-    pub fn on_timeout(&mut self, now: Instant) {
-        if self.deadline().is_none_or(|deadline| now < deadline) {
-            return;
+    /// Ends the session, like `Socket._onClose`, once either side's channel
+    /// ended. Closing again is accepted.
+    pub fn close(&mut self) {
+        if !self.is_closed() {
+            tracing::debug!("session closed");
         }
 
-        let error = match self.state {
-            ReadyState::Opening { .. } => EngineError::HandshakeTimeout,
-            _ => EngineError::HeartbeatTimeout,
-        };
-        tracing::debug!(%error, "session timed out");
-
+        // The server needs no pong once either side has hung up.
         self.pong = None;
-        self.state = ReadyState::Closed(CloseReason::Failed(error));
+        self.state = SessionState::Closed;
+    }
+
+    /// Fails the session once its deadline has passed, like the timers of
+    /// `_resetPingTimeout` and of the `timeout` option.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::HandshakeTimeout`] or
+    /// [`EngineError::HeartbeatTimeout`] when the deadline has passed, and the
+    /// session is then closed.
+    pub fn on_timeout(&mut self, now: Instant) -> Result<(), EngineError> {
+        let error = match self.state {
+            SessionState::Opening {
+                deadline: Some(deadline),
+            } if now >= deadline => EngineError::HandshakeTimeout,
+            SessionState::Open { deadline, .. } if now >= deadline => EngineError::HeartbeatTimeout,
+            _ => return Ok(()),
+        };
+
+        self.close();
+
+        Err(error)
     }
 
     /// Whether a pong waits for a transport permit.
@@ -203,56 +171,15 @@ impl EngineCore {
     #[must_use]
     pub fn deadline(&self) -> Option<Instant> {
         match self.state {
-            ReadyState::Opening { deadline } => deadline,
-            ReadyState::Open { deadline, .. } | ReadyState::Closing { deadline } => Some(deadline),
-            ReadyState::Closed(_) => None,
+            SessionState::Opening { deadline } => deadline,
+            SessionState::Open { deadline, .. } => Some(deadline),
+            SessionState::Closed => None,
         }
     }
 
-    /// Whether messages still go to the manager. Only a peer end delivers
-    /// the last message; a local close or a failure discards it, because the
-    /// manager no longer wants it.
+    /// Whether the session is over, so the caller stops sending frames.
     #[must_use]
-    pub fn delivers(&self) -> bool {
-        matches!(
-            self.state,
-            ReadyState::Opening { .. }
-                | ReadyState::Open { .. }
-                | ReadyState::Closed(CloseReason::Peer)
-        )
-    }
-
-    /// Whether frames still go to the transport. Once this turns false, the
-    /// caller drops its transport sender, which makes the transport send the
-    /// Close packet.
-    #[must_use]
-    pub fn sends(&self) -> bool {
-        matches!(
-            self.state,
-            ReadyState::Opening { .. } | ReadyState::Open { .. }
-        )
-    }
-
-    /// Whether the transport future still runs. A cancelled opening or a
-    /// failure drops it, because the server either has no session yet or no
-    /// longer answers.
-    #[must_use]
-    pub fn keeps_transport(&self) -> bool {
-        !matches!(
-            self.state,
-            ReadyState::Closed(CloseReason::Cancelled | CloseReason::Failed(_))
-        )
-    }
-
-    /// Returns the session's own failure, if any.
-    ///
-    /// # Errors
-    ///
-    /// Returns the error that failed the session.
-    pub fn finish(self) -> Result<(), EngineError> {
-        match self.state {
-            ReadyState::Closed(CloseReason::Failed(error)) => Err(error),
-            _ => Ok(()),
-        }
+    pub fn is_closed(&self) -> bool {
+        matches!(self.state, SessionState::Closed)
     }
 }

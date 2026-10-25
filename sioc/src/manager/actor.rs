@@ -40,7 +40,7 @@ where
     };
 
     let result = actor.drive().await;
-    actor.finish(result.is_err()).await;
+    actor.shutdown(result.is_err()).await;
     result
 }
 
@@ -232,11 +232,11 @@ where
                 } else {
                     ManagerInput::Message(message)
                 }),
-                EngineStep::Closed(result) => {
+                EngineStep::Closed => {
                     // Complete session reclamation before the core can open
                     // its successor. Persistent event inboxes stay owned here.
                     client_message_permit = None;
-                    *engine = None;
+                    let result = engine.take().expect("the guard checked the engine").into_result();
                     for buffer in namespace_inputs {
                         buffer.ack_packet_rx = None;
                     }
@@ -265,24 +265,20 @@ where
 
     /// Releases every resource. After an internal error, ends every namespace
     /// without waiting for the application: dropping the channels fails
-    /// blocked sends. Then finishes the engine, reading what the server still
-    /// sends, so it never sees a failed send.
-    async fn finish(mut self, failed: bool) {
+    /// blocked sends. Then closes the engine and waits for its task, reading
+    /// what the server still sends, so it never sees a failed send.
+    async fn shutdown(mut self, failed: bool) {
         self.connect_request_rx = None;
         self.namespace_inputs.clear();
         if failed {
             self.core.shutdown();
         }
         tracing::debug!("client ended");
-        if let Some(engine) = &mut self.engine {
+        if let Some(mut engine) = self.engine.take() {
             engine.close(Drain::Discard);
-            loop {
-                if let EngineStep::Closed(result) = engine.next(false, false).await {
-                    if let Err(error) = result {
-                        tracing::warn!(%error, "engine failed");
-                    }
-                    break;
-                }
+            while !matches!(engine.next(false, false).await, EngineStep::Closed) {}
+            if let Err(error) = engine.into_result() {
+                tracing::warn!(%error, "engine failed");
             }
         }
     }

@@ -13,7 +13,7 @@ use url::Url;
 use crate::connector::WebSocketConnector;
 use crate::engine::state::EngineCore;
 use crate::error::{EngineError, Error, TransportError};
-use crate::packet::{Message, ServerMessage};
+use crate::packet::{ClientMessage, ServerMessage};
 use crate::transport::{ClientFrame, ServerFrame, TransportStrategy};
 
 /// What [`open`] needs, like engine.io-client's `SocketOptions`.
@@ -61,7 +61,7 @@ pub struct EngineOptions<C> {
 #[derive(Debug)]
 pub struct Engine {
     /// What the client sends, like `Socket.write`.
-    pub client_message_tx: mpsc::Sender<Message>,
+    pub client_message_tx: mpsc::Sender<ClientMessage>,
     /// What the server sends, like the `"open"` and `"message"` events.
     pub server_message_rx: mpsc::Receiver<ServerMessage>,
     /// The session's result, like the `"error"` and `"close"` events. Rust
@@ -127,6 +127,15 @@ where
 /// next message are answered while the manager is full. That frame's message
 /// waits in `pending`, and no frame is read until it is delivered.
 ///
+/// The end of each channel drives cleanup. When the manager hangs up, the
+/// session closes, the unread server messages are discarded, and the
+/// transport sends Close once its channel ends. When the transport ends the
+/// server direction, the session closes and the messages already received
+/// are still delivered. A deadline failure drops the transport, because the
+/// server no longer answers, and still delivers the message already received.
+/// In every case the task keeps receiving manager messages until the manager
+/// hangs up, so its sends never fail.
+///
 /// Every branch future is cancel safe: channels keep unread items, a
 /// cancelled reservation returns its slot, the transport future lives here
 /// and is polled by reference, so no other branch cancels a request in
@@ -134,8 +143,8 @@ where
 ///
 /// # Errors
 ///
-/// Returns the core's failure first, then the transport's, so the error is
-/// the root cause rather than a closed channel that it caused.
+/// Returns the first failure, from the core or the transport. Later closed
+/// channels that the failure caused never replace it.
 ///
 /// # Panics
 ///
@@ -150,39 +159,38 @@ pub async fn run<T>(
     server_frame_rx: mpsc::Receiver<ServerFrame>,
     client_frame_tx: mpsc::Sender<ClientFrame>,
     server_message_tx: mpsc::Sender<ServerMessage>,
-    client_message_rx: mpsc::Receiver<Message>,
+    client_message_rx: mpsc::Receiver<ClientMessage>,
 ) -> Result<(), Error>
 where
     T: Future<Output = Result<(), TransportError>>,
 {
     let mut transport = Some(Box::pin(transport));
-    let mut transport_result = Ok(());
     let mut server_frame_rx = Some(server_frame_rx);
     let mut client_frame_tx = Some(client_frame_tx);
     let mut server_message_tx = Some(server_message_tx);
     let mut client_message_rx = Some(client_message_rx);
     // The message of the last server frame, waiting for a manager permit.
     let mut pending: Option<ServerMessage> = None;
+    // The first failure, kept while cleanup runs.
+    let mut result: Result<(), Error> = Ok(());
 
     let sleep = tokio::time::sleep(Duration::ZERO);
     tokio::pin!(sleep);
     let mut armed = None;
 
     loop {
-        // Drop each end once the core says its direction is over, so the
-        // other side sees the end of its channel.
-        if !core.delivers() {
+        // A manager that hung up no longer reads, so its messages are
+        // discarded. Otherwise the manager channel ends after the last
+        // message the transport delivered.
+        if client_message_rx.is_none() {
             pending = None;
         }
-        if pending.is_none() && (!core.delivers() || server_frame_rx.is_none()) {
+        if pending.is_none() && (client_message_rx.is_none() || server_frame_rx.is_none()) {
             server_message_tx = None;
         }
-        if !core.sends() {
+        // Ending the transport channel makes the transport send Close.
+        if core.is_closed() {
             client_frame_tx = None;
-        }
-        if !core.keeps_transport() {
-            transport = None;
-            server_frame_rx = None;
         }
 
         let deadline = core.deadline();
@@ -211,7 +219,7 @@ where
                     pending = core.on_frame(frame, Instant::now());
                 } else {
                     server_frame_rx = None;
-                    core.on_transport_ended();
+                    core.close();
                 }
             },
 
@@ -223,8 +231,11 @@ where
                     .await
             }, if pending.is_some() => {
                 // The manager drops its receiver only after this sender, so a
-                // failure here is a library bug.
-                let permit = permit.map_err(|_| EngineError::ServerMessageClosed)?;
+                // failure here is a library bug, reported unless a failure
+                // came first.
+                let Ok(permit) = permit else {
+                    return result.and(Err(EngineError::ServerMessageClosed.into()));
+                };
                 permit.send(pending.take().expect("the guard checked the message"));
             },
 
@@ -252,12 +263,12 @@ where
                     }
                 } else {
                     client_message_rx = None;
-                    core.on_client_closed();
+                    core.close();
                 }
             },
 
             permit = async {
-                client_frame_tx.as_ref().expect("a pong implies the session sends").reserve().await
+                client_frame_tx.as_ref().expect("a pong implies an open session").reserve().await
             }, if has_pong => {
                 let pong = core.take_pong().expect("the guard checked the pong");
                 // A failed reservation means the transport is gone, and its own
@@ -267,21 +278,27 @@ where
                 }
             },
 
-            result = async {
+            transport_result = async {
                 transport.as_mut().expect("the guard checked the transport").as_mut().await
             }, if transport.is_some() => {
                 transport = None;
-                transport_result = result;
+                result = result.and(transport_result.map_err(Error::from));
             },
 
-            () = &mut sleep, if armed.is_some() => core.on_timeout(Instant::now()),
+            () = &mut sleep, if armed.is_some() => {
+                if let Err(error) = core.on_timeout(Instant::now()) {
+                    // The server no longer answers, so its session and the
+                    // frames still in flight are gone. A message already
+                    // received still reaches the manager.
+                    transport = None;
+                    server_frame_rx = None;
+                    result = result.and(Err(error.into()));
+                }
+            },
 
             else => unreachable!("the loop stops before every input is gone"),
         }
     }
 
-    core.finish()?;
-    transport_result?;
-
-    Ok(())
+    result
 }

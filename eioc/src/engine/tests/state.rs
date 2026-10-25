@@ -5,7 +5,7 @@ use tokio::time::Instant;
 
 use crate::engine::state::EngineCore;
 use crate::error::EngineError;
-use crate::packet::{Handshake, Message, ServerMessage};
+use crate::packet::{ClientMessage, Handshake, ServerMessage};
 use crate::transport::{ClientFrame, ServerFrame};
 
 const PING_WINDOW: Duration = Duration::from_secs(30);
@@ -42,8 +42,7 @@ fn open_frame_delivers_open_and_arms_the_ping_window() {
     let core = open_core(now);
 
     assert_eq!(core.deadline(), Some(now + PING_WINDOW));
-    assert!(core.delivers());
-    assert!(core.sends());
+    assert!(!core.is_closed());
     assert!(!core.has_pong());
 }
 
@@ -55,19 +54,19 @@ fn opening_without_a_timeout_has_no_deadline() {
 }
 
 #[test]
-fn handshake_timeout_fails_the_opening_and_drops_the_transport() {
+fn handshake_timeout_fails_and_closes_the_opening() {
     let now = Instant::now();
     let timeout = Duration::from_secs(5);
     let mut core = EngineCore::new(Some(timeout), now);
     assert_eq!(core.deadline(), Some(now + timeout));
 
-    core.on_timeout(now + timeout);
+    assert!(matches!(
+        core.on_timeout(now + timeout),
+        Err(EngineError::HandshakeTimeout)
+    ));
 
+    assert!(core.is_closed());
     assert_eq!(core.deadline(), None);
-    assert!(!core.delivers());
-    assert!(!core.sends());
-    assert!(!core.keeps_transport());
-    assert!(matches!(core.finish(), Err(EngineError::HandshakeTimeout)));
 }
 
 #[test]
@@ -75,33 +74,35 @@ fn messages_during_opening_are_encoded_for_the_transport_channel() {
     let mut core = EngineCore::new(None, Instant::now());
 
     assert_eq!(
-        core.on_message(Message::Text("hi".into())),
+        core.on_message(ClientMessage::Text("hi".into())),
         Some(ClientFrame::Message("hi".into()))
     );
 }
 
 #[test]
-fn client_close_during_opening_cancels_it_and_drops_the_transport() {
+fn closing_an_opening_ends_its_deadline() {
     let mut core = EngineCore::new(Some(Duration::from_secs(5)), Instant::now());
 
-    core.on_client_closed();
+    core.close();
 
+    assert!(core.is_closed());
     assert_eq!(core.deadline(), None);
-    assert!(!core.delivers());
-    assert!(!core.sends());
-    assert!(!core.keeps_transport());
-    core.finish().unwrap();
 }
 
 #[test]
-fn transport_end_during_opening_keeps_the_transport_result() {
-    let mut core = EngineCore::new(None, Instant::now());
+fn a_frame_before_open_is_out_of_place() {
+    let now = Instant::now();
+    let mut core = EngineCore::new(None, now);
 
-    core.on_transport_ended();
+    assert_eq!(
+        core.on_frame(ServerFrame::Message("early".into()), now),
+        None
+    );
 
-    assert!(core.keeps_transport());
-    assert!(!core.sends());
-    core.finish().unwrap();
+    assert_eq!(
+        core.on_frame(open_frame(), now),
+        Some(ServerMessage::Open(handshake()))
+    );
 }
 
 // Open session
@@ -126,11 +127,11 @@ fn client_messages_become_frames() {
     let mut core = open_core(Instant::now());
 
     assert_eq!(
-        core.on_message(Message::Text("hi".into())),
+        core.on_message(ClientMessage::Text("hi".into())),
         Some(ClientFrame::Message("hi".into()))
     );
     assert_eq!(
-        core.on_message(Message::Binary(Bytes::from_static(b"\x01"))),
+        core.on_message(ClientMessage::Binary(Bytes::from_static(b"\x01"))),
         Some(ClientFrame::Binary(Bytes::from_static(b"\x01")))
     );
 }
@@ -177,22 +178,23 @@ fn noop_and_out_of_place_packets_are_ignored() {
     }
     assert!(!core.has_pong());
     assert_eq!(core.deadline(), Some(now + PING_WINDOW));
-    assert!(core.delivers());
+    assert!(!core.is_closed());
 }
 
 #[test]
-fn heartbeat_timeout_fails_the_session_and_drops_the_transport() {
+fn heartbeat_timeout_fails_and_closes_the_session() {
     let now = Instant::now();
     let mut core = open_core(now);
     core.on_frame(ServerFrame::Ping("".into()), now);
 
-    core.on_timeout(now + PING_WINDOW);
+    assert!(matches!(
+        core.on_timeout(now + PING_WINDOW),
+        Err(EngineError::HeartbeatTimeout)
+    ));
 
+    assert!(core.is_closed());
     assert!(!core.has_pong());
-    assert!(!core.delivers());
-    assert!(!core.sends());
-    assert!(!core.keeps_transport());
-    assert!(matches!(core.finish(), Err(EngineError::HeartbeatTimeout)));
+    assert_eq!(core.deadline(), None);
 }
 
 #[test]
@@ -200,102 +202,50 @@ fn an_early_timeout_changes_nothing() {
     let now = Instant::now();
     let mut core = open_core(now);
 
-    core.on_timeout(now + PING_WINDOW - Duration::from_millis(1));
+    core.on_timeout(now + PING_WINDOW - Duration::from_millis(1))
+        .unwrap();
 
-    assert!(core.delivers());
-    assert!(core.sends());
+    assert!(!core.is_closed());
+    assert_eq!(core.deadline(), Some(now + PING_WINDOW));
 }
 
-// Closing
+// Closed session
 
 #[test]
-fn client_close_stops_sending_and_discards_server_frames() {
+fn a_closed_session_discards_frames_and_refuses_messages() {
     let now = Instant::now();
     let mut core = open_core(now);
     core.on_frame(ServerFrame::Ping("".into()), now);
 
-    core.on_client_closed();
+    core.close();
 
     assert!(!core.has_pong());
-    assert!(!core.sends());
-    assert!(!core.delivers());
-    assert!(core.keeps_transport());
     assert_eq!(
         core.on_frame(ServerFrame::Message("late".into()), now),
         None
     );
     assert_eq!(core.on_frame(ServerFrame::Ping("".into()), now), None);
     assert!(!core.has_pong());
-    assert_eq!(core.on_message(Message::Text("late".into())), None);
+    assert_eq!(core.on_message(ClientMessage::Text("late".into())), None);
 }
 
 #[test]
-fn the_last_ping_window_bounds_a_local_close() {
+fn a_closed_session_never_times_out() {
     let now = Instant::now();
     let mut core = open_core(now);
-    core.on_client_closed();
-    assert_eq!(core.deadline(), Some(now + PING_WINDOW));
 
-    core.on_timeout(now + PING_WINDOW);
-
-    assert!(!core.keeps_transport());
-    assert!(matches!(core.finish(), Err(EngineError::HeartbeatTimeout)));
-}
-
-#[test]
-fn transport_end_after_a_local_close_ends_the_session() {
-    let mut core = open_core(Instant::now());
-    core.on_client_closed();
-
-    core.on_transport_ended();
+    core.close();
 
     assert_eq!(core.deadline(), None);
-    assert!(!core.delivers());
-    assert!(core.keeps_transport());
-    core.finish().unwrap();
+    core.on_timeout(now + PING_WINDOW * 2).unwrap();
 }
 
 #[test]
-fn transport_end_keeps_delivering_and_stops_sending() {
-    let now = Instant::now();
-    let mut core = open_core(now);
-    core.on_frame(ServerFrame::Ping("".into()), now);
-
-    core.on_transport_ended();
-
-    assert_eq!(core.deadline(), None);
-    assert!(!core.has_pong());
-    assert!(core.delivers());
-    assert!(!core.sends());
-    assert!(core.keeps_transport());
-    assert_eq!(core.on_message(Message::Text("late".into())), None);
-    core.finish().unwrap();
-}
-
-#[test]
-fn repeated_end_reports_are_accepted() {
+fn closing_again_is_accepted() {
     let mut core = open_core(Instant::now());
 
-    core.on_transport_ended();
-    core.on_transport_ended();
-    core.on_client_closed();
+    core.close();
+    core.close();
 
-    assert!(core.delivers());
-    core.finish().unwrap();
-}
-
-#[test]
-fn a_frame_before_open_is_out_of_place() {
-    let now = Instant::now();
-    let mut core = EngineCore::new(None, now);
-
-    assert_eq!(
-        core.on_frame(ServerFrame::Message("early".into()), now),
-        None
-    );
-
-    assert_eq!(
-        core.on_frame(open_frame(), now),
-        Some(ServerMessage::Open(handshake()))
-    );
+    assert!(core.is_closed());
 }

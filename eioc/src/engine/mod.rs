@@ -6,8 +6,8 @@
 //! concurrency, and upgrade:
 //!
 //! ```text
-//!  manager --Message---------> run --ClientFrame--> transport (polling, websocket)
-//!  manager <--ServerMessage--- run <--ServerFrame-- transport
+//!  manager --ClientMessage--> run --ClientFrame--> transport (polling, websocket)
+//!  manager <--ServerMessage-- run <--ServerFrame-- transport
 //!                               |
 //!                          EngineCore
 //! ```
@@ -36,9 +36,13 @@
 //!   the task drops its transport sender, which the transport waits for. The
 //!   task drops its manager sender before it waits for the manager to hang up,
 //!   which the manager does at that end.
-//! - Only a peer end delivers the last message. A local close or a failure
-//!   discards it, and a cancelled opening or a failure drops the transport
-//!   future, because the server has no session yet or no longer answers.
+//! - Each owner keeps one fact. `EngineCore` knows whether the session is open,
+//!   and returns a deadline failure as an `Err`. The task keeps the first
+//!   failure in one `Result` while cleanup runs, and reads each closure from
+//!   the end of a channel: the manager's end discards unread server messages,
+//!   while the transport's end and a deadline failure still deliver the message
+//!   already received. A deadline failure also drops the transport future,
+//!   because the server no longer answers.
 //!
 //! JavaScript reference: [engine.io-client 6.6.7's `Socket`].
 //!

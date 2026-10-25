@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
 use bytestring::ByteString;
-use eioc::prelude::{Message, ServerMessage};
+use eioc::prelude::{ClientMessage, ServerMessage};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -122,7 +122,7 @@ enum Write {
     /// unencoded, so a namespace that leaves first can take it back.
     Connect { ns: ByteString, auth: ByteString },
     /// Any other message, already encoded.
-    Encoded(Message),
+    Encoded(ClientMessage),
 }
 
 /// The synchronous core of the manager, like socket.io-client's `Manager`.
@@ -271,7 +271,7 @@ impl ManagerCore {
     }
 
     /// Takes one message for the engine, like `engine.write`.
-    pub fn next_message(&mut self) -> Option<Message> {
+    pub fn next_message(&mut self) -> Option<ClientMessage> {
         if !self.engine_runs() {
             return None;
         }
@@ -396,8 +396,9 @@ impl ManagerCore {
         self.write_buffer
             .push_back(Write::Encoded(encode(ns, &packet)));
         let attachments = attachments.into_iter().flatten();
-        self.write_buffer
-            .extend(attachments.map(|attachment| Write::Encoded(Message::Binary(attachment))));
+        self.write_buffer.extend(
+            attachments.map(|attachment| Write::Encoded(ClientMessage::Binary(attachment))),
+        );
     }
 
     fn disconnect(&mut self, ns: &ByteString) {
@@ -661,6 +662,6 @@ impl ManagerCore {
 }
 
 /// Encodes a packet for namespace `ns` as its text message.
-fn encode(ns: &str, packet: &Packet) -> Message {
-    Message::Text(packet.encode(ns).into())
+fn encode(ns: &str, packet: &Packet) -> ClientMessage {
+    ClientMessage::Text(packet.encode(ns).into())
 }

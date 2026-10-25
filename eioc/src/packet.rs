@@ -14,14 +14,14 @@ pub const PROBE: ByteString = ByteString::from_static("probe");
 
 /// Content exchanged between the Socket.IO and Engine.IO layers.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Message {
+pub enum ClientMessage {
     /// A UTF-8 text payload.
     Text(ByteString),
     /// A raw binary payload.
     Binary(Bytes),
 }
 
-impl std::fmt::Display for Message {
+impl std::fmt::Display for ClientMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Text(s) => f.debug_tuple("Text").field(&format_args!("{s}")).finish(),
@@ -419,7 +419,7 @@ mod tests {
 
     #[test]
     fn message_display_text() {
-        let s = format!("{}", Message::Text(bss("hello")));
+        let s = format!("{}", ClientMessage::Text(bss("hello")));
         assert_eq!(s, "Text(hello)");
     }
 
@@ -427,7 +427,7 @@ mod tests {
     fn message_display_binary() {
         let s = format!(
             "{}",
-            Message::Binary(bytes::Bytes::from_static(b"\x01\x02"))
+            ClientMessage::Binary(bytes::Bytes::from_static(b"\x01\x02"))
         );
         assert_eq!(s, "Binary { len: 2 }");
     }

@@ -9,7 +9,7 @@ use url::Url;
 use crate::engine::EngineOptions;
 use crate::engine::state::EngineCore;
 use crate::error::{EngineError, Error, TransportError, WebSocketError};
-use crate::packet::{Handshake, Message, ServerMessage};
+use crate::packet::{ClientMessage, Handshake, ServerMessage};
 use crate::transport::{ClientFrame, ServerFrame, TransportStrategy};
 
 fn handshake() -> Handshake {
@@ -36,7 +36,7 @@ struct Harness {
     server_frame_tx: mpsc::Sender<ServerFrame>,
     client_frame_rx: mpsc::Receiver<ClientFrame>,
     server_message_rx: mpsc::Receiver<ServerMessage>,
-    client_message_tx: mpsc::Sender<Message>,
+    client_message_tx: mpsc::Sender<ClientMessage>,
     /// Closed once the engine drops the transport future.
     transport_tx: oneshot::Sender<Result<(), TransportError>>,
     task: JoinHandle<Result<(), Error>>,
@@ -91,14 +91,14 @@ impl Harness {
 
     async fn send_message(&self, message: &str) {
         self.client_message_tx
-            .send(Message::Text(message.into()))
+            .send(ClientMessage::Text(message.into()))
             .await
             .unwrap();
     }
 
     /// Ends the transport like a real one: the server direction ends, and the
     /// future finishes with `result` once the engine closed the client one.
-    async fn end_transport(mut self, result: Result<(), TransportError>) -> Remains {
+    async fn close_transport(mut self, result: Result<(), TransportError>) -> Remains {
         drop(self.server_frame_tx);
         let mut frames = Vec::new();
         while let Some(frame) = self.client_frame_rx.recv().await {
@@ -123,13 +123,13 @@ async fn send<T: std::fmt::Debug>(tx: &mpsc::Sender<T>, item: T) {
 struct Remains {
     frames: Vec<ClientFrame>,
     server_message_rx: mpsc::Receiver<ServerMessage>,
-    client_message_tx: mpsc::Sender<Message>,
+    client_message_tx: mpsc::Sender<ClientMessage>,
     task: JoinHandle<Result<(), Error>>,
 }
 
 impl Remains {
     /// Reads the manager channel to its end, then hangs up.
-    async fn finish(mut self) -> (Vec<ServerMessage>, Result<(), Error>) {
+    async fn join(mut self) -> (Vec<ServerMessage>, Result<(), Error>) {
         let mut messages = Vec::new();
         while let Some(message) = self.server_message_rx.recv().await {
             messages.push(message);
@@ -151,9 +151,9 @@ async fn server_frames_arrive_in_order_after_open() {
     harness.send_frame(ServerFrame::Noop).await;
     harness.send_frame(text("c")).await;
 
-    let remains = harness.end_transport(Ok(())).await;
+    let remains = harness.close_transport(Ok(())).await;
     assert_eq!(remains.frames, []);
-    let (messages, result) = remains.finish().await;
+    let (messages, result) = remains.join().await;
     assert_eq!(
         messages,
         [
@@ -241,12 +241,14 @@ async fn the_deadline_fires_while_the_manager_is_full() {
     harness.send_frame(text("pending")).await;
 
     // Nothing reads the manager channel until the failure dropped the
-    // transport. The failure discards the pending message.
+    // transport. The message already received still arrives.
     harness.transport_tx.closed().await;
-    assert_eq!(
-        harness.server_message_rx.recv().await,
-        Some(ServerMessage::Text("fills".into()))
-    );
+    for payload in ["fills", "pending"] {
+        assert_eq!(
+            harness.server_message_rx.recv().await,
+            Some(ServerMessage::Text(payload.into()))
+        );
+    }
     assert_eq!(harness.server_message_rx.recv().await, None);
     drop(harness.client_message_tx);
     assert!(matches!(
@@ -292,7 +294,11 @@ async fn a_peer_end_delivers_the_last_message_and_accepts_messages_until_hang_up
     assert_eq!(harness.server_message_rx.recv().await, None);
     assert_eq!(harness.client_frame_rx.recv().await, None);
     // Sends succeed after the end, so the manager never sees a failed send.
-    send(&harness.client_message_tx, Message::Text("late".into())).await;
+    send(
+        &harness.client_message_tx,
+        ClientMessage::Text("late".into()),
+    )
+    .await;
     let _ = harness.transport_tx.send(Ok(()));
     drop(harness.client_message_tx);
     harness.task.await.unwrap().unwrap();
@@ -303,9 +309,9 @@ async fn a_transport_error_is_the_session_result() {
     let harness = Harness::open(4, 4).await;
 
     let remains = harness
-        .end_transport(Err(WebSocketError::Closed.into()))
+        .close_transport(Err(WebSocketError::Closed.into()))
         .await;
-    let (messages, result) = remains.finish().await;
+    let (messages, result) = remains.join().await;
     assert_eq!(messages, []);
     assert!(matches!(
         result,
@@ -316,12 +322,16 @@ async fn a_transport_error_is_the_session_result() {
 }
 
 #[tokio::test]
-async fn a_close_during_opening_drops_the_transport() {
+async fn a_close_during_opening_ends_the_transport_channel() {
     let mut harness = Harness::spawn(None, 4, 4);
     drop(harness.client_message_tx);
 
-    harness.transport_tx.closed().await;
+    // A transport that reads its channel learns of the close and sends Close
+    // after the handshake. An owner that cannot wait drops the task instead.
+    assert_eq!(harness.client_frame_rx.recv().await, None);
     assert_eq!(harness.server_message_rx.recv().await, None);
+    drop(harness.server_frame_tx);
+    let _ = harness.transport_tx.send(Ok(()));
     harness.task.await.unwrap().unwrap();
 }
 
@@ -376,4 +386,45 @@ async fn dropping_the_engine_aborts_its_task() {
 
     // The connector's future drops with the aborted task.
     assert!(alive_rx.await.is_err());
+}
+
+#[tokio::test]
+async fn a_transport_error_still_delivers_the_messages_already_received() {
+    let mut harness = Harness::open(4, 4).await;
+    harness.send_frame(text("before")).await;
+    drop(harness.server_frame_tx);
+    let _ = harness
+        .transport_tx
+        .send(Err(WebSocketError::Closed.into()));
+
+    assert_eq!(
+        harness.server_message_rx.recv().await,
+        Some(ServerMessage::Text("before".into()))
+    );
+    assert_eq!(harness.server_message_rx.recv().await, None);
+    assert_eq!(harness.client_frame_rx.recv().await, None);
+    drop(harness.client_message_tx);
+    assert!(matches!(
+        harness.task.await.unwrap(),
+        Err(Error::Transport(TransportError::WebSocket(
+            WebSocketError::Closed
+        )))
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_first_failure_survives_the_cleanup_after_it() {
+    let mut harness = Harness::open(4, 4).await;
+
+    // The heartbeat fails with nothing to read, which drops the transport.
+    harness.transport_tx.closed().await;
+    assert_eq!(harness.server_message_rx.recv().await, None);
+    // The manager keeps sending until it notices, and its sends succeed.
+    harness.send_message("late").await;
+    drop(harness.client_message_tx);
+
+    assert!(matches!(
+        harness.task.await.unwrap(),
+        Err(Error::Engine(EngineError::HeartbeatTimeout))
+    ));
 }
