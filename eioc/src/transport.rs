@@ -135,6 +135,67 @@ mod tests {
     use super::*;
     use crate::error::TransportError;
 
+    fn handshake() -> Handshake {
+        Handshake {
+            sid: "sid".into(),
+            upgrades: vec![],
+            ping_interval: 25_000,
+            ping_timeout: 5_000,
+            max_payload: 1_000_000,
+        }
+    }
+
+    #[test]
+    fn server_frames_keep_every_packet_but_close() {
+        let bytes = Bytes::from_static(b"\x01");
+        let cases = [
+            (
+                Packet::Open(handshake()).into(),
+                ServerFrame::Open(handshake()),
+            ),
+            (
+                Packet::Ping("p".into()).into(),
+                ServerFrame::Ping("p".into()),
+            ),
+            (
+                Packet::Pong("p".into()).into(),
+                ServerFrame::Pong("p".into()),
+            ),
+            (
+                Packet::Message("m".into()).into(),
+                ServerFrame::Message("m".into()),
+            ),
+            (Packet::Upgrade.into(), ServerFrame::Upgrade),
+            (Packet::Noop.into(), ServerFrame::Noop),
+            (Frame::Binary(bytes.clone()), ServerFrame::Binary(bytes)),
+        ];
+        for (frame, expected) in cases {
+            assert_eq!(ServerFrame::from_frame(frame), Some(expected));
+        }
+
+        // The transport ends the server direction at Close instead.
+        assert_eq!(ServerFrame::from_frame(Packet::Close.into()), None);
+    }
+
+    #[test]
+    fn client_frames_encode_as_their_wire_frames() {
+        let bytes = Bytes::from_static(b"\x01");
+        let cases = [
+            (
+                ClientFrame::Message("m".into()),
+                Packet::Message("m".into()).into(),
+            ),
+            (
+                ClientFrame::Pong("p".into()),
+                Packet::Pong("p".into()).into(),
+            ),
+            (ClientFrame::Binary(bytes.clone()), Frame::Binary(bytes)),
+        ];
+        for (frame, expected) in cases {
+            assert_eq!(Frame::from(frame), expected);
+        }
+    }
+
     #[test]
     fn transport_strategy_default_is_polling() {
         assert!(matches!(
