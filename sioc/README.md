@@ -2,7 +2,7 @@
 
 A type-safe, async [Socket.IO protocol revision 5](https://socket.io/docs/v4/socket-io-protocol/) client for Rust.
 
-## What is the Socket.IO protocol?
+## Socket.IO protocol
 
 The [Socket.IO protocol](https://socket.io/docs/v4/socket-io-protocol/) is built on top of the [Engine.IO protocol](https://socket.io/docs/v4/engine-io-protocol/).
 
@@ -18,7 +18,7 @@ Socket.IO numbers its libraries and its protocols separately. `sioc` speaks Sock
 - Actor-model client. Each client runs one background task that talks to the handles through channels.
 - Derive macros for events and acks.
 - Reconnection like the JavaScript client. After a dropped connection, the client backs off, opens a new Engine.IO session, and connects every open namespace again.
-- Event handling lives in match arms, no callbacks with boxed futures.
+- Events are handled in match arms.
 - Application state lives in the enclosing scope.
 - Zero-copy packet parsing via [`bytestring`](https://docs.rs/bytestring) and [`bytes`](https://docs.rs/bytes).
 

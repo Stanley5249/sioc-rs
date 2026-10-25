@@ -9,9 +9,9 @@
 
 A type-safe, async client for Rust that speaks [Socket.IO protocol revision 5](https://socket.io/docs/v4/socket-io-protocol/), the protocol of Socket.IO 3.x and 4.x servers.
 
-## Quick Start
+## Quick start
 
-### Open and Connect
+### Open and connect
 
 Create a client and connect to a namespace. The default namespace is `"/"`. `tx` is cheap to clone and share across tasks.
 
@@ -179,28 +179,21 @@ Early development. Expect breaking changes. End-to-end tests run against the ref
 
 ## Comparison
 
-### Rust-socketio-client
+### rust-socketio
 
-[rust-socketio](https://github.com/1c3t3a/rust-socketio) is another Socket.IO client for Rust, but its callback-based model creates friction in async Rust:
+[rust-socketio](https://github.com/1c3t3a/rust-socketio) provides a callback API. Its asynchronous API accepts `Send + Sync + 'static` callbacks that return boxed futures. Sharing mutable state between callbacks and other tasks may require synchronization.
 
-1. Callbacks must be `Send + Sync + 'static`, forcing smart pointers and interior mutability for any shared state.
-2. Storing async callbacks requires boxed futures, which adds heap allocation and dynamic dispatch overhead.
-
-`sioc` replaces callbacks with channels and enums. Event handling lives in match arms and state lives in the enclosing scope, with no boxing or shared-state boilerplate.
+With `sioc`, the caller receives events through `SocketReceiver` and handles them in a match loop. Application state can stay in that loop.
 
 ### Socketioxide
 
-[socketioxide](https://github.com/Totodore/socketioxide) is a Socket.IO server implementation that integrates with [Tower](https://github.com/tower-rs/tower) and [Tokio](https://github.com/tokio-rs/tokio) stack.
+[socketioxide](https://github.com/Totodore/socketioxide) is a Socket.IO server implementation that integrates with [Tower](https://github.com/tower-rs/tower) and [Tokio](https://github.com/tokio-rs/tokio). It uses registered async handlers and extractors for event data and shared application state.
 
-Server and client use fundamentally different architectures, so `socketioxide`'s design doesn't translate to a client. `sioc` uses `tokio` as well, with networking built on top of `reqwest` and `tokio-tungstenite`.
-
-`socketioxide` uses callbacks for event handling, which is less of an issue for stateless servers. `sioc` offers stronger type safety for events and acks through its derive macros and type system.
+`sioc` is a client. Its derive macros associate event and acknowledgement types, and received events go to the caller's receive loop. Networking uses `tokio`, `reqwest`, and `tokio-tungstenite`.
 
 ## Examples
 
-[`quick-start`](examples/quick-start) is a minimal chat client with JavaScript and Python Socket.IO server alternatives.
-
-[`generals-io`](examples/generals-io) is the client for [generals.io](https://generals.io), the online strategy game that motivated this crate.
+See [examples](examples/README.md) for runnable clients and reference servers.
 
 ## Development
 
