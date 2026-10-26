@@ -11,6 +11,7 @@ use super::harness::*;
 use crate::config::ChannelConfig;
 use crate::error::SocketError;
 use crate::manager::connect_request::ConnectRequest;
+use crate::manager::tests::rig::event;
 use crate::packet::ServerPacket;
 
 #[tokio::test(start_paused = true)]
@@ -23,10 +24,7 @@ async fn emits_flow_while_receiver_is_full() {
         manager.send_server_message(r#"2["flood"]"#).await;
     }
 
-    client_packet_tx
-        .send(event(r#"["out"]"#, None))
-        .await
-        .unwrap();
+    client_packet_tx.send(event(r#"["out"]"#)).await.unwrap();
     let text = tokio::time::timeout(Duration::from_secs(5), manager.recv_client_text())
         .await
         .expect("emit stalled behind a full receiver");
@@ -92,7 +90,7 @@ async fn emits_while_handling_a_server_flood() {
             match rx.recv().await {
                 Some(ServerPacket::Event(_)) => {
                     received += 1;
-                    tx.send(event(r#"["reply"]"#, None)).await.unwrap();
+                    tx.send(event(r#"["reply"]"#)).await.unwrap();
                 }
                 Some(_) => {}
                 None => panic!("the receiver ended during the flood"),
@@ -136,7 +134,7 @@ async fn held_packet_keeps_later_events_for_the_next_engine() {
     // The old engine gets nothing more, and closes once the manager lets go.
     let mut client_message_rx = old.client_message_rx;
     assert!(client_message_rx.recv().await.is_none());
-    tx.send(event(r#"["late"]"#, None)).await.unwrap();
+    tx.send(event(r#"["late"]"#)).await.unwrap();
     old.result_tx.send(Ok(())).unwrap();
 
     tokio::time::timeout(Duration::from_secs(1), rx.recv())
@@ -169,7 +167,7 @@ async fn a_stalled_receiver_stops_only_incoming_data() {
     manager.send_server_message(r#"2/a,["held"]"#).await;
     manager.send_server_message(r#"2/b,["queued"]"#).await;
 
-    b_tx.send(event(r#"["out"]"#, None)).await.unwrap();
+    b_tx.send(event(r#"["out"]"#)).await.unwrap();
     assert_eq!(&*manager.recv_client_text().await, r#"2/b,["out"]"#);
 
     assert!(matches!(b_rx.recv().await, Some(ServerPacket::Connect(_))));
@@ -183,9 +181,9 @@ async fn unconfirmed_namespace_applies_backpressure_and_flushes_in_order() {
     let mut manager = TestManager::spawn().await;
     let (tx, mut rx) = manager.open("/").await;
     for _ in 0..32 {
-        tx.send(event(r#"["queued"]"#, None)).await.unwrap();
+        tx.send(event(r#"["queued"]"#)).await.unwrap();
     }
-    let pending = tx.send(event(r#"["last"]"#, None));
+    let pending = tx.send(event(r#"["last"]"#));
     tokio::pin!(pending);
     assert!(
         tokio::time::timeout(Duration::from_secs(1), &mut pending)
@@ -213,9 +211,9 @@ async fn full_unconfirmed_buffer_does_not_block_other_namespaces() {
     let mut manager = TestManager::spawn().await;
     let (tx, _rx) = manager.open("/").await;
     for _ in 0..32 {
-        tx.send(event(r#"["queued"]"#, None)).await.unwrap();
+        tx.send(event(r#"["queued"]"#)).await.unwrap();
     }
-    let pending = tx.send(event(r#"["blocked"]"#, None));
+    let pending = tx.send(event(r#"["blocked"]"#));
     tokio::pin!(pending);
     assert!(
         tokio::time::timeout(Duration::from_secs(1), &mut pending)
@@ -229,7 +227,7 @@ async fn full_unconfirmed_buffer_does_not_block_other_namespaces() {
         .send_server_message(r#"0/other,{"sid":"other"}"#)
         .await;
     other_rx.recv().await.unwrap();
-    other_tx.send(event(r#"["out"]"#, None)).await.unwrap();
+    other_tx.send(event(r#"["out"]"#)).await.unwrap();
     assert_eq!(&*manager.recv_client_text().await, r#"2/other,["out"]"#);
     tx.disconnect();
     assert!(matches!(pending.await, Err(SocketError::Closed)));
@@ -242,7 +240,7 @@ async fn dropping_last_sender_releases_a_full_unconfirmed_buffer() {
     let mut manager = TestManager::spawn().await;
     let (tx, _rx) = manager.open("/").await;
     for _ in 0..32 {
-        tx.send(event(r#"["queued"]"#, None)).await.unwrap();
+        tx.send(event(r#"["queued"]"#)).await.unwrap();
     }
     drop(tx);
     tokio::time::timeout(Duration::from_secs(1), manager.join())

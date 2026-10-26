@@ -44,14 +44,18 @@ These are defaults. Depart from one when the design is simpler, and say why in t
 ## Tests
 
 - **Unit tests:** Put them at the bottom of the source file.
-- **Component tests:** Put them in the submodule's `tests.rs`, or in a `tests/` directory split by scenario group.
+- **Component tests:** Put them in the submodule's `tests.rs`, or in a `tests/` directory with one file for each behavior they protect, such as `ack` or `namespace`, so a reader can find a test without knowing the private types.
 - **End-to-end and derive macro tests:** Put them in `sioc/tests/`.
+
+Split a test file when it holds groups that a reader cannot predict from its name, not when it reaches a size. Keep a helper in the file that uses it, and move it to the component's shared builders or harness once a second file needs it, so each builder has one copy. A harness drives the real core or actor and fakes only what lies outside it, such as an engine or a transport, and never copies its routing, scheduling, or state.
+
+Move tests unchanged before rewriting them, so a review can tell a move from a change. Delete or merge a test only after naming the test that still catches its bug, with the same order and absence checks.
 
 Each test protects a contract and catches a bug you can name. Assert the whole outcome the test controls, including order and the absence of extra outputs, so a regression cannot pass by adding or reordering packets.
 
 Test each behavior at the layer that decides it. Add a test at a higher layer only for what the lower one cannot see.
 
-- **Core tests:** A rule that a synchronous core decides, such as ordering, acks, reconnection, namespace lifecycle, and binary packets, is a plain `#[test]` on that core. It sends inputs and asserts outputs and queries, using builders only. `sioc/src/manager/tests/state.rs` shows the shape.
+- **Core tests:** A rule that a synchronous core decides, such as ordering, acks, reconnection, namespace lifecycle, and binary packets, is a plain `#[test]` on that core. It sends inputs and asserts outputs and queries, using builders only. The core tests in `sioc/src/manager/tests/` show the shape.
 - **I/O tests:** Cover what a core cannot see, which is cancel safety, permits and backpressure, hang-up detection, and cleanup that never waits on the application, and the rules of a component without a core, such as a transport. Use a small fake peer, such as the harness in `sioc/src/manager/tests/actor/`, or bare channels for a client handle, as `sioc/src/client/tests/` does.
 - **End-to-end tests:** Check the wiring against the reference servers, one scenario per feature.
 
