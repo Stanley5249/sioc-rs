@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use bytestring::ByteString;
 use eioc::prelude::{ClientMessage, Handshake, ServerMessage};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_util::task::AbortOnDropHandle;
 
@@ -164,24 +164,30 @@ pub fn spawn_session(
 ) -> eioc::engine::Engine {
     let (server_message_tx, server_message_rx) = mpsc::channel(channels.manager);
     let (client_message_tx, client_message_rx) = mpsc::channel(channels.engine);
+    let (closed_tx, closed_rx) = watch::channel(());
     let task = tokio::spawn(run_session(
         server_message_tx,
         client_message_rx,
+        closed_tx,
         session_tx,
     ));
     eioc::engine::Engine {
         client_message_tx,
         server_message_rx,
+        closed_rx,
         task: AbortOnDropHandle::new(task),
     }
 }
 
 /// Models an engine's owned server direction separately from peer injection.
 /// Closing the peer input is observed while the engine future is polled, just
-/// as the real protocol drops its server sender before draining client input.
+/// as the real protocol ends the session and drops its server sender before
+/// draining client input. Like a real engine, it sees that end only after it
+/// forwarded every earlier message.
 pub async fn run_session(
     server_message_tx: mpsc::Sender<ServerMessage>,
     client_message_rx: mpsc::Receiver<ClientMessage>,
+    closed_tx: watch::Sender<()>,
     session_tx: mpsc::Sender<TestSession>,
 ) -> Result<(), eioc::error::Error> {
     let (peer_tx, mut peer_rx) = mpsc::channel(32);
@@ -207,6 +213,7 @@ pub async fn run_session(
     while let Some(message) = peer_rx.recv().await {
         server_message_tx.send(message).await.unwrap();
     }
+    drop(closed_tx);
     drop(server_message_tx);
     result_rx.await.unwrap_or(Ok(()))
 }
