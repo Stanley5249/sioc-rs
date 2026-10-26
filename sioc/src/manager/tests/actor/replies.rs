@@ -10,23 +10,16 @@ use tokio_util::sync::CancellationToken;
 
 use super::harness::*;
 use crate::config::ChannelConfig;
+use crate::manager::tests::rig::{Rig, ack, event};
 use crate::packet::ClientPacket;
-
-fn ack(id: u64) -> ClientPacket {
-    ClientPacket::Ack {
-        payload: "[]".into(),
-        id,
-        attachments: None,
-    }
-}
 
 #[test]
 fn a_reply_flood_does_not_starve_buffered_events() {
-    let mut rig = crate::manager::tests::rig::Rig::new();
+    let mut rig = Rig::new();
     let _handles = rig.connected("/");
     let (event_tx, event_rx) = mpsc::channel(1);
     let (ack_tx, ack_rx) = mpsc::channel(1);
-    event_tx.try_send(event(r#"["waiting"]"#, None)).unwrap();
+    event_tx.try_send(event(r#"["waiting"]"#)).unwrap();
     ack_tx.try_send(ack(0)).unwrap();
     let closed = CancellationToken::new();
     let mut buffers = [crate::manager::namespace_inputs::NamespaceInputs {
@@ -65,7 +58,7 @@ fn a_reply_flood_does_not_starve_buffered_events() {
 #[test]
 fn both_input_ends_release_the_namespace_in_either_polling_order() {
     for ack_first in [false, true] {
-        let mut rig = crate::manager::tests::rig::Rig::new();
+        let mut rig = Rig::new();
         let _handles = rig.connected("/");
         let (event_tx, event_rx) = mpsc::channel(1);
         let (ack_tx, ack_rx) = mpsc::channel(1);
@@ -119,7 +112,7 @@ async fn queued_and_blocked_replies_end_with_their_engine_while_events_survive()
     // At most one packet can enter the old engine. The rest remain bounded
     // in the two namespace inputs without a consumer on the engine side.
     for _ in 0..32 {
-        within("queue events", tx.send(event(r#"["queued"]"#, None)))
+        within("queue events", tx.send(event(r#"["queued"]"#)))
             .await
             .unwrap();
     }
@@ -171,7 +164,7 @@ async fn queued_and_blocked_replies_end_with_their_engine_while_events_survive()
         }
         events
     };
-    let (sent, new_events) = tokio::join!(tx.send(event(r#"["last"]"#, None)), receive);
+    let (sent, new_events) = tokio::join!(tx.send(event(r#"["last"]"#)), receive);
     sent.unwrap();
     assert_eq!(old_events + new_events, 32);
     tx.send(ack(1000)).await.unwrap();
@@ -190,7 +183,7 @@ async fn replies_while_unconfirmed_are_discarded_instead_of_buffered() {
         tx.send(ack(id)).await.unwrap();
         manager.send_server_message(CONNECT_RESPONSE).await;
         rx.recv().await.unwrap();
-        tx.send(event(r#"["confirmed"]"#, None)).await.unwrap();
+        tx.send(event(r#"["confirmed"]"#)).await.unwrap();
         assert_eq!(&*manager.recv_client_text().await, r#"2["confirmed"]"#);
         if id == 1 {
             manager.session.take().unwrap().close().await;
@@ -209,7 +202,7 @@ async fn local_disconnect_drains_replies_before_releasing_the_name() {
     manager.send_server_message(CONNECT_RESPONSE).await;
     rx.recv().await.unwrap();
     tx.send(ack(7)).await.unwrap();
-    tx.send(event(r#"["last"]"#, None)).await.unwrap();
+    tx.send(event(r#"["last"]"#)).await.unwrap();
     tx.disconnect();
     let TestSession {
         server_message_tx,

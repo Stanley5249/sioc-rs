@@ -13,7 +13,6 @@ use crate::config::ChannelConfig;
 use crate::error::ManagerError;
 use crate::manager::backoff::Backoff;
 use crate::manager::connect_request::ConnectRequest;
-use crate::packet::{ClientPacket, DynAck};
 
 pub const CONNECT_RESPONSE: &str = "0{\"sid\":\"test\"}";
 
@@ -54,14 +53,6 @@ pub struct TestManager {
     /// Receives each session the manager opens after the first.
     pub session_rx: mpsc::Receiver<TestSession>,
     pub task: JoinHandle<Result<(), ManagerError>>,
-}
-
-pub fn event(payload: &'static str, ack_tx: Option<oneshot::Sender<DynAck>>) -> ClientPacket {
-    ClientPacket::Event {
-        payload: ByteString::from_static(payload),
-        ack_tx,
-        attachments: None,
-    }
 }
 
 impl TestManager {

@@ -9,6 +9,7 @@ use eioc::prelude::ClientMessage;
 use super::harness::*;
 use crate::error::{ManagerError, SocketError};
 use crate::manager::connect_request::ConnectRequest;
+use crate::manager::tests::rig::event;
 use crate::packet::ServerPacket;
 
 #[tokio::test]
@@ -90,11 +91,11 @@ async fn internal_send_failure_releases_a_full_retained_receiver() {
     let mut manager = TestManager::spawn().await;
     let (tx, _rx) = manager.open_with("/", ByteString::new(), 1).await;
     manager.send_server_message(CONNECT_RESPONSE).await;
-    tx.send(event(r#"["ready"]"#, None)).await.unwrap();
+    tx.send(event(r#"["ready"]"#)).await.unwrap();
     assert_eq!(&*manager.recv_client_text().await, r#"2["ready"]"#);
     manager.send_server_message(r#"2["blocked"]"#).await;
     manager.session().client_message_rx.close();
-    tx.send(event(r#"["fails"]"#, None)).await.unwrap();
+    tx.send(event(r#"["fails"]"#)).await.unwrap();
     let result = tokio::time::timeout(Duration::from_secs(1), manager.join())
         .await
         .expect("a broken engine must release blocked delivery");
@@ -130,7 +131,7 @@ async fn peer_close_drains_final_messages_without_an_application_consumer() {
     manager.send_server_message(CONNECT_RESPONSE).await;
     // An emitted event proves the namespace was confirmed while Connect
     // remains in the full application queue.
-    tx.send(event(r#"["ready"]"#, None)).await.unwrap();
+    tx.send(event(r#"["ready"]"#)).await.unwrap();
     manager.recv_client_text().await;
     for message in [r#"2["held"]"#, r#"2["overflow"]"#, "1"] {
         manager.send_server_message(message).await;
@@ -182,7 +183,7 @@ async fn aborting_the_manager_ends_the_handles() {
     assert!(manager.task.await.unwrap_err().is_cancelled());
     assert!(rx.recv().await.is_none());
     assert!(matches!(
-        tx.send(event(r#"["after"]"#, None)).await,
+        tx.send(event(r#"["after"]"#)).await,
         Err(SocketError::Closed)
     ));
 }

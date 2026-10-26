@@ -7,8 +7,8 @@ use eioc::prelude::TransportStrategy;
 use tokio::sync::Notify;
 use url::Url;
 
-use super::harness::event;
 use crate::client::ClientBuilder;
+use crate::manager::tests::rig::event;
 
 #[tokio::test(start_paused = true)]
 async fn cancellation_during_opening_needs_neither_handshake_nor_deadline() {
@@ -27,7 +27,7 @@ async fn cancellation_during_opening_needs_neither_handshake_nor_deadline() {
             .unwrap();
         let handles = if with_namespace {
             let (tx, rx) = client.connect("/").await.unwrap();
-            tx.send(event(r#"["queued"]"#, None)).await.unwrap();
+            tx.send(event(r#"["queued"]"#)).await.unwrap();
             Some((tx, rx))
         } else {
             None

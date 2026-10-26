@@ -3,7 +3,6 @@
 
 use tokio::sync::mpsc::error::TryRecvError as MpscTryRecvError;
 use tokio::sync::oneshot::error::TryRecvError;
-use tokio::sync::{mpsc, oneshot};
 
 use super::rig::{Effect, Rig, disconnect, event, event_ack, listen, packet};
 use crate::error::SocketError;
@@ -299,17 +298,14 @@ fn reopen_discards_the_old_held_delivery_before_installing_new_handles() {
 
     old.closed.cancel();
     let mut new = rig.connect("/", "{}", 1);
-    assert_eq!(
-        new.reply_rx.try_recv().unwrap_err(),
-        oneshot::error::TryRecvError::Empty
-    );
-    rig.step(ManagerInput::Disconnect("/".into()));
+    assert_eq!(new.reply_rx.try_recv().unwrap_err(), TryRecvError::Empty);
+    rig.step(disconnect("/"));
 
     assert!(rig.core.held_sender().is_none());
     new.reply_rx.try_recv().unwrap().unwrap();
     assert_eq!(
         new.server_packet_rx.try_recv().unwrap_err(),
-        mpsc::error::TryRecvError::Empty
+        MpscTryRecvError::Empty
     );
 }
 
@@ -324,15 +320,9 @@ fn repeated_termination_keeps_the_old_participation_draining() {
     let mut new = rig.connect("/", "{}", 1);
     rig.server("1");
     rig.server("4{\"message\":\"again\"}");
-    assert_eq!(
-        new.reply_rx.try_recv().unwrap_err(),
-        oneshot::error::TryRecvError::Empty
-    );
-    assert_eq!(
-        waiter.try_recv().unwrap_err(),
-        oneshot::error::TryRecvError::Closed
-    );
-    rig.step(ManagerInput::Disconnect("/".into()));
+    assert_eq!(new.reply_rx.try_recv().unwrap_err(), TryRecvError::Empty);
+    assert_eq!(waiter.try_recv().unwrap_err(), TryRecvError::Closed);
+    rig.step(disconnect("/"));
     new.reply_rx.try_recv().unwrap().unwrap();
 }
 
@@ -346,7 +336,7 @@ fn partial_binary_input_stays_with_the_old_participation_during_reuse() {
             rig.server(r#"51-["old",{"_placeholder":true,"num":0}]"#);
         }
         old.closed.cancel();
-        rig.step(ManagerInput::Disconnect("/".into()));
+        rig.step(disconnect("/"));
         rig.messages();
         if header_after_end {
             rig.server(r#"51-["old",{"_placeholder":true,"num":0}]"#);
@@ -357,7 +347,7 @@ fn partial_binary_input_stays_with_the_old_participation_during_reuse() {
         rig.server_binary(b"old attachment");
         assert_eq!(
             new.server_packet_rx.try_recv().unwrap_err(),
-            mpsc::error::TryRecvError::Empty
+            MpscTryRecvError::Empty
         );
         rig.confirm("/");
         new.server_packet_rx.try_recv().unwrap();
