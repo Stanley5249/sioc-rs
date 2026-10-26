@@ -120,7 +120,8 @@ where
 /// Handle that resolves to [`Ack`] when the server's acknowledgement arrives.
 ///
 /// Obtained from [`SocketSender::emit`](crate::client::SocketSender::emit).
-/// Implements [`Future`]: `.await` it directly.
+/// Implements [`Future`]: `.await` it directly. A named type rather than an
+/// `async fn`, so callers can store it and add [`timeout`](Self::timeout).
 #[pin_project]
 #[must_use = "AckHandle must be awaited to receive the ack"]
 #[derive(Debug)]

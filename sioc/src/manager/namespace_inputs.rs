@@ -43,6 +43,12 @@ pub struct NamespaceInputs {
 /// dropped, so unsent packets wait in the channel, which bounds them. Once a
 /// channel's token is cancelled, it is closed so blocked handles fail and the
 /// rest drains to its end.
+///
+/// A poll function rather than `select!`, because the set of namespaces
+/// changes at run time and each one is read only when the core allows it. A
+/// namespace the core holds back registers no wakeup here: only the actor's
+/// other inputs change the core's answer, and each of them ends the actor's
+/// wait, so the next turn polls again.
 pub fn poll_namespace_inputs(
     core: &ManagerCore,
     namespace_inputs: &mut [NamespaceInputs],
