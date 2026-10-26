@@ -171,3 +171,16 @@ pub fn ack(id: u64) -> ClientPacket {
         attachments: None,
     }
 }
+
+/// A handle's packet as the actor hands it over, without the read check.
+pub fn packet(ns: &str, packet: ClientPacket) -> ManagerInput {
+    ManagerInput::Packet {
+        ns: ns.into(),
+        packet,
+    }
+}
+
+/// The end of a namespace's input channels.
+pub fn disconnect(ns: &str) -> ManagerInput {
+    ManagerInput::Disconnect(ns.into())
+}

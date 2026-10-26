@@ -51,7 +51,7 @@ Each test protects a contract and catches a bug you can name. Assert the whole o
 
 Test each behavior at the layer that decides it. Add a test at a higher layer only for what the lower one cannot see.
 
-- **Core tests:** A rule that a synchronous core decides, such as ordering, acks, reconnection, namespace lifecycle, and binary packets, is a plain `#[test]` on that core. It sends inputs and asserts outputs and queries, using builders only. `sioc/src/manager/tests/state.rs` shows the shape.
+- **Core tests:** A rule that a synchronous core decides, such as ordering, acks, reconnection, namespace lifecycle, and binary packets, is a plain `#[test]` on that core. It sends inputs and asserts outputs and queries, using builders only. The core tests in `sioc/src/manager/tests/` show the shape.
 - **I/O tests:** Cover what a core cannot see, which is cancel safety, permits and backpressure, hang-up detection, and cleanup that never waits on the application, and the rules of a component without a core, such as a transport. Use a small fake peer, such as the harness in `sioc/src/manager/tests/actor/`, or bare channels for a client handle, as `sioc/src/client/tests/` does.
 - **End-to-end tests:** Check the wiring against the reference servers, one scenario per feature.
 
