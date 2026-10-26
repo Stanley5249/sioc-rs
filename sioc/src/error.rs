@@ -25,7 +25,7 @@ pub struct PayloadError {
 impl PayloadError {
     /// Creates a `PayloadError` for type `T`.
     #[must_use]
-    pub fn new<T>(source: serde_path_to_error::Error<serde_json::Error>) -> Self {
+    pub(crate) fn new<T>(source: serde_path_to_error::Error<serde_json::Error>) -> Self {
         Self {
             type_name: std::any::type_name::<T>(),
             source,
@@ -328,7 +328,7 @@ pub enum ManagerError {
     /// reconstructing a packet".
     #[error("unexpected text frame: {0:?}")]
     #[diagnostic(
-        code(sioc::manager::unexpected_text),
+        code(sioc::parse::unexpected_text),
         help(
             "the server sent a text frame while binary reassembly was in progress; likely a server protocol bug"
         )
@@ -340,7 +340,7 @@ pub enum ManagerError {
     /// reconstructing a packet".
     #[error("unexpected binary frame: {0:?}")]
     #[diagnostic(
-        code(sioc::manager::unexpected_binary),
+        code(sioc::parse::unexpected_binary),
         help(
             "the server sent a binary frame while no reassembly was pending; likely a server protocol bug"
         )
