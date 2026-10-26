@@ -445,4 +445,22 @@ mod tests {
     fn encode_noop_panics() {
         Packet::Noop.encode();
     }
+
+    /// The kinds appear in error messages, so each packet type keeps its name.
+    #[test]
+    fn frame_kinds_name_the_packet_type() {
+        let frames = [
+            (Frame::Packet(Packet::Open(test_handshake())), "open"),
+            (Packet::Close.into(), "close"),
+            (Packet::Ping(bss("")).into(), "ping"),
+            (Packet::Pong(bss("")).into(), "pong"),
+            (Packet::Message(bss("")).into(), "message"),
+            (Packet::Upgrade.into(), "upgrade"),
+            (Packet::Noop.into(), "noop"),
+            (Frame::Binary(Bytes::new()), "binary"),
+        ];
+        for (frame, kind) in frames {
+            assert_eq!(frame.kind(), kind);
+        }
+    }
 }
