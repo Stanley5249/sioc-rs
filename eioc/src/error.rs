@@ -5,13 +5,13 @@ use miette::Diagnostic;
 use thiserror::Error;
 use tokio::sync::mpsc;
 
-use crate::packet::Frame;
 use crate::transport::ServerFrame;
 
 /// Top-level error aggregator for `eioc`.
 #[derive(Debug, Error, Diagnostic)]
 #[error(transparent)]
 #[diagnostic(transparent)]
+#[non_exhaustive]
 pub enum Error {
     /// Error from the transport coordination task.
     Transport(#[from] TransportError),
@@ -42,6 +42,7 @@ impl Error {
 
 /// Errors that occur during an active Engine.IO session.
 #[derive(Debug, Error, Diagnostic)]
+#[non_exhaustive]
 pub enum EngineError {
     /// Delivering a server message to the upper layer failed because it
     /// dropped its receiver before the engine hung up.
@@ -71,6 +72,7 @@ pub enum EngineError {
 /// Errors that occur during Engine.IO connection setup and transport
 /// coordination.
 #[derive(Debug, Error, Diagnostic)]
+#[non_exhaustive]
 pub enum TransportError {
     /// A WebSocket transport error.
     #[error(transparent)]
@@ -91,15 +93,16 @@ pub enum TransportError {
     )]
     ServerFrameClosed,
 
-    /// The first frame received was not an Open packet.
-    #[error("expected Open packet as first frame")]
+    /// The first frame received was not an Open packet. Holds the type of the
+    /// packet that arrived instead.
+    #[error("expected Open packet as first frame, received {0}")]
     #[diagnostic(
         code(eioc::transport::open),
         help(
             "the server did not send the expected Open packet; check the server implementation and Engine.IO version"
         )
     )]
-    Open(Frame),
+    Open(&'static str),
 }
 
 impl From<mpsc::error::SendError<ServerFrame>> for TransportError {
@@ -110,6 +113,7 @@ impl From<mpsc::error::SendError<ServerFrame>> for TransportError {
 
 /// Errors specific to the WebSocket transport.
 #[derive(Debug, Error, Diagnostic)]
+#[non_exhaustive]
 pub enum WebSocketError {
     /// An error from the `tokio-tungstenite` library.
     #[error(transparent)]
@@ -125,14 +129,14 @@ pub enum WebSocketError {
     Closed,
 
     /// The server did not respond to the probe Ping with a Pong.
-    #[error("probe Pong not received")]
+    #[error("probe Pong not received, received {0}")]
     #[diagnostic(
         code(eioc::transport::websocket::probe),
         help(
             "the server did not respond to the probe Ping with a Pong; check the server implementation and Engine.IO version"
         )
     )]
-    Probe(Frame),
+    Probe(&'static str),
 
     /// A packet decoding error within a WebSocket text frame.
     #[error(transparent)]
@@ -142,6 +146,7 @@ pub enum WebSocketError {
 
 /// Errors specific to the HTTP long-polling transport.
 #[derive(Debug, Error, Diagnostic)]
+#[non_exhaustive]
 pub enum PollingError {
     /// An HTTP client error.
     #[error(transparent)]
@@ -171,6 +176,7 @@ pub enum PollingError {
 
 /// Errors from decoding a raw Engine.IO packet.
 #[derive(Debug, Error, Diagnostic)]
+#[non_exhaustive]
 pub enum PacketError {
     /// Packet bytes are empty.
     #[error("empty packet")]
@@ -205,16 +211,12 @@ pub enum PacketError {
 mod tests {
     use super::*;
 
-    fn frame() -> Frame {
-        crate::packet::Packet::Noop.into()
-    }
-
     #[test]
     fn network_and_server_faults_are_not_internal() {
         let errors: [Error; 5] = [
             TransportError::WebSocket(WebSocketError::Closed).into(),
             TransportError::Polling(PollingError::Response(String::new())).into(),
-            TransportError::Open(frame()).into(),
+            TransportError::Open("noop").into(),
             EngineError::HeartbeatTimeout.into(),
             EngineError::HandshakeTimeout.into(),
         ];
@@ -284,8 +286,7 @@ mod tests {
 
     #[test]
     fn error_from_transport_error() {
-        let e: Error =
-            TransportError::Open(crate::packet::Frame::Packet(crate::packet::Packet::Close)).into();
+        let e: Error = TransportError::Open("close").into();
         assert!(matches!(e, Error::Transport(_)));
     }
 }

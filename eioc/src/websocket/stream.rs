@@ -93,7 +93,7 @@ pub async fn probe_upgrade(stream: &mut WebSocketStream) -> Result<(), WebSocket
             tracing::debug!("received probe pong");
         }
 
-        frame => return Err(WebSocketError::Probe(frame)),
+        frame => return Err(WebSocketError::Probe(frame.kind())),
     }
 
     Ok(())

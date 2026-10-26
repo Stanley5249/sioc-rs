@@ -94,16 +94,29 @@ pub struct Engine {
     closed_rx: watch::Receiver<()>,
 }
 
-impl Engine {
-    /// Takes all ends of a new session, like `Manager.open` installing its
-    /// engine and listeners.
-    pub fn new(engine: eioc::engine::Engine) -> Self {
+impl From<eioc::engine::Engine> for Engine {
+    fn from(engine: eioc::engine::Engine) -> Self {
+        // A field that a later eioc adds is safe to drop, as `Engine` promises.
         let eioc::engine::Engine {
             client_message_tx,
             server_message_rx,
             closed_rx,
             task,
+            ..
         } = engine;
+        Self::new(client_message_tx, server_message_rx, closed_rx, task)
+    }
+}
+
+impl Engine {
+    /// Takes all ends of a new session, like `Manager.open` installing its
+    /// engine and listeners.
+    pub fn new(
+        client_message_tx: mpsc::Sender<ClientMessage>,
+        server_message_rx: mpsc::Receiver<ServerMessage>,
+        closed_rx: watch::Receiver<()>,
+        task: AbortOnDropHandle<Result<(), eioc::error::Error>>,
+    ) -> Self {
         Self {
             task: Task::Running(task),
             admission: Admission::Open {
@@ -294,12 +307,12 @@ mod tests {
         let (client_message_tx, client_message_rx) = mpsc::channel(1);
         // The session is over from the start, like the server direction.
         let (_, closed_rx) = watch::channel(());
-        Engine::new(eioc::engine::Engine {
+        Engine::new(
             client_message_tx,
             server_message_rx,
             closed_rx,
-            task: AbortOnDropHandle::new(task(server_message_tx, client_message_rx)),
-        })
+            AbortOnDropHandle::new(task(server_message_tx, client_message_rx)),
+        )
     }
 
     async fn result_of(mut engine: Engine) -> Result<(), ManagerError> {
@@ -397,12 +410,12 @@ mod tests {
         let (server_message_tx, server_message_rx) = mpsc::channel(1);
         let (client_message_tx, _client_message_rx) = mpsc::channel(1);
         let (closed_tx, closed_rx) = watch::channel(());
-        let mut engine = Engine::new(eioc::engine::Engine {
+        let mut engine = Engine::new(
             client_message_tx,
             server_message_rx,
             closed_rx,
-            task: AbortOnDropHandle::new(tokio::spawn(std::future::pending())),
-        });
+            AbortOnDropHandle::new(tokio::spawn(std::future::pending())),
+        );
         {
             let mut waiting = std::pin::pin!(engine.next(false, false));
             assert!(waiting.as_mut().now_or_never().is_none());

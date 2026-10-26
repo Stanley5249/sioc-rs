@@ -27,7 +27,7 @@ pub async fn run<F>(
     backoff: Option<Backoff>,
 ) -> Result<(), ManagerError>
 where
-    F: FnMut() -> eioc::engine::Engine,
+    F: FnMut() -> Engine,
 {
     let mut actor = ManagerActor {
         core: ManagerCore::new(backoff, fastrand::Rng::new()),
@@ -69,7 +69,7 @@ struct ManagerActor<F> {
 
 impl<F> ManagerActor<F>
 where
-    F: FnMut() -> eioc::engine::Engine,
+    F: FnMut() -> Engine,
 {
     /// Feeds the core until the client and every namespace are gone, or the
     /// core reports an internal error.
@@ -142,7 +142,7 @@ where
             "the core opens an engine only after the last one closed"
         );
 
-        self.engine = Some(Engine::new((self.connect_engine)()));
+        self.engine = Some((self.connect_engine)());
     }
 
     /// Sends one waiting message on the held permit, like `engine.write`.

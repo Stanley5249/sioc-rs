@@ -17,7 +17,11 @@ use crate::packet::{ClientMessage, ServerMessage};
 use crate::transport::{ClientFrame, ServerFrame, TransportStrategy};
 
 /// What [`open`] needs, like engine.io-client's `SocketOptions`.
+///
+/// Start from [`EngineOptions::new`] and set the fields that differ. Later
+/// releases may add options with defaults, so the type is non-exhaustive.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct EngineOptions<C> {
     /// The Engine.IO endpoint, like the `uri` and `path` options.
     pub url: Url,
@@ -48,6 +52,34 @@ pub struct EngineOptions<C> {
     pub client_frame_capacity: usize,
 }
 
+impl<C> EngineOptions<C> {
+    /// Options for `url` that open WebSocket connections with
+    /// `websocket_connector`, which can be `()` for a plain connection.
+    ///
+    /// The other fields start at these defaults:
+    ///
+    /// - `http_client`: [`reqwest::Client::new`], which has no timeout.
+    /// - `transport`: [`TransportStrategy::Polling`], which upgrades when the
+    ///   server offers WebSocket, like engine.io-client's default `transports`.
+    /// - `handshake_timeout`: `None`, because engine.io-client has no handshake
+    ///   timeout of its own. socket.io-client's `Manager` adds one.
+    /// - Every channel capacity: 32 slots, the default of `sioc`'s
+    ///   `ChannelConfig`.
+    pub fn new(url: Url, websocket_connector: C) -> Self {
+        Self {
+            url,
+            http_client: reqwest::Client::new(),
+            websocket_connector,
+            transport: TransportStrategy::default(),
+            handshake_timeout: None,
+            server_message_capacity: 32,
+            client_message_capacity: 32,
+            server_frame_capacity: 32,
+            client_frame_capacity: 32,
+        }
+    }
+}
+
 /// A running engine, like engine.io-client's `Socket`. Rust channel: the JS
 /// `Socket` is called directly, while here its one task is reached through
 /// these channels.
@@ -69,7 +101,11 @@ pub struct EngineOptions<C> {
 /// only after the handshake, so once that channel is full the task cannot
 /// see the hang-up, and a handshake may have no deadline. Dropping `task`
 /// aborts the session at any point.
+///
+/// Move the fields out with `..`. Later releases may add fields, each of which
+/// is safe to drop, so the type is non-exhaustive.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Engine {
     /// What the client sends, like `Socket.write`.
     pub client_message_tx: mpsc::Sender<ClientMessage>,

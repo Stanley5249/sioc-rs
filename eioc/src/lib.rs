@@ -3,7 +3,7 @@
 pub mod connector;
 pub mod engine;
 pub mod error;
-pub mod packet;
+mod packet;
 mod polling;
 mod transport;
 mod websocket;
@@ -15,6 +15,5 @@ pub const ENGINE_IO_VERSION: &str = "4";
 /// Convenience re-exports for common usage.
 pub mod prelude {
     pub use crate::connector::{WebSocketConnector, WebSocketStream};
-    pub use crate::packet::{ClientMessage, Frame, Handshake, Packet, ServerMessage};
-    pub use crate::transport::TransportStrategy;
+    pub use crate::engine::{ClientMessage, Handshake, ServerMessage, TransportStrategy};
 }

@@ -25,7 +25,7 @@ pub struct PayloadError {
 impl PayloadError {
     /// Creates a `PayloadError` for type `T`.
     #[must_use]
-    pub fn new<T>(source: serde_path_to_error::Error<serde_json::Error>) -> Self {
+    pub(crate) fn new<T>(source: serde_path_to_error::Error<serde_json::Error>) -> Self {
         Self {
             type_name: std::any::type_name::<T>(),
             source,
@@ -40,6 +40,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 #[derive(Debug, Error, Diagnostic)]
 #[error(transparent)]
 #[diagnostic(transparent)]
+#[non_exhaustive]
 pub enum Error {
     /// Error from [`ClientBuilder::open`](crate::client::ClientBuilder::open).
     Builder(#[from] ClientBuilderError),
@@ -57,6 +58,7 @@ pub enum Error {
 /// Error returned by
 /// [`ClientBuilder::open`](crate::client::ClientBuilder::open).
 #[derive(Debug, Error, Diagnostic)]
+#[non_exhaustive]
 pub enum ClientBuilderError {
     /// A bounded channel requires a positive capacity.
     #[error("channel capacity for {channel} must be positive")]
@@ -73,6 +75,7 @@ pub enum ClientBuilderError {
 
 /// Error returned by [`Client::join`](crate::client::Client::join).
 #[derive(Debug, Error, Diagnostic)]
+#[non_exhaustive]
 pub enum ClientError {
     /// Error propagated from the socket manager.
     #[error(transparent)]
@@ -87,6 +90,7 @@ pub enum ClientError {
 
 /// Error returned by [`SocketSender`](crate::client::SocketSender) operations.
 #[derive(Debug, Error, Diagnostic)]
+#[non_exhaustive]
 pub enum SocketError {
     /// A binary packet has zero attachments or exceeds
     /// [`MAX_ATTACHMENTS`](crate::binary::MAX_ATTACHMENTS).
@@ -120,6 +124,7 @@ pub enum SocketError {
 /// Error converting a [`DynEvent`](crate::packet::DynEvent) into a typed
 /// [`Event`](crate::event::Event).
 #[derive(Debug, Error, Diagnostic)]
+#[non_exhaustive]
 pub enum EventError {
     /// Event payload deserialization failed.
     #[error("failed to deserialize event payload")]
@@ -139,6 +144,7 @@ pub enum EventError {
 
 /// Error returned when receiving or parsing a typed acknowledgement.
 #[derive(Debug, Error, Diagnostic)]
+#[non_exhaustive]
 pub enum AckError {
     /// The client stopped waiting for the server's answer, because the
     /// namespace closed or the Engine.IO session dropped after the event went
@@ -169,6 +175,7 @@ pub enum AckError {
 /// Ack ID presence mismatch between the inbound packet and the event type's
 /// policy.
 #[derive(Debug, Error, Diagnostic)]
+#[non_exhaustive]
 pub enum AckIdError {
     /// Event declares `HasAck` but the server sent no ack ID.
     #[error("ack ID was missing")]
@@ -194,6 +201,7 @@ pub enum AckIdError {
 /// Attachment presence mismatch between the inbound packet and the type's
 /// binary policy.
 #[derive(Debug, Error, Diagnostic)]
+#[non_exhaustive]
 pub enum AttachmentsError {
     /// A placeholder references an attachment outside the supplied list.
     #[error("attachment slot {slot} is outside {count} attachments")]
@@ -229,6 +237,7 @@ pub enum AttachmentsError {
 ///
 /// Callers receive this wrapped in [`ManagerError::Packet`].
 #[derive(Debug, Error, Diagnostic)]
+#[non_exhaustive]
 pub enum PacketError {
     /// A binary packet has zero attachments or exceeds
     /// [`MAX_ATTACHMENTS`](crate::binary::MAX_ATTACHMENTS).
@@ -302,6 +311,7 @@ pub enum PacketError {
 
 /// The top-level error type for Socket.IO manager operations.
 #[derive(Debug, Error, Diagnostic)]
+#[non_exhaustive]
 pub enum ManagerError {
     /// Error propagated from the Engine.IO transport layer.
     #[error(transparent)]
@@ -318,7 +328,7 @@ pub enum ManagerError {
     /// reconstructing a packet".
     #[error("unexpected text frame: {0:?}")]
     #[diagnostic(
-        code(sioc::manager::unexpected_text),
+        code(sioc::parse::unexpected_text),
         help(
             "the server sent a text frame while binary reassembly was in progress; likely a server protocol bug"
         )
@@ -330,7 +340,7 @@ pub enum ManagerError {
     /// reconstructing a packet".
     #[error("unexpected binary frame: {0:?}")]
     #[diagnostic(
-        code(sioc::manager::unexpected_binary),
+        code(sioc::parse::unexpected_binary),
         help(
             "the server sent a binary frame while no reassembly was pending; likely a server protocol bug"
         )

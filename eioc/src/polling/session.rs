@@ -8,7 +8,7 @@ use url::Url;
 
 use crate::connector::WebSocketConnector;
 use crate::error::TransportError;
-use crate::packet::{Frame, Packet};
+use crate::packet::{Frame, Handshake, Packet};
 use crate::transport::{ClientFrame, ServerFrame};
 
 /// Runs the full polling transport lifecycle: handshake, GET/POST loops, and
@@ -51,11 +51,11 @@ where
         .next()
         .expect("a decoded payload holds at least one frame");
     let Frame::Packet(Packet::Open(handshake)) = &first else {
-        return Err(TransportError::Open(first));
+        return Err(TransportError::Open(first.kind()));
     };
 
     url.query_pairs_mut().append_pair("sid", &handshake.sid);
-    let can_upgrade = handshake.can_upgrade_to_websocket();
+    let can_upgrade = offers_websocket(handshake);
     let sid = handshake.sid.clone();
     let max_payload = handshake.max_payload;
 
@@ -101,4 +101,33 @@ where
     while client_frame_rx.recv().await.is_some() {}
 
     Ok(())
+}
+
+/// Whether the server offered a WebSocket upgrade.
+fn offers_websocket(handshake: &Handshake) -> bool {
+    handshake
+        .upgrades
+        .iter()
+        .any(|upgrade| upgrade == "websocket")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn handshake(upgrades: Vec<bytestring::ByteString>) -> Handshake {
+        Handshake {
+            sid: "x".into(),
+            upgrades,
+            ping_interval: 25_000,
+            ping_timeout: 5_000,
+            max_payload: 1_000_000,
+        }
+    }
+
+    #[test]
+    fn a_websocket_upgrade_is_offered_only_when_listed() {
+        assert!(offers_websocket(&handshake(vec!["websocket".into()])));
+        assert!(!offers_websocket(&handshake(vec![])));
+    }
 }

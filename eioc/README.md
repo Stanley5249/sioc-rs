@@ -10,6 +10,35 @@ The [Engine.IO protocol](https://socket.io/docs/v4/engine-io-protocol/) provides
 
 The higher-level [`sioc`](https://docs.rs/sioc) crate adds namespaces, events, and acknowledgements.
 
+`eioc::engine::open` spawns a session and returns its channels. Wait for the handshake before sending, and close the session by dropping `client_message_tx`:
+
+```rust,no_run
+use eioc::engine::{ClientMessage, Engine, EngineOptions, ServerMessage};
+use url::Url;
+
+# async fn run() -> Result<(), Box<dyn std::error::Error>> {
+let url = Url::parse("http://localhost:3000/engine.io/")?;
+let Engine {
+    client_message_tx,
+    mut server_message_rx,
+    task,
+    ..
+} = eioc::engine::open(EngineOptions::new(url, ()));
+
+if let Some(ServerMessage::Open(handshake)) = server_message_rx.recv().await {
+    println!("session {}", handshake.sid);
+    client_message_tx.send(ClientMessage::Text("hello".into())).await?;
+}
+
+drop(client_message_tx);
+while let Some(message) = server_message_rx.recv().await {
+    println!("{message:?}");
+}
+task.await??;
+# Ok(())
+# }
+```
+
 ## License
 
 MIT OR Apache-2.0.
