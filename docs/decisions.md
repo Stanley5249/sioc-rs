@@ -13,19 +13,20 @@ Each section covers one area or component. A rejected approach records why it fa
 - The end of a channel is the only close signal between tasks. Forwarding the Engine.IO `Close` packet as well gave two signals for one state, so every side had to handle both.
 - Channels the server can fill are bounded, because an unbounded control channel queued a message for every repeated CONNECT or unknown DISCONNECT, so a server could grow it without limit.
 
-## Manager actor
+## Manager
 
-- Actor select handlers apply I/O results synchronously and yield only protocol inputs. A separate step enum and interpreter repeated outcomes the handlers had already decided.
-- After a packet input, the actor hands off the message the core produced. Recomputing the read policy in the actor repeated a decision the core had already made.
+- Handles apply complete transitions to one synchronous core under a short-lived mutex, and one driver owns Engine I/O, timers, and blocked deliveries. The actor's request channel, per-namespace input handoff, dynamic polling, and ACK-route channels repeated ownership that the core can enforce directly.
+- Compared with the actor, `connect` accepts a waiting replacement immediately rather than waiting for old inbox cleanup, but its CONNECT and bounded events still wait for the old participation to finish. Confirmed outgoing packets follow core acceptance order rather than actor input polling order, and server termination reclaims queued work immediately rather than waiting for inbox EOF.
 - A cancelled output reservation is restarted, because the engine is the channel's only writer. Storing the pending future separately added state without another responsibility.
 - One owner closes admission, drains the incoming direction, and collects the result, for normal closure, failure, and shutdown alike.
 - Packet selection keeps its output permit until the event is handed off. A readiness snapshot let engine polling revoke the permit after the event left its inbox, so cleanup discarded an unsent event.
 - The core sends nothing before the engine's handshake, like `Socket.connect` waiting for the manager's `"open"` event, so closing admission also ends an opening. Sending CONNECT before Open filled the transport channel while the transport could not read it yet, so the engine never saw the manager hang up, and the manager had to abort the task by tracking whether Open had arrived.
 - When the engine ends first, the manager still processes its final control packets and discards later overflow. When the manager closes the engine, it discards unread messages. Cleanup never waits for application capacity.
-- One task owns the manager's state, and a synchronous core decides every transition. Two loops that shared namespace state behind a `Mutex` each saw half of every transition, which needed a three-step confirmation state and an unbounded event channel between them.
-- A namespace's channel is its only send buffer, and the actor reads it only when the packet can go to the engine at once. Reading every packet into a second buffer in the core needed a semaphore to bound it, a disconnecting state to flush it, and per-event ack bookkeeping, and hiding the channel until the buffer had room hid its end, so an unconfirmed namespace never closed.
+- A shared mutex protects whole transitions, not independently updated halves of state. Two earlier loops each saw half of a namespace transition and needed a three-step confirmation state and an unbounded event channel between them.
+- Semaphore permits bound core-owned outgoing packets until header submission or cancellation, with no outgoing handle channel to drain. Local disconnect and final sender drop enter the core directly, so a full or unconfirmed buffer cannot hide closure.
+- Engine construction and user connector operations run outside the mutex. A panic wakes the driver after unlocking and poisoning the core, and only shutdown recovers poisoned state, because resuming potentially partial transitions is unsafe.
 - A server packet held for a full receiver never hides the engine's hang-up. The actor kept sending events into a session that only drained, which lost them, and an empty closed server direction blocked the engine's cleanup. Reading one more engine message to see the hang-up then missed an end that came after that message, so the manager and the ended engine waited on each other until the application read. The engine now also ends a separate watch channel with the session, which wakes the manager to drain without application capacity.
-- Every sender of a namespace's channel is a `SocketSender`, whose `DropGuard` cancels the token when the last one drops. The actor leaves an unconfirmed channel unread, so a raw sender dropped without the token left the namespace open forever.
+- A shutdown guard exists before the driver future's first poll and closes every handle when the future drops. Creating cleanup only inside an async body left handles open if the task was aborted before it started.
 - The engine task's own error always becomes the session result, and success before the manager closed admission is the only internal error. Replacing the result whenever the engine ended while admission was open hid the engine's real failure, and a separate state that remembered which side stopped first only classified an engine that broke its own contract.
 - Rejected: one input channel shared by all sources. The shared channel loses per-namespace EOF and backpressure, starves control behind data, and needs a forwarding task for engine messages.
 - Rejected: generation counters or incarnation ids to tell old work from new. Old work is isolated by ownership and finished cleanup instead.
@@ -34,13 +35,13 @@ Each section covers one area or component. A rejected approach records why it fa
 
 - Wire framing and direct `SocketSender` construction stay internal. Exposing them made implementation details part of the public compatibility contract.
 - Confirmed participation flushes accepted packets when the engine has room, even after admission closes, and unconfirmed closed participation discards them. The two cases stay separate because their close policies differ on purpose.
-- Event and ACK channels live in one group that keeps their separate lifetimes. Calling the group a send buffer suggested that ACK replies persisted like buffered events.
+- Events and ACK replies have separate capacity, but queued replies belong only to their captured Engine connection. Calling both a persistent send buffer suggested that replies survived Engine loss.
 - CONNECT is queued when a namespace activates on a running engine or a new engine opens. A separate due flag duplicated those transitions and made engine startup clear an intent it did not use.
-- Cleanup finishes the old inbox and any held delivery before it opens a waiting request, so it never opens replacement handles. A held delivery keeps its original receiver and token instead of resolving the name again.
-- Ack waiters live with the active participation, and only the per-name counter outlives it. Keeping waiters beside the persistent name let cleanup and new handles share mutable state.
-- A namespace ends through the EOF of its inbox when the last `SocketSender` drops. A disconnect message sent from `Drop` was lost when the inbox was full.
-- A namespace that ends before the actor took its inbox frees its name at once. Waiting for old handles to drain an inbox nobody polled left the name taken forever.
-- A send that waits for inbox capacity fails once the namespace closes. Before the shared `CancellationToken`, such a send kept waiting after the namespace closed.
+- Local disconnect retains the accepting participation until its queued events and DISCONNECT are submitted or cancelled. Marking it disconnected immediately orphaned its queued work, prevented server termination from cancelling the flush, and registered old ACK waiters in replacement state.
+- A Socket admits at most one waiting replacement while flushing, and only activates it after old work ends. Immediate repeated activation created unlimited capacity pools behind a stalled Engine, even though each individual pool was bounded.
+- A held delivery keeps its original receiver and close token instead of resolving the name again, so replacement handles never receive stale server packets.
+- Ack waiters belong to the connected or disconnecting participation, and only the per-Socket counter outlives it. Keeping waiters beside the persistent name let cleanup and new handles share mutable state.
+- Closing the admission semaphore wakes blocked sends and rejects already acquired slots at the atomic core transition. Token checks alone left a race between observing closure and accepting a packet.
 - The terminal DISCONNECT or CONNECT_ERROR travels on its own oneshot. Through the data queue, the terminal packet never arrived while the receiver was full, so shutdown hung.
 - CONNECT_ERROR closes the namespace like DISCONNECT. Before, the namespace stayed open after a refusal and could not open again.
 - Server packets for a closed namespace are discarded. Treating them as errors failed the whole client, because the server may still send them after the client left.
@@ -49,9 +50,9 @@ Each section covers one area or component. A rejected approach records why it fa
 
 ## Acks
 
-- Unsent events keep the namespace inbox, and ACK replies use a separate bounded input that ends with the engine. Buffering both in the persistent inbox replayed old replies on the next engine.
-- Event and reply inputs take turns being polled first, so a reply flood cannot starve events. When both end in one poll, that poll reports completion, because returning pending left no wake and stalled cleanup.
-- Replies submitted while unconfirmed are discarded. `AckId` stays a wire id without a session tag, and session isolation comes from the owned input source.
+- Unsent events of live handles retain their permits across Engine reconnect, but queued ACK replies are discarded. Buffering both across sessions replayed old replies on the next Engine.
+- Confirmed events and replies share submission order, so a reply flood cannot overtake an accepted event. The actor needed alternating polls because its separate input channels otherwise let ready replies starve events.
+- Replies made while unconfirmed are discarded. A reply waiting for capacity captures a connection token before waiting and is discarded if that connection ends, while `AckId` stays a wire id without a session tag.
 - Ack ids count per namespace name and never restart. Restarting at 0 on reopen let a late ack for the closed namespace answer an event of the new one.
 - Rejected: a session tag on server ack ids. The tag was added and reverted, because the server draws ids from one counter per namespace that never resets, so the server already ignores a stale id, and the JS client sends acks without a check.
 - Registering an ack reclaims waiters whose handles were dropped or timed out. Without that, unanswered requests accumulated waiters.
@@ -68,7 +69,7 @@ Each section covers one area or component. A rejected approach records why it fa
 ## Binary
 
 - Reconstruction stores the decoded event or ACK with one shared attachment counter and buffer. A second binary-kind enum repeated distinctions the decoded packet already carries.
-- Ending a namespace consumes its remaining attachments without delivery. Resetting the decoder lost frame alignment, and keeping the name as a live destination let an old packet reach replacement handles.
+- Ending a namespace consumes its remaining incoming attachments without delivery and submits the remaining outgoing attachments if their header already entered Engine. Cancelling those attachments loses stream alignment, while unsubmitted headers and their attachments are discarded together.
 - Placeholders are validated before attachments are retained, and a binary packet carries 1 to `MAX_ATTACHMENTS` attachments. Unchecked references reached application indexing code and could hold reconstruction open.
 
 ## Engine.IO

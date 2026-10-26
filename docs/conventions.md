@@ -8,7 +8,7 @@
 
 These protect correctness. A change that breaks one needs a new decision in `docs/decisions.md`.
 
-- Each piece of mutable state has one owner. The owner can be a task, a future inside a task, or a synchronous core that a task drives. Others act on the state through its owner, by a method call or a channel, instead of sharing it.
+- Each piece of mutable state has one owner. The owner can be a task, a future inside a task, or a synchronous core. Handles may share that core through one mutex when each method applies a whole synchronous transition, no lock spans an await or user connector operation, and unwinding wakes the driver for shutdown. Other components act through the owner instead of keeping partial copies of its lifecycle.
 - Use `mpsc::channel` to give every channel fed by the server a bounded capacity. Use `mpsc::unbounded_channel` only if library state limits the number of queued items. Document that limit in a comment on the channel.
 - A `select!` loop that serves several inputs never awaits inside a handler. The loop waits for each output, such as a channel permit or a timer, as its own branch beside the inputs, so a full queue holds up only the data that needs it. Prove that every branch future is safe to cancel. A future that another branch must not cancel, such as an HTTP request in flight, is owned outside the `select!` and polled by reference. Dropping it on purpose, such as to cancel an opening, is cleanup, not cancellation by a branch.
 - Shut down through half-close. A component drops its channel senders with `drop` to initiate shutdown, then waits until `mpsc::Receiver::recv` or `mpsc::UnboundedReceiver::recv` returns `None` for every input channel before finishing. Under this protocol, sends between library components succeed, so treat any send failure as an error. If delivery fails because the caller dropped a receiver, discard the item. Discard an item only when its destination has ended, such as a closed session or namespace.
@@ -21,7 +21,7 @@ These are defaults. Depart from one when the design is simpler, and say why in t
 
 - Put protocol rules in a synchronous core that never awaits when their state and branches are worth testing apart from I/O. A core takes and returns plain data. Concurrency that belongs to one component, such as a transport's requests, may stay in that component's async code.
 - Run independent I/O directions, such as a transport's read and write halves, in separate loops joined with `tokio::join!` when no state ties them together.
-- Inside a component, items waiting in one direction wait in one place. A bounded channel between two components is that boundary's buffer and does not count as a second one.
+- Inside a component, items waiting in one direction wait in one place. A bounded channel between two components is that boundary's buffer and does not count as a second one. A shared core's queued work keeps the accepting participation and its permit until submission or cancellation, and a closing participation cannot become reusable while its old work is unowned.
 - Wait with `select!`, channels, permits, and task handles. A manual `poll`, `poll_fn`, or `Future` implementation needs a reason in its doc comment, such as reading a dynamic set of receivers or naming a public future type, because each one has to prove its own wakeups and cancel safety.
 - Add a buffer, task, channel, or piece of lifecycle state only for a responsibility that nothing else holds. A forwarding task or extra queue that only replaces manual polling moves the problem instead of removing it.
 
@@ -69,7 +69,7 @@ Each test protects a contract and catches a bug you can name. Assert the whole o
 Test each behavior at the layer that decides it. Add a test at a higher layer only for what the lower one cannot see.
 
 - **Core tests:** A rule that a synchronous core decides, such as ordering, acks, reconnection, namespace lifecycle, and binary packets, is a plain `#[test]` on that core. It sends inputs and asserts outputs and queries, using builders only. The core tests in `sioc/src/manager/tests/` show the shape.
-- **I/O tests:** Cover what a core cannot see, which is cancel safety, permits and backpressure, hang-up detection, and cleanup that never waits on the application, and the rules of a component without a core, such as a transport. Use a small fake peer, such as the harness in `sioc/src/manager/tests/actor/`, or bare channels for a client handle, as `sioc/src/client/tests/` does.
+- **I/O tests:** Cover what a core cannot see, which is cancel safety, permits and backpressure, hang-up detection, and cleanup that never waits on the application, and the rules of a component without a core, such as a transport. Use a small fake peer, such as the harness in `sioc/src/manager/tests/driver/`, or bare channels for a client handle, as `sioc/src/client/tests/` does.
 - **End-to-end tests:** Check the wiring against the reference servers, one scenario per feature.
 
 Under backpressure, test safety and progress apart. Safety means a full queue loses and reorders nothing, and a core test checks it. Progress means a full queue holds up only the data that needs it, and only an I/O test can check it, as `emits_flow_while_receiver_is_full` does.

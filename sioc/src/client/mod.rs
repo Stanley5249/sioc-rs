@@ -8,6 +8,7 @@ mod connection;
 mod socket;
 
 pub use connection::{Client, ClientBuilder};
+pub(crate) use socket::connect;
 pub use socket::{SocketReceiver, SocketSender};
 
 #[cfg(test)]

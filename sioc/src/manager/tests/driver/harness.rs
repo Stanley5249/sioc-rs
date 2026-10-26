@@ -1,5 +1,6 @@
-//! A fake engine and a spawned manager that the actor tests drive.
+//! A fake engine and a spawned manager that the driver tests drive.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytestring::ByteString;
@@ -10,10 +11,11 @@ use tokio_util::task::AbortOnDropHandle;
 
 use crate::client::{SocketReceiver, SocketSender};
 use crate::config::ChannelConfig;
-use crate::error::ManagerError;
+use crate::error::{ManagerError, SocketError};
 use crate::manager::backoff::Backoff;
-use crate::manager::connect_request::ConnectRequest;
+use crate::manager::driver::Manager;
 use crate::manager::engine::Engine;
+use crate::manager::state::ManagerCore;
 
 pub const CONNECT_RESPONSE: &str = "0{\"sid\":\"test\"}";
 
@@ -46,10 +48,10 @@ impl TestSession {
     }
 }
 
-/// A running manager with the client handle and the engine end of its open
-/// session.
+/// A running manager with the engine end of its open session. The client
+/// handle lives until [`drop_client`](Self::drop_client).
 pub struct TestManager {
-    pub connect_request_tx: mpsc::Sender<ConnectRequest>,
+    pub manager: Arc<Manager>,
     pub session: Option<TestSession>,
     /// Receives each session the manager opens after the first.
     pub session_rx: mpsc::Receiver<TestSession>,
@@ -79,17 +81,16 @@ impl TestManager {
     }
 
     pub async fn spawn_with_channels(backoff: Option<Backoff>, channels: ChannelConfig) -> Self {
-        let (connect_request_tx, connect_request_rx) = mpsc::channel(32);
+        let manager = Manager::new(ManagerCore::new(backoff, fastrand::Rng::new()));
         let (session_tx, mut session_rx) = mpsc::channel(1);
         let connect_engine = move || spawn_session(channels, session_tx.clone());
-        let task = tokio::spawn(crate::manager::actor::run(
-            connect_request_rx,
+        let task = tokio::spawn(crate::manager::driver::run(
+            Arc::clone(&manager),
             connect_engine,
-            backoff,
         ));
         let session = session_rx.recv().await;
         Self {
-            connect_request_tx,
+            manager,
             session,
             session_rx,
             task,
@@ -113,13 +114,24 @@ impl TestManager {
         auth: ByteString,
         server_packet_capacity: usize,
     ) -> (SocketSender, SocketReceiver) {
-        let (connect_request, handles) =
-            ConnectRequest::new(ns.into(), auth, 32, server_packet_capacity);
-        self.connect_request_tx.send(connect_request).await.unwrap();
+        let (tx, rx) = self.connect(ns, auth, server_packet_capacity).unwrap();
         assert!(self.recv_client_text().await.starts_with('0'));
-        let (tx, rx, reply_rx) = handles.into_socket();
-        reply_rx.await.unwrap().unwrap();
         (tx, rx)
+    }
+
+    /// Opens a namespace as `Client::connect` does, with room for 32 events.
+    pub fn connect(
+        &self,
+        ns: &str,
+        auth: ByteString,
+        server_packet_capacity: usize,
+    ) -> Result<(SocketSender, SocketReceiver), SocketError> {
+        crate::client::connect(&self.manager, ns.into(), auth, 32, server_packet_capacity)
+    }
+
+    /// Drops the client handle, as `Client::join` does.
+    pub fn drop_client(&self) {
+        self.manager.with_core(ManagerCore::drop_client);
     }
 
     pub async fn send_server_message(&mut self, text: &'static str) {
@@ -143,13 +155,13 @@ impl TestManager {
     /// A manager that stops instead of reconnecting ends with the session; one
     /// that reconnects ends once its namespaces are gone.
     pub async fn join(self) -> Result<(), ManagerError> {
+        self.drop_client();
         let Self {
-            connect_request_tx,
             session,
             session_rx: _session_rx,
             task,
+            ..
         } = self;
-        drop(connect_request_tx);
         if let Some(session) = session {
             session.close().await;
         }

@@ -141,6 +141,7 @@ impl Engine {
 
     /// Whether one message can be handed to this engine now, like an
     /// immediately writable `engine.write`.
+    #[cfg(test)]
     pub fn has_permit(&self) -> bool {
         matches!(
             self.admission,

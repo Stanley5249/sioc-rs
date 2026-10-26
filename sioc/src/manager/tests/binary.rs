@@ -5,8 +5,6 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use super::rig::{Effect, Rig, event, event_ack};
-use crate::manager::namespace::Read;
-use crate::manager::state::ManagerInput;
 use crate::packet::{ClientPacket, ServerPacket};
 
 const PLACEHOLDER: &str = "{\"_placeholder\":true,\"num\":0}";
@@ -27,19 +25,20 @@ fn binary_packets_leave_with_their_attachments_before_other_messages() {
             attachments: Some(attachments),
         },
     );
+    rig.send("/b", event("[\"x\"]"));
+    rig.send("/", event("[\"y\"]"));
 
-    // No namespace reads before the attachments left.
-    assert_eq!(rig.core.read("/", true), Read::Wait);
-    assert_eq!(rig.core.read("/b", true), Read::Wait);
+    // Packets queued behind it wait until its attachments left.
     assert_eq!(
         rig.messages(),
-        [format!("52-{payload}").as_str(), "bin:a", "bin:b"]
+        [
+            format!("52-{payload}").as_str(),
+            "bin:a",
+            "bin:b",
+            "2/b,[\"x\"]",
+            "2[\"y\"]"
+        ]
     );
-
-    rig.send("/b", event("[\"x\"]"));
-    assert_eq!(rig.messages(), ["2/b,[\"x\"]"]);
-    rig.send("/", event("[\"y\"]"));
-    assert_eq!(rig.messages(), ["2[\"y\"]"]);
 }
 
 #[test]
@@ -90,13 +89,17 @@ fn incoming_binary_packets_are_rebuilt() {
 #[test]
 fn server_protocol_errors_close_the_engine_without_an_internal_error() {
     let cases: [&dyn Fn(&mut Rig); 4] = [
-        &|rig| rig.server("51-[\"e\",{\"_placeholder\":true,\"num\":3}]"),
+        &|rig| {
+            rig.server("51-[\"e\",{\"_placeholder\":true,\"num\":3}]");
+        },
         &|rig| rig.server_binary(b"z"),
         &|rig| {
             rig.server(&format!("51-[\"e\",{PLACEHOLDER}]"));
             rig.server("2[\"e\"]");
         },
-        &|rig| rig.server("garbage"),
+        &|rig| {
+            rig.server("garbage");
+        },
     ];
 
     for case in cases {
@@ -107,8 +110,7 @@ fn server_protocol_errors_close_the_engine_without_an_internal_error() {
         assert!(!rig.core.has_message());
 
         // The engine then finishes without an error, and the client reconnects.
-        let effects = rig.step(ManagerInput::Closed(Ok(())));
-        assert_eq!(effects, [Effect::Schedule(Duration::ZERO)]);
+        assert_eq!(rig.close(), [Effect::Schedule(Duration::ZERO)]);
     }
 }
 
@@ -117,8 +119,8 @@ fn reconstruction_restarts_with_the_next_engine() {
     let mut rig = Rig::reconnecting();
     rig.connected("/");
     rig.server(&format!("51-[\"e\",{PLACEHOLDER}]"));
-    rig.step(ManagerInput::Closed(Ok(())));
-    rig.step(ManagerInput::Reconnect);
+    rig.close();
+    rig.reconnect();
     rig.handshake();
     rig.effects();
 
