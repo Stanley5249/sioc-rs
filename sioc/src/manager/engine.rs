@@ -271,8 +271,6 @@ impl Engine {
                 }
                 EngineStep::Progress
             },
-
-            else => unreachable!("a finished task with an ended server direction returns above"),
         }
     }
 }
@@ -414,5 +412,49 @@ mod tests {
         assert!(engine.next(false, false).now_or_never().is_none());
         assert!(!engine.has_permit());
         drop(server_message_tx);
+    }
+
+    /// A task that failed and finished still has its last message delivered,
+    /// and its own error stays the result.
+    #[tokio::test]
+    async fn a_failed_task_still_delivers_its_last_message() {
+        let mut engine = engine_with(|server_message_tx, client_message_rx| {
+            tokio::spawn(async move {
+                server_message_tx
+                    .send(ServerMessage::Text("last".into()))
+                    .await
+                    .unwrap();
+                drop((server_message_tx, client_message_rx));
+                Err(eioc::error::EngineError::HeartbeatTimeout.into())
+            })
+        });
+
+        let mut messages = Vec::new();
+        loop {
+            match engine.next(false, false).await {
+                EngineStep::Message { message, draining } => {
+                    assert!(draining, "an ended session needs no receiver capacity");
+                    messages.push(message);
+                }
+                EngineStep::Progress => {}
+                EngineStep::Closed => break,
+            }
+        }
+        assert_eq!(messages, [ServerMessage::Text("last".into())]);
+        assert!(matches!(
+            engine.into_result(),
+            Err(ManagerError::Engine(eioc::error::Error::Engine(
+                eioc::error::EngineError::HeartbeatTimeout
+            )))
+        ));
+    }
+
+    /// A panic in the engine task reaches the manager instead of becoming an
+    /// error result.
+    #[tokio::test]
+    #[should_panic(expected = "engine bug")]
+    async fn a_panicking_engine_task_resumes_its_panic() {
+        let engine = engine_with(|_, _| tokio::spawn(async { panic!("engine bug") }));
+        let _ = result_of(engine).await;
     }
 }
