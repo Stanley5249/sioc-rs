@@ -11,7 +11,7 @@ use super::harness::*;
 use crate::config::ChannelConfig;
 use crate::error::SocketError;
 use crate::manager::connect_request::ConnectRequest;
-use crate::manager::tests::rig::event;
+use crate::manager::tests::rig::{event, event_ack};
 use crate::packet::ServerPacket;
 
 #[tokio::test(start_paused = true)]
@@ -183,6 +183,47 @@ async fn an_engine_end_behind_unread_messages_needs_no_application_read() {
     assert!(matches!(rx.recv().await, Some(ServerPacket::Connect(_))));
     assert!(matches!(rx.recv().await, Some(ServerPacket::Event(_))));
     assert_eq!(rx.try_recv().unwrap_err(), mpsc::error::TryRecvError::Empty);
+}
+
+/// Behind a held packet, an ended engine's last messages are drained without
+/// the application: an ACK still answers its waiter and the DISCONNECT still
+/// ends the namespace on its own channel. The events that need receiver
+/// capacity, the held one included, end with the namespace.
+#[tokio::test(start_paused = true)]
+async fn an_ended_engine_drains_acks_and_termination_behind_a_held_packet() {
+    let mut manager = TestManager::spawn().await;
+    let (tx, mut rx) = manager.open_with("/", ByteString::new(), 1).await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    let (packet, ack_rx) = event_ack(r#"["ask"]"#);
+    tx.send(packet).await.unwrap();
+    assert_eq!(&*manager.recv_client_text().await, r#"20["ask"]"#);
+    // The Connect packet fills the receiver, so the manager holds this one.
+    manager.send_server_message(r#"2["held"]"#).await;
+    for message in [r#"2["overflow"]"#, r#"30["answer"]"#, "1"] {
+        manager.send_server_message(message).await;
+    }
+    // The paused clock moves only once every task waits, so the manager has
+    // stopped reading before the session ends.
+    tokio::time::sleep(Duration::from_millis(1)).await;
+
+    let old = manager.session.take().expect("a session is open");
+    drop(old.server_message_tx);
+    let mut client_message_rx = old.client_message_rx;
+    tokio::time::timeout(Duration::from_secs(1), client_message_rx.recv())
+        .await
+        .expect("the manager hangs up the ended engine");
+    let ack = tokio::time::timeout(Duration::from_secs(1), ack_rx)
+        .await
+        .expect("the drained ACK answers its waiter")
+        .unwrap();
+    assert_eq!(&*ack.payload, r#"["answer"]"#);
+    old.result_tx.send(Ok(())).unwrap();
+
+    assert!(matches!(rx.recv().await, Some(ServerPacket::Connect(_))));
+    assert!(matches!(rx.recv().await, Some(ServerPacket::Disconnect)));
+    assert!(rx.recv().await.is_none());
+    drop(tx);
+    manager.join().await.unwrap();
 }
 
 /// Every queue holds one item. A receiver the application stops reading holds

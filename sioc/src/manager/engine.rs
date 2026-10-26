@@ -279,6 +279,7 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
+    use futures_util::FutureExt;
     use tokio_util::task::AbortOnDropHandle;
 
     use super::*;
@@ -388,5 +389,30 @@ mod tests {
             result_of(engine).await,
             Err(ManagerError::EngineEnded)
         ));
+    }
+
+    /// After the session's end was observed, its closed watch channel is no
+    /// longer a branch, so a session whose server direction is still open
+    /// waits instead of reporting progress again and again.
+    #[tokio::test]
+    async fn an_observed_session_end_is_not_reported_again() {
+        let (server_message_tx, server_message_rx) = mpsc::channel(1);
+        let (client_message_tx, _client_message_rx) = mpsc::channel(1);
+        let (closed_tx, closed_rx) = watch::channel(());
+        let mut engine = Engine::new(eioc::engine::Engine {
+            client_message_tx,
+            server_message_rx,
+            closed_rx,
+            task: AbortOnDropHandle::new(tokio::spawn(std::future::pending())),
+        });
+        {
+            let mut waiting = std::pin::pin!(engine.next(false, false));
+            assert!(waiting.as_mut().now_or_never().is_none());
+            drop(closed_tx);
+            assert!(matches!(waiting.now_or_never(), Some(EngineStep::Progress)));
+        }
+        assert!(engine.next(false, false).now_or_never().is_none());
+        assert!(!engine.has_permit());
+        drop(server_message_tx);
     }
 }

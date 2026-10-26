@@ -394,10 +394,18 @@ async fn dropping_the_engine_aborts_its_task() {
         client_frame_capacity: 4,
     });
 
-    drop(engine);
+    let crate::engine::Engine {
+        client_message_tx: _client_message_tx,
+        server_message_rx: _server_message_rx,
+        mut closed_rx,
+        task,
+    } = engine;
+    drop(task);
 
-    // The connector's future drops with the aborted task.
+    // The connector's future drops with the aborted task, and so does the
+    // session's closed channel, although the manager never hung up.
     assert!(alive_rx.await.is_err());
+    closed_rx.changed().await.unwrap_err();
 }
 
 #[tokio::test]
