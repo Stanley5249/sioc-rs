@@ -44,8 +44,12 @@ These are defaults. Depart from one when the design is simpler, and say why in t
 ## Tests
 
 - **Unit tests:** Put them at the bottom of the source file.
-- **Component tests:** Put them in the submodule's `tests.rs`, or in a `tests/` directory split by scenario group.
+- **Component tests:** Put them in the submodule's `tests.rs`, or in a `tests/` directory with one file for each behavior they protect, such as `ack` or `namespace`, so a reader can find a test without knowing the private types.
 - **End-to-end and derive macro tests:** Put them in `sioc/tests/`.
+
+Split a test file when it holds groups that a reader cannot predict from its name, not when it reaches a size. Keep a helper in the file that uses it, and move it to the component's shared builders or harness once a second file needs it, so each builder has one copy. A harness drives the real core or actor and fakes only what lies outside it, such as an engine or a transport, and never copies its routing, scheduling, or state.
+
+Move tests unchanged before rewriting them, so a review can tell a move from a change. Delete or merge a test only after naming the test that still catches its bug, with the same order and absence checks.
 
 Each test protects a contract and catches a bug you can name. Assert the whole outcome the test controls, including order and the absence of extra outputs, so a regression cannot pass by adding or reordering packets.
 
