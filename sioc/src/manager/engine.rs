@@ -3,13 +3,14 @@
 //! One owner closes admission, drains the server direction and observes the
 //! task's result. Namespace backpressure applies while running; cleanup
 //! forwards remaining messages without waiting for application capacity.
-
-use std::future::{Future, poll_fn};
-use std::pin::Pin;
-use std::task::{Context, Poll};
+//!
+//! The session's end arrives on the engine's `closed_rx`, which ends ahead of
+//! the messages still queued, so a full application receiver never hides it.
+//! From then on every remaining message is read as a drain, and the end of the
+//! server direction, not `closed_rx`, finishes the session.
 
 use eioc::prelude::{ClientMessage, ServerMessage};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_util::task::AbortOnDropHandle;
 
 use crate::error::ManagerError;
@@ -53,6 +54,20 @@ enum Admission {
     Closed(Drain),
 }
 
+impl Admission {
+    /// Ends admission. A discard, once asked for, stays. Returns whether
+    /// admission stopped in this transition.
+    fn close(&mut self, drain: Drain) -> bool {
+        let changed = matches!(self, Self::Open { .. });
+        *self = match (&*self, drain) {
+            (Self::Open { .. } | Self::Closed(_), Drain::Discard) => Self::Closed(Drain::Discard),
+            (Self::Open { .. }, Drain::Deliver) => Self::Closed(Drain::Deliver),
+            (Self::Closed(kept), Drain::Deliver) => Self::Closed(*kept),
+        };
+        changed
+    }
+}
+
 /// An observation from the engine, like the listeners `Manager.open` installs.
 pub enum EngineStep {
     /// One engine message, with cleanup delivery distinguished explicitly.
@@ -60,7 +75,7 @@ pub enum EngineStep {
         message: ServerMessage,
         draining: bool,
     },
-    /// A permit, early server message or close transition became ready.
+    /// A permit, the task's result, or the session's end became ready.
     /// Rust wait: every ownership change wakes the caller before waiting again.
     Progress,
     /// The task and its server direction have both finished. Take the result
@@ -75,9 +90,8 @@ pub struct Engine {
     admission: Admission,
     /// The engine's data events until EOF.
     server_message_rx: mpsc::Receiver<ServerMessage>,
-    /// One message read while application delivery is full, so the engine's
-    /// hang-up behind it stays visible. Rust bound.
-    next_server_message: Option<ServerMessage>,
+    /// Ends when the session closes, like the `"close"` event.
+    closed_rx: watch::Receiver<()>,
 }
 
 impl Engine {
@@ -87,6 +101,7 @@ impl Engine {
         let eioc::engine::Engine {
             client_message_tx,
             server_message_rx,
+            closed_rx,
             task,
         } = engine;
         Self {
@@ -96,22 +111,19 @@ impl Engine {
                 permit: None,
             },
             server_message_rx,
-            next_server_message: None,
+            closed_rx,
         }
     }
 
     /// Stops outgoing acceptance, like `engine.close`. A discard, once asked
     /// for, stays. Returns whether admission stopped in this transition.
     pub fn close(&mut self, drain: Drain) -> bool {
-        let changed = matches!(self.admission, Admission::Open { .. });
-        self.admission = match (&self.admission, drain) {
-            (Admission::Open { .. } | Admission::Closed(_), Drain::Discard) => {
-                Admission::Closed(Drain::Discard)
-            }
-            (Admission::Open { .. }, Drain::Deliver) => Admission::Closed(Drain::Deliver),
-            (Admission::Closed(kept), Drain::Deliver) => Admission::Closed(*kept),
-        };
-        changed
+        self.admission.close(drain)
+    }
+
+    /// Whether the session is over, so nothing more is handed to it.
+    fn has_ended(&self) -> bool {
+        self.closed_rx.has_changed().is_err()
     }
 
     /// Whether one message can be handed to this engine now, like an
@@ -123,13 +135,13 @@ impl Engine {
                 permit: Some(_),
                 ..
             }
-        ) && !self.server_message_rx.is_closed()
+        ) && !self.has_ended()
     }
 
     /// Takes the already reserved output slot, like `engine.write` accepting
     /// one message. The caller transfers ownership directly on that permit.
     pub fn take_permit(&mut self) -> Option<mpsc::OwnedPermit<ClientMessage>> {
-        if self.server_message_rx.is_closed() {
+        if self.has_ended() {
             return None;
         }
         match &mut self.admission {
@@ -162,118 +174,106 @@ impl Engine {
         }
     }
 
-    /// Advances the session. An acquired permit stays owned by the engine.
-    /// A pending reservation can restart when another input wins because this
-    /// engine is the output channel's only writer and reservation waiter.
+    /// Advances the session by one observation.
+    ///
+    /// Every branch is cancel safe: the task handle and the receivers are
+    /// polled by reference, and a pending reservation restarts on the next
+    /// call, because this engine is the output channel's only writer and
+    /// reservation waiter. An acquired permit stays owned by the engine.
     pub async fn next(
         &mut self,
         can_receive_server_message: bool,
         can_reserve_client_message: bool,
     ) -> EngineStep {
-        let reservation = match &self.admission {
+        let ended = self.has_ended();
+        let Self {
+            task,
+            admission,
+            server_message_rx,
+            closed_rx,
+        } = self;
+        // The engine dropped its sender, so it holds nothing for us and our
+        // hang-up loses nothing. The messages left are still read.
+        if server_message_rx.is_closed() {
+            admission.close(Drain::Deliver);
+        }
+        // An ended channel keeps returning `None`, so it is read only while it
+        // still has messages.
+        let server_direction_ended = server_message_rx.is_closed() && server_message_rx.is_empty();
+        if server_direction_ended && matches!(task, Task::Finished(_)) {
+            return EngineStep::Closed;
+        }
+        let draining = ended || matches!(admission, Admission::Closed(_));
+        let discards = matches!(admission, Admission::Closed(Drain::Discard));
+        let receives = (can_receive_server_message || draining) && !server_direction_ended;
+        let reserving_tx = match admission {
             Admission::Open {
                 client_message_tx,
                 permit: None,
-            } if can_reserve_client_message => Some(client_message_tx.clone().reserve_owned()),
+            } if can_reserve_client_message && !ended => Some(client_message_tx.clone()),
             _ => None,
         };
-        tokio::pin!(reservation);
-        poll_fn(|cx| {
-            self.poll_next(
-                can_receive_server_message,
-                reservation.as_mut().as_pin_mut(),
-                cx,
-            )
-        })
-        .await
-    }
-
-    fn poll_next(
-        &mut self,
-        can_receive_server_message: bool,
-        reservation: Option<
-            Pin<
-                &mut impl Future<
-                    Output = Result<mpsc::OwnedPermit<ClientMessage>, mpsc::error::SendError<()>>,
-                >,
-            >,
-        >,
-        cx: &mut Context<'_>,
-    ) -> Poll<EngineStep> {
-        // Poll first so a task that closes its server direction and then
-        // awaits our hang-up is observed in this same turn.
-        if let Task::Running(handle) = &mut self.task
-            && let Poll::Ready(joined) = Pin::new(handle).poll(cx)
-        {
-            // The task's own failure always wins. An engine finishes only after
-            // the manager closed admission, so success before that, or a
-            // cancellation by a shutting-down runtime, is a library error.
-            self.task = Task::Finished(match (joined, &self.admission) {
-                (Err(error), _) if error.is_panic() => {
-                    std::panic::resume_unwind(error.into_panic())
-                }
-                (Err(_), _) | (Ok(Ok(())), Admission::Open { .. }) => {
-                    Err(ManagerError::EngineEnded)
-                }
-                (Ok(Err(error)), _) => Err(error.into()),
-                (Ok(Ok(())), Admission::Closed(_)) => Ok(()),
-            });
-            if self.close(Drain::Deliver) {
-                return Poll::Ready(EngineStep::Progress);
-            }
-        }
-        if self.server_message_rx.is_closed() && self.close(Drain::Deliver) {
-            return Poll::Ready(EngineStep::Progress);
-        }
-
-        let draining = !matches!(self.admission, Admission::Open { .. });
-        let discards = matches!(self.admission, Admission::Closed(Drain::Discard));
-        if (can_receive_server_message || draining)
-            && let Some(message) = self.next_server_message.take()
-            && !discards
-        {
-            return Poll::Ready(EngineStep::Message { message, draining });
-        }
-
-        if self.next_server_message.is_none() || draining {
-            match self.server_message_rx.poll_recv(cx) {
-                Poll::Ready(Some(message)) => {
-                    if discards {
-                        return Poll::Ready(EngineStep::Progress);
-                    }
-                    if can_receive_server_message || draining {
-                        return Poll::Ready(EngineStep::Message { message, draining });
-                    }
-                    self.next_server_message = Some(message);
-                    return Poll::Ready(EngineStep::Progress);
-                }
-                Poll::Ready(None) => {
-                    self.close(Drain::Deliver);
-                    if matches!(self.task, Task::Finished(_)) {
-                        return Poll::Ready(EngineStep::Closed);
-                    }
-                }
-                Poll::Pending => {}
-            }
-        }
-
-        let Admission::Open { permit, .. } = &mut self.admission else {
-            return Poll::Pending;
+        let wants_permit = reserving_tx.is_some();
+        let handle = match task {
+            Task::Running(handle) => Some(handle),
+            Task::Finished(_) => None,
         };
-        let Some(reservation) = reservation else {
-            return Poll::Pending;
-        };
-        let Poll::Ready(result) = reservation.poll(cx) else {
-            return Poll::Pending;
-        };
-        if let Ok(reserved) = result {
-            *permit = Some(reserved);
-        } else {
-            // The engine drops its receiver early only when it returns an
-            // error, and its result says why.
-            self.close(Drain::Deliver);
+        let runs = handle.is_some();
+
+        tokio::select! {
+            // The task first, so a task that ended its server direction and
+            // awaits our hang-up is observed in the same turn.
+            biased;
+
+            joined = async { handle.expect("the guard checked the task").await }, if runs => {
+                // The task's own failure always wins. An engine finishes only
+                // after the manager closed admission, so success before that,
+                // or a cancellation by a shutting-down runtime, is a library
+                // error.
+                *task = Task::Finished(match (joined, &*admission) {
+                    (Err(error), _) if error.is_panic() => {
+                        std::panic::resume_unwind(error.into_panic())
+                    }
+                    (Err(_), _) | (Ok(Ok(())), Admission::Open { .. }) => {
+                        Err(ManagerError::EngineEnded)
+                    }
+                    (Ok(Err(error)), _) => Err(error.into()),
+                    (Ok(Ok(())), Admission::Closed(_)) => Ok(()),
+                });
+                admission.close(Drain::Deliver);
+                EngineStep::Progress
+            },
+
+            // Only the wake matters: from now on `ended` turns every read into
+            // a drain that needs no application capacity.
+            _ = closed_rx.changed(), if !ended => EngineStep::Progress,
+
+            message = server_message_rx.recv(), if receives => match message {
+                Some(_) if discards => EngineStep::Progress,
+                Some(message) => EngineStep::Message { message, draining },
+                None => {
+                    admission.close(Drain::Deliver);
+                    EngineStep::Progress
+                }
+            },
+
+            reserved = async {
+                reserving_tx.expect("the guard checked the sender").reserve_owned().await
+            }, if wants_permit => {
+                if let Admission::Open { permit, .. } = admission
+                    && let Ok(reserved) = reserved
+                {
+                    *permit = Some(reserved);
+                } else {
+                    // The engine drops its receiver early only when it
+                    // returns an error, and its result says why.
+                    admission.close(Drain::Deliver);
+                }
+                EngineStep::Progress
+            },
+
+            else => unreachable!("a finished task with an ended server direction returns above"),
         }
-        Poll::Ready(EngineStep::Progress)
     }
 }
 
@@ -293,9 +293,12 @@ mod tests {
     ) -> Engine {
         let (server_message_tx, server_message_rx) = mpsc::channel(1);
         let (client_message_tx, client_message_rx) = mpsc::channel(1);
+        // The session is over from the start, like the server direction.
+        let (_, closed_rx) = watch::channel(());
         Engine::new(eioc::engine::Engine {
             client_message_tx,
             server_message_rx,
+            closed_rx,
             task: AbortOnDropHandle::new(task(server_message_tx, client_message_rx)),
         })
     }

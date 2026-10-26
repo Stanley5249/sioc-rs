@@ -153,6 +153,38 @@ async fn held_packet_keeps_later_events_for_the_next_engine() {
     assert_eq!(&*manager.recv_client_text().await, r#"2["late"]"#);
 }
 
+/// A held packet stops reading the engine, so the session's end arrives behind
+/// a message the manager has not read. The engine must still be released, and
+/// the next one opened, without the application reading its receiver.
+#[tokio::test(start_paused = true)]
+async fn an_engine_end_behind_unread_messages_needs_no_application_read() {
+    let mut manager = TestManager::spawn_reconnecting().await;
+    let (_tx, mut rx) = manager.open_with("/", ByteString::new(), 1).await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    // The Connect packet fills the receiver, so the manager holds this one.
+    manager.send_server_message(r#"2["held"]"#).await;
+    manager.send_server_message(r#"2["behind"]"#).await;
+    // The paused clock moves only once every task waits, so the manager has
+    // taken what it reads before the session ends behind it.
+    tokio::time::sleep(Duration::from_millis(1)).await;
+
+    let old = manager.session.take().expect("a session is open");
+    drop(old.server_message_tx);
+    let mut client_message_rx = old.client_message_rx;
+    tokio::time::timeout(Duration::from_secs(1), client_message_rx.recv())
+        .await
+        .expect("the manager hangs up the ended engine");
+    old.result_tx.send(Ok(())).unwrap();
+    manager.session = tokio::time::timeout(Duration::from_secs(1), manager.session_rx.recv())
+        .await
+        .expect("the next engine opens");
+
+    // The held packet keeps its receiver, and the overflow behind it is gone.
+    assert!(matches!(rx.recv().await, Some(ServerPacket::Connect(_))));
+    assert!(matches!(rx.recv().await, Some(ServerPacket::Event(_))));
+    assert_eq!(rx.try_recv().unwrap_err(), mpsc::error::TryRecvError::Empty);
+}
+
 /// Every queue holds one item. A receiver the application stops reading holds
 /// up what the server sends to the whole connection, as the README documents,
 /// but the other namespace still emits, and both flow again once it reads.

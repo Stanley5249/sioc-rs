@@ -4,7 +4,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
@@ -59,6 +59,11 @@ pub struct EngineOptions<C> {
 /// sends never fail. Drop `client_message_tx` before awaiting `task`, which
 /// waits for that hang-up.
 ///
+/// `closed_rx` ends once the session is over, before the messages still
+/// queued on `server_message_rx`. A reader that cannot take those messages,
+/// because its own receiver is full, learns from it that the session is
+/// gone, so it can drain them and hang up instead of waiting for capacity.
+///
 /// Dropping `client_message_tx` before the handshake drops the opening. Send
 /// nothing before [`ServerMessage::Open`]: the transport reads its channel
 /// only after the handshake, so once that channel is full the task cannot
@@ -70,6 +75,10 @@ pub struct Engine {
     pub client_message_tx: mpsc::Sender<ClientMessage>,
     /// What the server sends, like the `"open"` and `"message"` events.
     pub server_message_rx: mpsc::Receiver<ServerMessage>,
+    /// Ends when the session closes, like the `"close"` event, and never
+    /// carries a value. Rust wait: a channel's end stays hidden behind its
+    /// unread items, while JS emits `"close"` at once.
+    pub closed_rx: watch::Receiver<()>,
     /// The session's result, like the `"error"` and `"close"` events. Rust
     /// cleanup: dropping it aborts the task, so an owner that is itself
     /// dropped leaves no task behind.
@@ -98,6 +107,7 @@ where
     let (client_message_tx, client_message_rx) = mpsc::channel(client_message_capacity);
     let (server_frame_tx, server_frame_rx) = mpsc::channel(server_frame_capacity);
     let (client_frame_tx, client_frame_rx) = mpsc::channel(client_frame_capacity);
+    let (closed_tx, closed_rx) = watch::channel(());
 
     let transport = crate::transport::open(
         transport,
@@ -115,12 +125,14 @@ where
         client_frame_tx,
         server_message_tx,
         client_message_rx,
+        closed_tx,
     );
     let task = tokio::spawn(future.instrument(tracing::info_span!("engine")));
 
     Engine {
         client_message_tx,
         server_message_rx,
+        closed_rx,
         task: AbortOnDropHandle::new(task),
     }
 }
@@ -133,10 +145,11 @@ where
 /// next message are answered while the manager is full. That frame's message
 /// waits in `pending`, and no frame is read until it is delivered.
 ///
-/// The end of each channel drives cleanup. When the manager hangs up, the
-/// session closes, the unread server messages are discarded, and the
-/// transport sends Close once its channel ends, or is dropped if the
-/// handshake is still pending. When the transport ends the
+/// The end of each channel drives cleanup, and `closed_tx` ends with the
+/// session, ahead of the messages still queued for the manager. When the
+/// manager hangs up, the session closes, the unread server messages are
+/// discarded, and the transport sends Close once its channel ends, or is
+/// dropped if the handshake is still pending. When the transport ends the
 /// server direction, the session closes and the messages already received
 /// are still delivered. A deadline failure drops the transport, because the
 /// server no longer answers, and still delivers the message already received.
@@ -167,6 +180,7 @@ pub async fn run<T>(
     client_frame_tx: mpsc::Sender<ClientFrame>,
     server_message_tx: mpsc::Sender<ServerMessage>,
     client_message_rx: mpsc::Receiver<ClientMessage>,
+    closed_tx: watch::Sender<()>,
 ) -> Result<(), Error>
 where
     T: Future<Output = Result<(), TransportError>>,
@@ -176,6 +190,7 @@ where
     let mut client_frame_tx = Some(client_frame_tx);
     let mut server_message_tx = Some(server_message_tx);
     let mut client_message_rx = Some(client_message_rx);
+    let mut closed_tx = Some(closed_tx);
     // The message of the last server frame, waiting for a manager permit.
     let mut pending: Option<ServerMessage> = None;
     // The first failure, kept while cleanup runs.
@@ -195,9 +210,12 @@ where
         if pending.is_none() && (client_message_rx.is_none() || server_frame_rx.is_none()) {
             server_message_tx = None;
         }
-        // Ending the transport channel makes the transport send Close.
+        // Ending the transport channel makes the transport send Close, and
+        // ending `closed_tx` tells a manager blocked on application capacity
+        // to drain the messages left behind.
         if core.is_closed() {
             client_frame_tx = None;
+            drop(closed_tx.take());
         }
 
         let deadline = core.deadline();

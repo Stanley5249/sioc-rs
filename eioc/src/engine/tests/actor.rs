@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use url::Url;
@@ -37,6 +37,7 @@ struct Harness {
     client_frame_rx: mpsc::Receiver<ClientFrame>,
     server_message_rx: mpsc::Receiver<ServerMessage>,
     client_message_tx: mpsc::Sender<ClientMessage>,
+    closed_rx: watch::Receiver<()>,
     /// Closed once the engine drops the transport future.
     transport_tx: oneshot::Sender<Result<(), TransportError>>,
     task: JoinHandle<Result<(), Error>>,
@@ -52,6 +53,7 @@ impl Harness {
         let (client_frame_tx, client_frame_rx) = mpsc::channel(client_frame_capacity);
         let (server_message_tx, server_message_rx) = mpsc::channel(server_message_capacity);
         let (client_message_tx, client_message_rx) = mpsc::channel(4);
+        let (closed_tx, closed_rx) = watch::channel(());
         let (transport_tx, transport_rx) = oneshot::channel();
         let transport = async move { transport_rx.await.unwrap_or(Ok(())) };
         let core = EngineCore::new(handshake_timeout, Instant::now());
@@ -62,6 +64,7 @@ impl Harness {
             client_frame_tx,
             server_message_tx,
             client_message_rx,
+            closed_tx,
         ));
 
         Self {
@@ -69,6 +72,7 @@ impl Harness {
             client_frame_rx,
             server_message_rx,
             client_message_tx,
+            closed_rx,
             transport_tx,
             task,
         }
@@ -248,8 +252,10 @@ async fn the_deadline_fires_while_the_manager_is_full() {
     harness.send_frame(text("pending")).await;
 
     // Nothing reads the manager channel until the failure dropped the
-    // transport. The message already received still arrives.
+    // transport. The session's end is visible ahead of the messages, which
+    // still arrive.
     harness.transport_tx.closed().await;
+    harness.closed_rx.changed().await.unwrap_err();
     for payload in ["fills", "pending"] {
         assert_eq!(
             harness.server_message_rx.recv().await,
