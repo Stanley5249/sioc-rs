@@ -6,7 +6,7 @@ use bytestring::ByteString;
 use tokio::time::Instant;
 
 use crate::error::EngineError;
-use crate::packet::{ClientMessage, ServerMessage};
+use crate::packet::{ClientMessage, Handshake, ServerMessage};
 use crate::transport::{ClientFrame, ServerFrame};
 
 /// What the session can do, like `Socket.readyState`.
@@ -66,7 +66,7 @@ impl EngineCore {
             (SessionState::Opening { .. }, ServerFrame::Open(handshake)) => {
                 tracing::debug!(sid = %handshake.sid, "received handshake");
 
-                let ping_window = handshake.ping_window();
+                let ping_window = ping_window(&handshake);
                 self.state = SessionState::Open {
                     ping_window,
                     deadline: now + ping_window,
@@ -189,4 +189,10 @@ impl EngineCore {
     pub fn is_closed(&self) -> bool {
         matches!(self.state, SessionState::Closed)
     }
+}
+
+/// How long the server may stay silent, `pingInterval + pingTimeout`, like the
+/// timer of `_resetPingTimeout`.
+fn ping_window(handshake: &Handshake) -> Duration {
+    Duration::from_millis(handshake.ping_interval + handshake.ping_timeout)
 }

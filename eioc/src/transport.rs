@@ -13,8 +13,11 @@ use crate::connector::WebSocketConnector;
 use crate::error::TransportError;
 use crate::packet::{Frame, Handshake, Packet};
 
-/// Selects which transport to use when opening an Engine.IO connection.
+/// Selects which transport to use when opening an Engine.IO connection, like
+/// the `transports` option. Non-exhaustive, because engine.io-client also has
+/// a WebTransport transport.
 #[derive(Clone, Copy, Debug, Default)]
+#[non_exhaustive]
 pub enum TransportStrategy {
     /// Start with HTTP long-polling, then upgrade to WebSocket when the server
     /// offers it.

@@ -37,7 +37,7 @@ pub async fn run(
     if direct {
         let frame = crate::websocket::stream::recv_frame(&mut stream).await?;
         let Frame::Packet(Packet::Open(handshake)) = frame else {
-            return Err(TransportError::Open(frame));
+            return Err(TransportError::Open(frame.kind()));
         };
 
         server_frame_tx.send(ServerFrame::Open(handshake)).await?;

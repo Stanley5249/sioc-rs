@@ -92,6 +92,12 @@ Each section covers one area or component. A rejected approach records why it fa
 
 - A zero channel capacity is a builder error. It used to panic inside Tokio.
 
+## Public API
+
+- The Engine.IO wire codec is internal, and the engine's message and handshake types are public under `eioc::engine`. A public `packet` module exposed encoding helpers that no caller outside the crate used.
+- A transport error names the type of the packet that arrived instead of carrying the frame, which kept an internal type in a public error. The payload was never in the error message.
+- `eioc::engine::Engine` keeps public endpoint fields and is non-exhaustive. A constructor or an opaque handle would only move the breaking change when an endpoint is added, and the manager needs each endpoint on its own to drop the sender for half-close. sioc builds its fake engines from its own wrapper instead of `eioc::engine::Engine`.
+
 ## Tests
 
 - Core tests drive the core by inputs and outputs. Tests that ran through a rig modeling the actor's channel reads repeated the actor's logic and broke whenever the core's boundary moved.

@@ -4,9 +4,19 @@ use std::time::Duration;
 
 /// Channel buffer capacities for each internal MPSC queue.
 ///
-/// Construct via [`From<()>`] for defaults, [`From<usize>`] for uniform sizing,
-/// or build manually for per-channel control.
+/// Construct via [`From<()>`] or [`Default`] for defaults, or [`From<usize>`]
+/// for uniform sizing, then set fields for per-channel control. The fields
+/// follow the client's internal channels, which may change, so the type is
+/// non-exhaustive.
+///
+/// ```
+/// use sioc::prelude::ChannelConfig;
+///
+/// let mut channels = ChannelConfig::from(64);
+/// channels.socket = 256;
+/// ```
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct ChannelConfig {
     /// Engine task inboxes: frames from the transport and messages from the
     /// manager.

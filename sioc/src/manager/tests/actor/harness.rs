@@ -13,6 +13,7 @@ use crate::config::ChannelConfig;
 use crate::error::ManagerError;
 use crate::manager::backoff::Backoff;
 use crate::manager::connect_request::ConnectRequest;
+use crate::manager::engine::Engine;
 
 pub const CONNECT_RESPONSE: &str = "0{\"sid\":\"test\"}";
 
@@ -158,10 +159,7 @@ impl TestManager {
 
 /// Starts a fake engine task with the channel capacities the client gives a
 /// real one.
-pub fn spawn_session(
-    channels: ChannelConfig,
-    session_tx: mpsc::Sender<TestSession>,
-) -> eioc::engine::Engine {
+pub fn spawn_session(channels: ChannelConfig, session_tx: mpsc::Sender<TestSession>) -> Engine {
     let (server_message_tx, server_message_rx) = mpsc::channel(channels.manager);
     let (client_message_tx, client_message_rx) = mpsc::channel(channels.engine);
     let (closed_tx, closed_rx) = watch::channel(());
@@ -171,12 +169,12 @@ pub fn spawn_session(
         closed_tx,
         session_tx,
     ));
-    eioc::engine::Engine {
+    Engine::new(
         client_message_tx,
         server_message_rx,
         closed_rx,
-        task: AbortOnDropHandle::new(task),
-    }
+        AbortOnDropHandle::new(task),
+    )
 }
 
 /// Models an engine's owned server direction separately from peer injection.

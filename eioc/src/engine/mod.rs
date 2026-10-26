@@ -31,7 +31,8 @@
 //!   direction at the server's Close packet, which `ServerFrame` cannot hold.
 //!   `ClientFrame` holds only what the engine sends, because the transport owns
 //!   Close, Upgrade, and the probe. The end of a channel is the only close
-//!   signal.
+//!   signal. `closed_rx` is such a channel: it carries no value and ends with
+//!   the session, ahead of the messages still queued for the manager.
 //! - No wait cycle: the manager and this task each serve their inputs from one
 //!   `select!` and never await in a handler, and the transport runs each
 //!   direction on its own loop. When the transport ends the server direction,
@@ -57,3 +58,6 @@ mod state;
 mod tests;
 
 pub use actor::{Engine, EngineOptions, open};
+
+pub use crate::packet::{ClientMessage, Handshake, ServerMessage};
+pub use crate::transport::TransportStrategy;

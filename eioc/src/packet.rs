@@ -1,7 +1,5 @@
 //! Engine.IO packet types.
 
-use std::time::Duration;
-
 use bytes::Bytes;
 use bytestring::ByteString;
 use serde::Deserialize;
@@ -56,6 +54,22 @@ pub enum Frame {
     Binary(Bytes),
 }
 
+impl Frame {
+    /// The frame's packet type, for diagnostics that leave out the payload.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Packet(Packet::Open(_)) => "open",
+            Self::Packet(Packet::Close) => "close",
+            Self::Packet(Packet::Ping(_)) => "ping",
+            Self::Packet(Packet::Pong(_)) => "pong",
+            Self::Packet(Packet::Message(_)) => "message",
+            Self::Packet(Packet::Upgrade) => "upgrade",
+            Self::Packet(Packet::Noop) => "noop",
+            Self::Binary(_) => "binary",
+        }
+    }
+}
+
 impl From<Packet> for Frame {
     fn from(packet: Packet) -> Self {
         Frame::Packet(packet)
@@ -102,18 +116,6 @@ pub struct Handshake {
     /// payloads.
     #[serde(rename = "maxPayload")]
     pub max_payload: u64,
-}
-
-impl Handshake {
-    /// Returns `true` if the server offered a WebSocket upgrade.
-    pub fn can_upgrade_to_websocket(&self) -> bool {
-        self.upgrades.iter().any(|u| u == "websocket")
-    }
-
-    /// Combined `pingInterval + pingTimeout` as a [`Duration`].
-    pub fn ping_window(&self) -> Duration {
-        Duration::from_millis(self.ping_interval + self.ping_timeout)
-    }
 }
 
 /// A packet in the Engine.IO v4 protocol.
@@ -281,12 +283,6 @@ mod tests {
     }
 
     #[test]
-    fn handshake_ping_window() {
-        let hs = test_handshake();
-        assert_eq!(hs.ping_window(), std::time::Duration::from_secs(30));
-    }
-
-    #[test]
     fn decode_invalid_packet_id() {
         assert!(matches!(
             Packet::decode(&bss("9")),
@@ -370,24 +366,6 @@ mod tests {
     #[test]
     fn decode_noop() {
         assert_eq!(Packet::decode(&bss("6")).unwrap(), Packet::Noop);
-    }
-
-    #[test]
-    fn handshake_can_upgrade_to_websocket_true() {
-        let hs = test_handshake();
-        assert!(hs.can_upgrade_to_websocket());
-    }
-
-    #[test]
-    fn handshake_can_upgrade_to_websocket_false() {
-        let hs = Handshake {
-            sid: "x".into(),
-            upgrades: vec![],
-            ping_interval: 25000,
-            ping_timeout: 5000,
-            max_payload: 1_000_000,
-        };
-        assert!(!hs.can_upgrade_to_websocket());
     }
 
     #[test]

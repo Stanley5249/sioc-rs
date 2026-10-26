@@ -213,17 +213,15 @@ where
 
         // Each engine gets its own connector.
         let connect_engine = move || {
-            eioc::engine::open(EngineOptions {
-                url: url.clone(),
-                http_client: http_client.clone(),
-                websocket_connector: websocket_connector.clone(),
-                transport: transport_strategy,
-                handshake_timeout: timeout,
-                server_message_capacity: channels.manager,
-                client_message_capacity: channels.engine,
-                server_frame_capacity: channels.engine,
-                client_frame_capacity: channels.transport,
-            })
+            let mut options = EngineOptions::new(url.clone(), websocket_connector.clone());
+            options.http_client = http_client.clone();
+            options.transport = transport_strategy;
+            options.handshake_timeout = timeout;
+            options.server_message_capacity = channels.manager;
+            options.client_message_capacity = channels.engine;
+            options.server_frame_capacity = channels.engine;
+            options.client_frame_capacity = channels.transport;
+            eioc::engine::open(options).into()
         };
 
         let task = tokio::spawn(crate::manager::actor::run(

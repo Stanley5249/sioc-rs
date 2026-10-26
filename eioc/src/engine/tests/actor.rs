@@ -382,17 +382,9 @@ async fn dropping_the_engine_aborts_its_task() {
         let _alive_tx = alive_tx;
         std::future::pending().await
     };
-    let engine = crate::engine::open(EngineOptions {
-        url: Url::parse("http://localhost:3000/").unwrap(),
-        http_client: reqwest::Client::new(),
-        websocket_connector: connector,
-        transport: TransportStrategy::WebSocket,
-        handshake_timeout: None,
-        server_message_capacity: 4,
-        client_message_capacity: 4,
-        server_frame_capacity: 4,
-        client_frame_capacity: 4,
-    });
+    let mut options = EngineOptions::new(Url::parse("http://localhost:3000/").unwrap(), connector);
+    options.transport = TransportStrategy::WebSocket;
+    let engine = crate::engine::open(options);
 
     let crate::engine::Engine {
         client_message_tx: _client_message_tx,
