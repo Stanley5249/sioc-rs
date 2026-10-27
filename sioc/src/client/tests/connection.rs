@@ -1,5 +1,6 @@
 //! Builder options and client connection lifecycle through public handles.
 
+use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,7 +12,7 @@ use url::Url;
 
 use crate::client::{Client, ClientBuilder};
 use crate::config::{ChannelConfig, ReconnectionConfig};
-use crate::error::ClientBuilderError;
+use crate::error::{ClientBuilderError, SocketError};
 
 #[tokio::test]
 async fn builder_preserves_connection_query_parameters() {
@@ -171,11 +172,51 @@ async fn without_reconnection_the_first_failure_closes_the_namespace() {
         .unwrap();
 
     let (_tx, mut rx) = client
-        .connect_with("/chat", r#"{"token":"secret"}"#)
+        .socket("/chat")
+        .auth(&serde_json::json!({ "token": "secret" }))
+        .connect()
         .await
         .unwrap();
     assert!(rx.recv().await.is_none());
     client.join().await.unwrap();
+}
+
+/// The socket.io parser accepts only an object as the CONNECT payload and
+/// closes the whole connection otherwise, so a bad payload never takes the
+/// name.
+#[tokio::test]
+async fn auth_must_serialize_to_an_object() {
+    let client = ClientBuilder::new(Url::parse("http://localhost:3000/").unwrap())
+        .transport(TransportStrategy::WebSocket)
+        .websocket_connector(async |_| std::future::pending().await)
+        .open()
+        .unwrap();
+
+    for auth in [
+        serde_json::json!(null),
+        serde_json::json!("token"),
+        serde_json::json!(["token"]),
+        serde_json::json!(1),
+    ] {
+        assert!(matches!(
+            client.socket("/").auth(&auth).connect().await,
+            Err(SocketError::Auth)
+        ));
+    }
+    // JSON object keys must be strings.
+    let unserializable = BTreeMap::from([((1, 2), 3)]);
+    assert!(matches!(
+        client.socket("/").auth(&unserializable).connect().await,
+        Err(SocketError::Payload(_))
+    ));
+    // A later payload replaces a rejected one, and the name is still free.
+    client
+        .socket("/")
+        .auth(&"token")
+        .auth(&serde_json::json!({ "token": "secret" }))
+        .connect()
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

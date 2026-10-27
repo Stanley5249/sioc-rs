@@ -98,6 +98,7 @@ Each section covers one area or component. A rejected approach records why it fa
 - The Engine.IO wire codec is internal, and the engine's message and handshake types are public under `eioc::engine`. A public `packet` module exposed encoding helpers that no caller outside the crate used.
 - A transport error names the type of the packet that arrived instead of carrying the frame, which kept an internal type in a public error. The payload was never in the error message.
 - `eioc::engine::Engine` keeps public endpoint fields and is non-exhaustive. A constructor or an opaque handle would only move the breaking change when an endpoint is added, and the manager needs each endpoint on its own to drop the sender for half-close. sioc builds its fake engines from its own wrapper instead of `eioc::engine::Engine`.
+- The CONNECT auth payload is a `Serialize` value that must encode to a JSON object, set through `Client::socket`. A raw string went onto the wire unchecked, and the socket.io parser answers any other CONNECT payload by closing the whole connection.
 - Rejected: a public sender future for flush completion beside `closed`. Receiver EOF and `Client::join` already show completion, and a `disconnected` future read like socket.io-client's `Socket.disconnected`, which is also true during a temporary Engine loss.
 - A frame that breaks binary reassembly reports a `sioc::parse` code, because socket.io-parser's decoder raises it. Its `sioc::manager` code read as a connection-management failure.
 

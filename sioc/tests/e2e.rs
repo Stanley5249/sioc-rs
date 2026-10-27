@@ -360,8 +360,8 @@ async fn refused_reconnection_closes_namespace() {
     run(&ORDINARY, async |server: &Server, transport, capacity| {
         let client = server.client(transport, capacity);
         let (tx, mut rx) = connected(&client, "/").await;
-        let auth = format!(r#"{{"token":"{transport:?}-{capacity}"}}"#);
-        let (once_tx, mut once_rx) = client.connect_with("/once", auth).await.unwrap();
+        let auth = serde_json::json!({ "token": format!("{transport:?}-{capacity}") });
+        let (once_tx, mut once_rx) = client.socket("/once").auth(&auth).connect().await.unwrap();
         next_connect(&mut once_rx).await;
 
         tx.emit(CloseEngine).await.unwrap();

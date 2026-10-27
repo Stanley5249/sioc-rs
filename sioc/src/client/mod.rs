@@ -7,7 +7,7 @@
 mod connection;
 mod socket;
 
-pub use connection::{Client, ClientBuilder};
+pub use connection::{Client, ClientBuilder, SocketBuilder};
 pub(crate) use socket::connect;
 pub use socket::{SocketReceiver, SocketSender};
 
