@@ -88,6 +88,7 @@ Each section covers one area or component. A rejected approach records why it fa
 - The session state says only whether the session is opening, open, or closed, a deadline failure returns as an `Err`, and the task keeps the first failure in one `Result` during cleanup. A close reason that also stored the failure needed a separate step to extract it and mixed who closed the session with how it ended.
 - A closed session has no deadline, and the transport bounds its own close, which for polling means the HTTP client's timeout. Reusing the last ping window for a normal close reported a heartbeat timeout that never happened.
 - A hang-up during opening drops the transport, because the server holds no session yet, and the engine reads that from the session state instead of a close reason. Waiting for the handshake instead held a cancelled opening open when the handshake had no deadline.
+- Engine.IO trace and warning logs name a frame by packet type and payload length only. They once printed whole frames, which exposed the CONNECT auth and every application payload.
 
 ## Configuration
 
