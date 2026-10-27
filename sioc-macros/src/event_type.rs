@@ -1,10 +1,11 @@
 //! Derive macro implementation for the `EventType` trait.
 
-use crate::attrs::SiocInput;
 use darling::FromDeriveInput;
 use heck::ToSnakeCase;
 use proc_macro2::TokenStream;
 use quote::quote;
+
+use crate::attrs::SiocInput;
 
 /// Expands `#[derive(EventType)]` into an `EventType` trait implementation.
 pub fn expand(input: &syn::DeriveInput) -> darling::Result<TokenStream> {

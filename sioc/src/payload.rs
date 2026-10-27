@@ -1,10 +1,11 @@
 //! Payload serialization and deserialization traits and helpers.
 
-use crate::ack::AckType;
-use crate::error::PayloadError;
-use crate::event::EventType;
-use serde::ser::SerializeSeq;
 use std::marker::PhantomData;
+
+use serde::ser::SerializeSeq;
+
+use crate::error::PayloadError;
+use crate::marker::{AckType, EventType};
 
 /// Serializes `payload` to JSON, returning the encoded string.
 ///
@@ -36,13 +37,17 @@ where
     T: serde::Deserialize<'de>,
 {
     let mut de = serde_json::Deserializer::from_str(payload);
-    match serde_path_to_error::deserialize(&mut de) {
-        Ok(payload) => Ok(payload),
-        Err(e) => Err(PayloadError::new::<T>(e)),
-    }
+    let mut track = serde_path_to_error::Track::new();
+    let deserializer = serde_path_to_error::Deserializer::new(&mut de, &mut track);
+    let result = T::deserialize(deserializer).and_then(|value| de.end().map(|()| value));
+
+    result.map_err(|error| {
+        PayloadError::new::<T>(serde_path_to_error::Error::new(track.path(), error))
+    })
 }
 
-/// Serializes an [`EventType`] + [`SerializePayload`] value into its wire-format string representation.
+/// Serializes an [`EventType`] + [`SerializePayload`] value into its
+/// wire-format string representation.
 ///
 /// # Errors
 ///
@@ -54,7 +59,8 @@ where
     to_json(&EventPayload(event))
 }
 
-/// Deserializes a wire-format string into a typed [`EventType`] + [`DeserializePayload`] value.
+/// Deserializes a wire-format string into a typed [`EventType`] +
+/// [`DeserializePayload`] value.
 ///
 /// # Errors
 ///
@@ -67,7 +73,8 @@ where
     Ok(event)
 }
 
-/// Serializes an [`AckType`] + [`SerializePayload`] value into its wire-format string representation.
+/// Serializes an [`AckType`] + [`SerializePayload`] value into its wire-format
+/// string representation.
 ///
 /// # Errors
 ///
@@ -79,7 +86,8 @@ where
     to_json(&AckPayload(payload))
 }
 
-/// Deserializes a wire-format string into a typed [`AckType`] + [`DeserializePayload`] value.
+/// Deserializes a wire-format string into a typed [`AckType`] +
+/// [`DeserializePayload`] value.
 ///
 /// # Errors
 ///
@@ -110,7 +118,8 @@ pub trait DeserializePayload: Sized {
     ///
     /// # Errors
     ///
-    /// Returns an error if the sequence is malformed or a field fails to deserialize.
+    /// Returns an error if the sequence is malformed or a field fails to
+    /// deserialize.
     fn deserialize_payload<'de, S>(seq: &mut S) -> std::result::Result<Self, S::Error>
     where
         S: serde::de::SeqAccess<'de>;
@@ -180,13 +189,13 @@ where
     where
         V: serde::de::SeqAccess<'de>,
     {
-        let name: &'de str = seq
+        let name: String = seq
             .next_element()?
             .ok_or_else(|| serde::de::Error::invalid_length(0, &E::NAME))?;
 
         if name != E::NAME {
             return Err(serde::de::Error::invalid_value(
-                serde::de::Unexpected::Str(name),
+                serde::de::Unexpected::Str(&name),
                 &E::NAME,
             ));
         }
@@ -245,6 +254,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::marker::NoBinary;
 
@@ -297,6 +308,23 @@ mod tests {
     }
 
     #[test]
+    fn serialization_error_preserves_type_and_cause() {
+        let payload = BTreeMap::from([(vec![1u8], 42u32)]);
+        let error = to_json(&payload).unwrap_err().to_string();
+        assert!(error.contains(std::any::type_name::<BTreeMap<Vec<u8>, u32>>()));
+        assert!(error.contains("key must be a string"));
+    }
+
+    #[test]
+    fn deserialization_error_preserves_element_path() {
+        let error = from_json::<Vec<u32>>(r#"[1,"two"]"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("[1]"));
+        assert!(error.contains("invalid type"));
+    }
+
+    #[test]
     fn deserializes_from_json() {
         let value: u32 = from_json("42").unwrap();
         assert_eq!(value, 42u32);
@@ -340,6 +368,21 @@ mod tests {
     #[test]
     fn event_from_json_empty_array_fails() {
         assert!(event_from_json::<TestEvent>("[]").is_err());
+    }
+
+    #[test]
+    fn rejects_trailing_json_for_values_events_and_acks() {
+        for payload in ["true false", "true trailing", "true]"] {
+            assert!(from_json::<bool>(payload).is_err(), "{payload}");
+        }
+        assert!(event_from_json::<TestEvent>(r#"["test"] []"#).is_err());
+        assert!(ack_from_json::<()>("[] null").is_err());
+        assert!(from_json::<bool>("true \n\t ").unwrap());
+    }
+
+    #[test]
+    fn accepts_escaped_event_names() {
+        event_from_json::<TestEvent>(r#"["t\u0065st"]"#).unwrap();
     }
 
     #[test]

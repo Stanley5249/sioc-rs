@@ -1,17 +1,17 @@
 //! Error types for Engine.IO operations.
 
-use crate::engine::EngineAction;
-use crate::packet::{Frame, Handshake, Packet};
 use bytestring::ByteString;
 use miette::Diagnostic;
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
-use tokio::time::error::Elapsed;
+use tokio::sync::mpsc;
+
+use crate::transport::ServerFrame;
 
 /// Top-level error aggregator for `eioc`.
 #[derive(Debug, Error, Diagnostic)]
 #[error(transparent)]
 #[diagnostic(transparent)]
+#[non_exhaustive]
 pub enum Error {
     /// Error from the transport coordination task.
     Transport(#[from] TransportError),
@@ -20,58 +20,59 @@ pub enum Error {
     Engine(#[from] EngineError),
 }
 
+impl Error {
+    /// Returns whether the error is a library bug, such as a broken channel
+    /// between library tasks, rather than a network or server fault.
+    ///
+    /// A caller can retry the session after any other error.
+    #[must_use]
+    pub fn is_internal(&self) -> bool {
+        // No wildcard arm, so a new variant must be classified here.
+        match self {
+            Self::Transport(
+                TransportError::WebSocket(_) | TransportError::Polling(_) | TransportError::Open(_),
+            )
+            | Self::Engine(EngineError::HeartbeatTimeout | EngineError::HandshakeTimeout) => false,
+
+            Self::Transport(TransportError::ServerFrameClosed)
+            | Self::Engine(EngineError::ServerMessageClosed) => true,
+        }
+    }
+}
+
 /// Errors that occur during an active Engine.IO session.
 #[derive(Debug, Error, Diagnostic)]
+#[non_exhaustive]
 pub enum EngineError {
-    /// Outbound frame channel to the transport task is closed.
-    #[error("outbound frame channel closed")]
-    #[diagnostic(
-        code(eioc::engine::send_transport),
-        help("the transport task exited; check for prior transport errors")
-    )]
-    SendTransport(#[from] mpsc::error::SendError<Frame>),
-
-    /// Inbound message delivery to the Socket.IO layer failed.
-    #[error("inbound message sink closed")]
-    #[diagnostic(
-        code(eioc::engine::send_sink),
-        help("the consumer of inbound messages was dropped")
-    )]
-    // Keep as `#[source]` (not `#[from]`) so type-erased errors do not
-    // implicitly convert into `EngineError` at unrelated call sites.
-    SendSink(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
-
-    /// The handshake oneshot channel was dropped before the server responded.
-    #[error("failed to receive Engine.IO handshake")]
-    #[diagnostic(
-        code(eioc::engine::recv_handshake),
-        help(
-            "the transport task exited before completing the handshake; check the transport for prior errors"
-        )
-    )]
-    RecvHandshake(#[from] oneshot::error::RecvError),
+    /// Delivering a server message to the upper layer failed because it
+    /// dropped its receiver before the engine hung up.
+    #[error("server message channel closed")]
+    #[diagnostic(code(eioc::engine::server_message), help("library bug, please report"))]
+    ServerMessageClosed,
 
     /// The server stopped sending heartbeat pings within the expected window.
     #[error("heartbeat timeout")]
     #[diagnostic(
         code(eioc::engine::heartbeat_timeout),
-        help("the server stopped responding; check the network or server load")
-    )]
-    HeartbeatTimeout(#[from] Elapsed),
-
-    /// An unexpected packet was received during the session.
-    #[error("unexpected packet {0:?}")]
-    #[diagnostic(
-        code(eioc::engine::server),
         help(
-            "the server sent a packet that violates the Engine.IO state machine; likely a server bug or version mismatch"
+            "the server stopped responding, or the application did not read events for a whole ping window; check the network, server load, or the receive loop"
         )
     )]
-    Server(Packet),
+    HeartbeatTimeout,
+
+    /// The server did not accept the handshake in time.
+    #[error("handshake timeout")]
+    #[diagnostic(
+        code(eioc::engine::handshake_timeout),
+        help("the server did not answer in time; check the URL, the network, or server load")
+    )]
+    HandshakeTimeout,
 }
 
-/// Errors that occur during Engine.IO connection setup and transport coordination.
+/// Errors that occur during Engine.IO connection setup and transport
+/// coordination.
 #[derive(Debug, Error, Diagnostic)]
+#[non_exhaustive]
 pub enum TransportError {
     /// A WebSocket transport error.
     #[error(transparent)]
@@ -83,37 +84,36 @@ pub enum TransportError {
     #[diagnostic(transparent)]
     Polling(#[from] PollingError),
 
-    /// Sending an action to the engine task failed because the channel is closed.
-    #[error("engine action channel closed")]
+    /// Sending a server frame to the engine failed because it dropped its
+    /// receiver before the transport ended.
+    #[error("server frame channel closed")]
     #[diagnostic(
-        code(eioc::transport::send_engine),
-        help("the engine task exited; check for prior engine errors")
+        code(eioc::transport::server_frame),
+        help("library bug, please report")
     )]
-    SendEngine(#[from] mpsc::error::SendError<EngineAction>),
+    ServerFrameClosed,
 
-    /// Handshake data could not be forwarded to the engine task.
-    #[error("failed to send handshake to engine task")]
-    #[diagnostic(
-        code(eioc::transport::send_handshake),
-        help(
-            "the engine task exited before the handshake arrived; check the engine for prior errors"
-        )
-    )]
-    SendHandshake(Handshake),
-
-    /// The first frame received was not an Open packet.
-    #[error("expected Open packet as first frame")]
+    /// The first frame received was not an Open packet. Holds the type of the
+    /// packet that arrived instead.
+    #[error("expected Open packet as first frame, received {0}")]
     #[diagnostic(
         code(eioc::transport::open),
         help(
             "the server did not send the expected Open packet; check the server implementation and Engine.IO version"
         )
     )]
-    Open(Frame),
+    Open(&'static str),
+}
+
+impl From<mpsc::error::SendError<ServerFrame>> for TransportError {
+    fn from(_: mpsc::error::SendError<ServerFrame>) -> Self {
+        Self::ServerFrameClosed
+    }
 }
 
 /// Errors specific to the WebSocket transport.
 #[derive(Debug, Error, Diagnostic)]
+#[non_exhaustive]
 pub enum WebSocketError {
     /// An error from the `tokio-tungstenite` library.
     #[error(transparent)]
@@ -129,14 +129,14 @@ pub enum WebSocketError {
     Closed,
 
     /// The server did not respond to the probe Ping with a Pong.
-    #[error("probe Pong not received")]
+    #[error("probe Pong not received, received {0}")]
     #[diagnostic(
         code(eioc::transport::websocket::probe),
         help(
             "the server did not respond to the probe Ping with a Pong; check the server implementation and Engine.IO version"
         )
     )]
-    Probe(Frame),
+    Probe(&'static str),
 
     /// A packet decoding error within a WebSocket text frame.
     #[error(transparent)]
@@ -146,6 +146,7 @@ pub enum WebSocketError {
 
 /// Errors specific to the HTTP long-polling transport.
 #[derive(Debug, Error, Diagnostic)]
+#[non_exhaustive]
 pub enum PollingError {
     /// An HTTP client error.
     #[error(transparent)]
@@ -175,7 +176,7 @@ pub enum PollingError {
 
 /// Errors from decoding a raw Engine.IO packet.
 #[derive(Debug, Error, Diagnostic)]
-#[allow(missing_docs)]
+#[non_exhaustive]
 pub enum PacketError {
     /// Packet bytes are empty.
     #[error("empty packet")]
@@ -185,7 +186,10 @@ pub enum PacketError {
     /// First char of a packet is not a valid Engine.IO type id.
     #[error("invalid type id {id}")]
     #[diagnostic(code(eioc::packet::invalid_id))]
-    InvalidId { id: char },
+    InvalidId {
+        /// The first char of the packet.
+        id: char,
+    },
 
     /// Open packet's JSON payload is malformed.
     #[error("failed to parse Open payload")]
@@ -195,12 +199,42 @@ pub enum PacketError {
     /// Unexpected payload for the packet type.
     #[error("unexpected payload for type id {id}")]
     #[diagnostic(code(eioc::packet::payload))]
-    Payload { id: char, payload: ByteString },
+    Payload {
+        /// The packet type id.
+        id: char,
+        /// The payload that the type does not accept.
+        payload: ByteString,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn network_and_server_faults_are_not_internal() {
+        let errors: [Error; 5] = [
+            TransportError::WebSocket(WebSocketError::Closed).into(),
+            TransportError::Polling(PollingError::Response(String::new())).into(),
+            TransportError::Open("noop").into(),
+            EngineError::HeartbeatTimeout.into(),
+            EngineError::HandshakeTimeout.into(),
+        ];
+        for error in errors {
+            assert!(!error.is_internal(), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn channel_failures_are_internal() {
+        let errors: [Error; 2] = [
+            TransportError::ServerFrameClosed.into(),
+            EngineError::ServerMessageClosed.into(),
+        ];
+        for error in errors {
+            assert!(error.is_internal(), "{error:?}");
+        }
+    }
 
     #[test]
     fn packet_error_empty_display() {
@@ -225,9 +259,11 @@ mod tests {
     }
 
     #[test]
-    fn engine_error_server_display() {
-        let e = EngineError::Server(crate::packet::Packet::Upgrade);
-        assert_eq!(e.to_string(), "unexpected packet Upgrade");
+    fn engine_error_heartbeat_timeout_display() {
+        assert_eq!(
+            EngineError::HeartbeatTimeout.to_string(),
+            "heartbeat timeout"
+        );
     }
 
     #[test]
@@ -244,14 +280,13 @@ mod tests {
 
     #[test]
     fn error_from_engine_error() {
-        let e: Error = EngineError::Server(crate::packet::Packet::Close).into();
+        let e: Error = EngineError::HeartbeatTimeout.into();
         assert!(matches!(e, Error::Engine(_)));
     }
 
     #[test]
     fn error_from_transport_error() {
-        let e: Error =
-            TransportError::Open(crate::packet::Frame::Packet(crate::packet::Packet::Close)).into();
+        let e: Error = TransportError::Open("close").into();
         assert!(matches!(e, Error::Transport(_)));
     }
 }

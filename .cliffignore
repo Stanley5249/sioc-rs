@@ -1,0 +1,18 @@
+# Commits whose breaking change a later commit replaced before 0.6.0, so
+# the release notes list only the net change. git-cliff matches full SHAs.
+# A session tag on server ack ids, added and reverted.
+8be39f14ea3a59861003e9ee9dd2e660f83de406
+684bc7bcc44d8fe4a88f461e5c1929b208119053
+# ServerEvent became EngineEvent, which became EngineEnded.
+32642d349e51822e518470bb944658751308e317
+# WebSocketStream lost its Stream and Sink impls, then became an alias of
+# the tungstenite stream, which has them.
+4e987c8e089ba34ce9108c638170d758ead3d4cf
+# Channel error variants were renamed twice, then removed.
+f127d09344c12e9fee3a62e5962d17586beefd36
+1463b7b486768e8c4de1385fe2b8dc14e128aabe
+# engine::session::connect and transport::open, both private since.
+2c94eb4700909ff9884c98622037a3710a3d185d
+88c51d644c9c34b149f1a77eea7d80a0f98d22c3
+# EngineError::Handshake and UnexpectedPacket, both removed since.
+dcd1fb08d2a4c50966ec22c9446bd22b53e70856

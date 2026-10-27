@@ -1,46 +1,73 @@
 //! Engine.IO packet types.
 
-use std::time::Duration;
-
-use crate::error::PacketError;
 use bytes::Bytes;
 use bytestring::ByteString;
 use serde::Deserialize;
 
-/// Payload sent in the WebSocket upgrade probe ping and expected in the pong reply.
+use crate::error::PacketError;
+
+/// Payload sent in the WebSocket upgrade probe ping and expected in the pong
+/// reply.
 pub const PROBE: ByteString = ByteString::from_static("probe");
 
 /// Content exchanged between the Socket.IO and Engine.IO layers.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Message {
+pub enum ClientMessage {
     /// A UTF-8 text payload.
     Text(ByteString),
     /// A raw binary payload.
     Binary(Bytes),
-    /// Signals a clean connection close.
-    Close,
 }
 
-impl std::fmt::Display for Message {
+impl std::fmt::Display for ClientMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Text(s) => f.debug_tuple("Text").field(&format_args!("{s}")).finish(),
             Self::Binary(b) => f.debug_struct("Binary").field("len", &b.len()).finish(),
-            Self::Close => f.write_str("Close"),
         }
     }
 }
 
+/// What the engine delivers from the server to the upper layer, like
+/// engine.io-client's `Socket` events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServerMessage {
+    /// The server accepted the handshake, like the `"open"` event. Always the
+    /// first item of a session, and sent once.
+    Open(Handshake),
+    /// A UTF-8 text payload, like the `"message"` event.
+    Text(ByteString),
+    /// A raw binary payload, like the `"message"` event.
+    Binary(Bytes),
+}
+
 /// A wire-level frame exchanged with the transport layer.
 ///
-/// [`Frame::Packet`] carries a fully-encoded Engine.IO text packet (e.g. `"4hello"`).
-/// [`Frame::Binary`] carries a raw binary payload with no packet-type prefix.
+/// [`Frame::Packet`] carries a fully-encoded Engine.IO text packet (e.g.
+/// `"4hello"`). [`Frame::Binary`] carries a raw binary payload with no
+/// packet-type prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frame {
     /// A UTF-8 text frame (contains a complete Engine.IO packet).
     Packet(Packet),
     /// A raw binary frame.
     Binary(Bytes),
+}
+
+impl Frame {
+    /// The frame's packet type, for diagnostics that leave out the payload.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Packet(Packet::Open(_)) => "open",
+            Self::Packet(Packet::Close) => "close",
+            Self::Packet(Packet::Ping(_)) => "ping",
+            Self::Packet(Packet::Pong(_)) => "pong",
+            Self::Packet(Packet::Message(_)) => "message",
+            Self::Packet(Packet::Upgrade) => "upgrade",
+            Self::Packet(Packet::Noop) => "noop",
+            Self::Binary(_) => "binary",
+        }
+    }
 }
 
 impl From<Packet> for Frame {
@@ -70,7 +97,8 @@ impl From<Bytes> for Frame {
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Handshake {
-    /// Session identifier; sent as the `sid` query parameter in all subsequent requests.
+    /// Session identifier; sent as the `sid` query parameter in all subsequent
+    /// requests.
     pub sid: ByteString,
 
     /// Available transport upgrades (e.g. `["websocket"]`).
@@ -84,21 +112,10 @@ pub struct Handshake {
     #[serde(rename = "pingTimeout")]
     pub ping_timeout: u64,
 
-    /// Maximum bytes per chunk, used by the client to aggregate packets into payloads.
+    /// Maximum bytes per chunk, used by the client to aggregate packets into
+    /// payloads.
     #[serde(rename = "maxPayload")]
     pub max_payload: u64,
-}
-
-impl Handshake {
-    /// Returns `true` if the server offered a WebSocket upgrade.
-    pub fn can_upgrade_to_websocket(&self) -> bool {
-        self.upgrades.iter().any(|u| u == "websocket")
-    }
-
-    /// Combined `pingInterval + pingTimeout` as a [`Duration`].
-    pub fn ping_window(&self) -> Duration {
-        Duration::from_millis(self.ping_interval + self.ping_timeout)
-    }
 }
 
 /// A packet in the Engine.IO v4 protocol.
@@ -108,7 +125,8 @@ pub enum Packet {
     Open(Handshake),
     /// `1`: The transport can be closed.
     Close,
-    /// `2`: Heartbeat from the server (client must reply with [`Packet::Pong`]).
+    /// `2`: Heartbeat from the server (client must reply with
+    /// [`Packet::Pong`]).
     Ping(ByteString),
     /// `3`: Heartbeat reply.
     Pong(ByteString),
@@ -163,7 +181,8 @@ impl Packet {
     ///
     /// # Errors
     ///
-    /// Returns an error if the byte string is empty, has an unrecognised type ID, or the payload is malformed.
+    /// Returns an error if the byte string is empty, has an unrecognised type
+    /// ID, or the payload is malformed.
     pub fn decode(bytes: &ByteString) -> Result<Self, PacketError> {
         let mut chars = bytes.chars();
 
@@ -264,12 +283,6 @@ mod tests {
     }
 
     #[test]
-    fn handshake_ping_window() {
-        let hs = test_handshake();
-        assert_eq!(hs.ping_window(), std::time::Duration::from_secs(30));
-    }
-
-    #[test]
     fn decode_invalid_packet_id() {
         assert!(matches!(
             Packet::decode(&bss("9")),
@@ -356,24 +369,6 @@ mod tests {
     }
 
     #[test]
-    fn handshake_can_upgrade_to_websocket_true() {
-        let hs = test_handshake();
-        assert!(hs.can_upgrade_to_websocket());
-    }
-
-    #[test]
-    fn handshake_can_upgrade_to_websocket_false() {
-        let hs = Handshake {
-            sid: "x".into(),
-            upgrades: vec![],
-            ping_interval: 25000,
-            ping_timeout: 5000,
-            max_payload: 1_000_000,
-        };
-        assert!(!hs.can_upgrade_to_websocket());
-    }
-
-    #[test]
     fn decode_close_with_payload_is_error() {
         let bytes = bss("1extra");
         assert!(matches!(
@@ -402,7 +397,7 @@ mod tests {
 
     #[test]
     fn message_display_text() {
-        let s = format!("{}", Message::Text(bss("hello")));
+        let s = format!("{}", ClientMessage::Text(bss("hello")));
         assert_eq!(s, "Text(hello)");
     }
 
@@ -410,14 +405,9 @@ mod tests {
     fn message_display_binary() {
         let s = format!(
             "{}",
-            Message::Binary(bytes::Bytes::from_static(b"\x01\x02"))
+            ClientMessage::Binary(bytes::Bytes::from_static(b"\x01\x02"))
         );
         assert_eq!(s, "Binary { len: 2 }");
-    }
-
-    #[test]
-    fn message_display_close() {
-        assert_eq!(format!("{}", Message::Close), "Close");
     }
 
     #[test]
@@ -454,5 +444,23 @@ mod tests {
     #[should_panic(expected = "client should never encode a Noop packet")]
     fn encode_noop_panics() {
         Packet::Noop.encode();
+    }
+
+    /// The kinds appear in error messages, so each packet type keeps its name.
+    #[test]
+    fn frame_kinds_name_the_packet_type() {
+        let frames = [
+            (Frame::Packet(Packet::Open(test_handshake())), "open"),
+            (Packet::Close.into(), "close"),
+            (Packet::Ping(bss("")).into(), "ping"),
+            (Packet::Pong(bss("")).into(), "pong"),
+            (Packet::Message(bss("")).into(), "message"),
+            (Packet::Upgrade.into(), "upgrade"),
+            (Packet::Noop.into(), "noop"),
+            (Frame::Binary(Bytes::new()), "binary"),
+        ];
+        for (frame, kind) in frames {
+            assert_eq!(frame.kind(), kind);
+        }
     }
 }

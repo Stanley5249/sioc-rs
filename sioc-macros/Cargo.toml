@@ -13,6 +13,9 @@ categories = ["development-tools::procedural-macro-helpers", "network-programmin
 [lib]
 proc-macro = true
 
+[lints]
+workspace = true
+
 [dependencies]
 darling.workspace = true
 heck.workspace = true

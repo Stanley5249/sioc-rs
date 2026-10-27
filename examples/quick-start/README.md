@@ -1,30 +1,44 @@
-# Quick Start
+# Quick start
 
-A chat client in Rust that joins a room, talks to a bot, and shares an image with a Socket.IO server. The same client runs against two servers: `server.py` on python-socketio and `server.ts` on the reference JavaScript implementation. The bot stands in for other room members, so one client still sees broadcasts.
+A chat client in Rust that joins a room, talks to a bot, and shares an image. Use `server.ts` with the reference JavaScript implementation or `server.py` with `python-socketio`. Both servers implement the same chat events. The bot stands in for other room members, so one client still sees broadcasts.
 
-The example covers all five concepts from the main README:
+The example follows the main README's client flow.
 
-- **Open and Connect** — build a client and connect to the default namespace
-- **Emit** — send a `Say` message to the room
-- **Listen** — receive `Message`, `Notice`, `Confirm`, and `Image` events in a typed loop
-- **Acks** — request an ack from the server (`Join`) and answer one from the server (`Confirm`)
-- **Binary** — send an `Image` attachment and receive it back
+- **Open and connect**: Build a client and connect to the default namespace.
+- **Emit**: Send a `Say` message to the room.
+- **Listen**: Receive `Message`, `Notice`, `Confirm`, and `Image` events in a typed loop.
+- **Acks**: Request an ack from the server (`Join`) and answer one from the server (`Confirm`).
+- **Binary**: Send an `Image` attachment and receive it back.
 
 ## Prerequisites
 
-- [uv](https://docs.astral.sh/uv/getting-started/installation/) for `server.py`
-- [Bun](https://bun.sh/docs/installation) for `server.ts`
-
-Both servers take their dependencies from the workspace root `pyproject.toml` and `package.json`.
+- For `server.ts`: [Bun](https://bun.sh/docs/installation), with dependencies from the workspace root `package.json`.
+- For `server.py`: [uv](https://docs.astral.sh/uv/getting-started/installation/), which manages Python and dependencies from the workspace root `pyproject.toml` and `uv.lock`.
 
 ## Running
 
-Run the client against each server in one command from the workspace root:
+From the workspace root, choose one server and start the server in one terminal.
+
+For TypeScript:
 
 ```bash
-just smoke-py
-just smoke-js
+bun install --frozen-lockfile
+just examples::quick-start-ts
 ```
+
+For Python:
+
+```sh
+just examples::quick-start-py
+```
+
+Both recipes keep the server running on `127.0.0.1:3000`, so run one server at a time. In a second terminal, run the Rust client:
+
+```sh
+just examples::quick-start
+```
+
+Stop the server with Ctrl+C after the client finishes. `just test-e2e` runs protocol and pressure tests against the TypeScript reference fixture. CI includes those E2E tests in its combined Rust test run. Python formatting, linting, and type checking are included in `just ci-all`.
 
 Each side logs only the events it receives, so every event appears once, with an arrow pointing at the receiver:
 
@@ -40,29 +54,7 @@ client <- confirm   Leave the room?
 server <- ack       confirm: yes
 ```
 
-To run them by hand, start a server from the workspace root:
-
-```bash
-uv run examples/quick-start/server.py
-# or
-bun install && bun examples/quick-start/server.ts
-```
-
-Then in a second terminal, run the client.
-
-On Bash:
-
-```bash
-RUST_LOG=quick_start=info,sioc=trace cargo run --example quick_start
-```
-
-On PowerShell:
-
-```powershell
-$env:RUST_LOG="quick_start=info,sioc=trace"; cargo run --example quick_start
-```
-
-## What Happens
+## Message flow
 
 ```text
  Rust client                                server (+ bot)
@@ -82,4 +74,4 @@ $env:RUST_LOG="quick_start=info,sioc=trace"; cargo run --example quick_start
 2. The client shares `crab.png` as an `Image` event with one binary attachment. The server broadcasts it to the room, so the client receives it back.
 3. The client sends a `Say` message. The server broadcasts it to other members, and the bot replies with a `Message`.
 4. The server sends `Confirm` asking whether to leave the room. The client answers with an `Answer(true)` ack.
-5. The server disconnects the client and the loop exits cleanly. `server.py` disconnects the namespace, and `server.ts` closes the whole connection.
+5. TypeScript closes the whole connection, and Python disconnects the namespace. The Rust client exits the receive loop and closes the remaining session in both cases.

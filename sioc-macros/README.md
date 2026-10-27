@@ -12,26 +12,26 @@ Derive macros for [`sioc`](https://docs.rs/sioc).
 
 ## Struct-level attributes
 
-| Attribute             | Applies to             | Effect                                                                                                                |
-| --------------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `event(name = "str")` | [`EventType`]          | Overrides the event name. By default the struct name is converted to `snake_case`, so `MyEvent` becomes `"my_event"`. |
-| `event(ack = Type)`   | [`EventType`]          | Declares that this event expects an acknowledgement of type `Type`. Without this the event has no acknowledgement.    |
-| `event(binary)`       | [`EventType`]          | Marks the event as carrying binary attachments. Without this the event has no binary attachments.                     |
-| `ack(binary)`         | [`AckType`]            | Marks the acknowledgement as carrying binary attachments. Without this the ack has no binary attachments.             |
-| `strict`              | [`DeserializePayload`] | Rejects payloads that contain more elements than the struct has fields. By default, extra elements are ignored.       |
+| Attribute                      | Applies to             | Effect                                                                                                                                             |
+| ------------------------------ | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `#[sioc(event(name = "str"))]` | [`EventType`]          | Overrides the event name. By default the struct name is converted to `snake_case`, so `MyEvent` becomes `"my_event"`.                              |
+| `#[sioc(event(ack = "Type"))]` | [`EventType`]          | Declares that this event expects an acknowledgement of type `Type`. The default event has no acknowledgement.                                      |
+| `#[sioc(event(binary))]`       | [`EventType`]          | Marks the event as carrying binary attachments. The default event has no binary attachments.                                                       |
+| `#[sioc(ack(binary))]`         | [`AckType`]            | Marks the acknowledgement as carrying binary attachments. The default ack has no binary attachments.                                               |
+| `#[sioc(strict)]`              | [`DeserializePayload`] | Rejects elements left after the fields are read. A trailing flatten field consumes the remaining elements. By default, extra elements are ignored. |
 
 ## Field-level attributes
 
-| Attribute | Applies to                                   | Effect                                                                                                                                                                         |
-| --------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `flatten` | [`SerializePayload`], [`DeserializePayload`] | Each element of this collection field is serialized as a separate array element, and all remaining array elements are collected into it on the way in. Must be the last field. |
+| Attribute          | Applies to                                   | Effect                                                                                                                                                                                                          |
+| ------------------ | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `#[sioc(flatten)]` | [`SerializePayload`], [`DeserializePayload`] | Each element of this collection field is serialized as a separate array element, and all remaining array elements are collected into it on the way in. Place it on the last field so it consumes the remainder. |
 
 ## License
 
 MIT OR Apache-2.0.
 
-[`EventType`]: https://docs.rs/sioc/latest/sioc/event/trait.EventType.html
-[`AckType`]: https://docs.rs/sioc/latest/sioc/ack/trait.AckType.html
+[`EventType`]: https://docs.rs/sioc/latest/sioc/marker/trait.EventType.html
+[`AckType`]: https://docs.rs/sioc/latest/sioc/marker/trait.AckType.html
 [`SerializePayload`]: https://docs.rs/sioc/latest/sioc/payload/trait.SerializePayload.html
 [`DeserializePayload`]: https://docs.rs/sioc/latest/sioc/payload/trait.DeserializePayload.html
 [`EventRouter`]: https://docs.rs/sioc/latest/sioc/event/trait.EventRouter.html

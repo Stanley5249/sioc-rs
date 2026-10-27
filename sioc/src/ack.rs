@@ -4,60 +4,45 @@
 //! response is called an **acknowledgement** ("ack").  On the wire, acks are
 //! JSON arrays `[arg0, arg1, ...]`, like events, but without a leading name.
 //!
-//! The [`AckType`] trait (or `#[derive(AckType)]`) maps a Rust struct to this format.
+//! The [`AckType`] trait (or `#[derive(AckType)]`) maps a Rust struct to this
+//! format.
 //!
 //! - [`Ack`]: inbound, decoded from a [`DynAck`] via [`TryFrom`].
 //! - [`AckHandle`]: a future that resolves when the server's ack arrives.
 //!
 //! Outbound acks are sent directly via
-//! [`SocketSender::acknowledge`](crate::client::SocketSender::acknowledge); blanket [`Acknowledge`] impls
-//! handle serialization automatically for both plain acks and binary closures.
+//! [`SocketSender::acknowledge`](crate::client::SocketSender::acknowledge);
+//! blanket [`Acknowledge`] impls handle serialization automatically for both
+//! plain acks and binary closures.
 
-use crate::binary::AttachmentsBuilder;
-use crate::client::Acknowledge;
-use crate::error::{AckError, PayloadError};
-use crate::marker::{BinaryMarker, HasBinary, NoBinary};
-use crate::packet::Directive;
-use crate::packet::DynAck;
-use crate::payload::{DeserializePayload, SerializePayload, ack_from_json, ack_to_json};
-use pin_project::pin_project;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
+
+use pin_project::pin_project;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
-/// Maps a Rust struct to the Socket.IO ack JSON-array encoding.
-///
-/// Prefer `#[derive(AckType)]` over a manual implementation.  The derive
-/// generates the binary policy associated type.  Add `#[derive(SerializePayload)]`
-/// to send acks and `#[derive(DeserializePayload)]` to receive them.
-///
-/// Unlike [`EventType`](crate::event::EventType), ack arrays have no leading name
-/// element; the fields map directly to array positions.
-///
-/// # Example
-///
-/// ```rust
-/// use sioc::prelude::*;
-///
-/// #[derive(AckType, SerializePayload)]
-/// struct SaveAck { ok: bool, id: u64 }
-///
-/// fn main() {
-///     assert_eq!(ack_to_json(&()).unwrap(), "[]");
-///     assert_eq!(ack_to_json(&SaveAck { ok: true, id: 7 }).unwrap(), "[true,7]");
-/// }
-/// ```
-pub trait AckType: Sized {
-    /// Binary policy: [`NoBinary`] or [`HasBinary`].
-    type Binary: BinaryMarker;
-}
+use crate::binary::AttachmentsBuilder;
+use crate::error::{AckError, PayloadError};
+use crate::marker::{AckId, AckType, BinaryMarker, HasBinary, NoBinary};
+use crate::packet::{ClientPacket, DynAck};
+use crate::payload::{DeserializePayload, SerializePayload};
 
-impl AckType for () {
-    type Binary = NoBinary;
+/// Converts a typed acknowledgement into an ack [`ClientPacket`].
+pub trait Acknowledge<A, B>
+where
+    A: AckType,
+    B: BinaryMarker,
+{
+    /// Serializes into an ack [`ClientPacket`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if payload serialization fails.
+    fn into_client_packet(self, id: AckId<A>) -> Result<ClientPacket, PayloadError>;
 }
 
 /// A typed inbound acknowledgement with a compile-time binary policy marker.
@@ -93,7 +78,7 @@ where
     type Error = AckError;
 
     fn try_from(value: DynAck) -> Result<Self, AckError> {
-        let payload = ack_from_json(&value.payload)?;
+        let payload = crate::payload::ack_from_json(&value.payload)?;
         let attachments = A::Binary::parse(value.attachments)?;
         Ok(Self {
             payload,
@@ -106,11 +91,11 @@ impl<A> Acknowledge<A, NoBinary> for A
 where
     A: AckType<Binary = NoBinary> + SerializePayload,
 {
-    fn into_directive(self, id: u64) -> Result<Directive, PayloadError> {
-        let payload = ack_to_json(&self)?.into();
-        Ok(Directive::Ack {
+    fn into_client_packet(self, id: AckId<A>) -> Result<ClientPacket, PayloadError> {
+        let payload = crate::payload::ack_to_json(&self)?.into();
+        Ok(ClientPacket::Ack {
             payload,
-            id,
+            id: id.into_dyn(),
             attachments: None,
         })
     }
@@ -121,12 +106,12 @@ where
     F: FnOnce(&mut AttachmentsBuilder) -> A,
     A: AckType<Binary = HasBinary> + SerializePayload,
 {
-    fn into_directive(self, id: u64) -> Result<Directive, PayloadError> {
+    fn into_client_packet(self, id: AckId<A>) -> Result<ClientPacket, PayloadError> {
         let mut builder = AttachmentsBuilder::new();
-        let payload = ack_to_json(&self(&mut builder))?.into();
-        Ok(Directive::Ack {
+        let payload = crate::payload::ack_to_json(&self(&mut builder))?.into();
+        Ok(ClientPacket::Ack {
             payload,
-            id,
+            id: id.into_dyn(),
             attachments: Some(builder.finish()),
         })
     }
@@ -135,7 +120,8 @@ where
 /// Handle that resolves to [`Ack`] when the server's acknowledgement arrives.
 ///
 /// Obtained from [`SocketSender::emit`](crate::client::SocketSender::emit).
-/// Implements [`Future`]: `.await` it directly.
+/// Implements [`Future`]: `.await` it directly. A named type rather than an
+/// `async fn`, so callers can store it and add [`timeout`](Self::timeout).
 #[pin_project]
 #[must_use = "AckHandle must be awaited to receive the ack"]
 #[derive(Debug)]
@@ -147,7 +133,12 @@ pub struct AckHandle<A> {
 
 impl<A: AckType> AckHandle<A> {
     /// Wraps a oneshot receiver into a typed ack handle.
-    pub(crate) fn new(rx: oneshot::Receiver<DynAck>) -> Self {
+    ///
+    /// An [`Emit`](crate::event::Emit) implementation pairs this receiver
+    /// with the sender it puts in [`ClientPacket::Event`]'s `ack_tx`.
+    ///
+    /// [`ClientPacket::Event`]: crate::packet::ClientPacket::Event
+    pub fn new(rx: oneshot::Receiver<DynAck>) -> Self {
         Self {
             rx,
             marker: PhantomData,
@@ -161,11 +152,15 @@ where
     /// Returns a future that resolves to [`AckError::Timeout`] if the server
     /// does not respond within `duration`.
     ///
-    /// Mirrors [`tokio::time::timeout`].
+    /// Limits the wait, like [`tokio::time::timeout`]. Timing out drops this
+    /// handle; an event already queued or sent remains in flight. The manager
+    /// reclaims cancelled ack registrations when registering another ack or
+    /// closing the namespace.
     ///
     /// # Errors
     ///
-    /// Returns [`AckError::Timeout`] if `duration` elapses, or any error from the inner [`AckHandle`].
+    /// Returns [`AckError::Timeout`] if `duration` elapses, or any error from
+    /// the inner [`AckHandle`].
     ///
     /// # Example
     ///
@@ -185,11 +180,13 @@ where
     /// Returns a future that resolves to [`AckError::Timeout`] if the server
     /// does not respond by `deadline`.
     ///
-    /// Mirrors [`tokio::time::timeout_at`].
+    /// Limits the wait, like [`tokio::time::timeout_at`], with the same
+    /// cancellation behavior as [`timeout`](Self::timeout).
     ///
     /// # Errors
     ///
-    /// Returns [`AckError::Timeout`] if `deadline` passes, or any error from the inner [`AckHandle`].
+    /// Returns [`AckError::Timeout`] if `deadline` passes, or any error from
+    /// the inner [`AckHandle`].
     ///
     /// # Example
     ///
@@ -221,11 +218,13 @@ where
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
+    use bytestring::ByteString;
+
     use super::*;
     use crate::error::AckError;
     use crate::marker::{AckMarker, HasAck, HasBinary, NoBinary};
-    use bytes::Bytes;
-    use bytestring::ByteString;
+    use crate::packet::DynAckId;
 
     #[derive(Debug, PartialEq)]
     struct BinaryBoolAck(bool);
@@ -274,7 +273,7 @@ mod tests {
 
     #[test]
     fn deserialize_unit_ack() {
-        assert_eq!(ack_from_json::<()>("[]").unwrap(), ());
+        assert_eq!(crate::payload::ack_from_json::<()>("[]").unwrap(), ());
     }
 
     #[test]
@@ -310,26 +309,26 @@ mod tests {
         result.unwrap_err();
     }
     #[test]
-    fn send_ack_into_directive_binary() {
-        let id = <HasAck<BinaryBoolAck>>::parse(Some(3)).unwrap();
-        let directive = Acknowledge::<BinaryBoolAck, HasBinary>::into_directive(
+    fn send_ack_into_client_packet_binary() {
+        let id = <HasAck<BinaryBoolAck>>::parse(Some(DynAckId::new(3))).unwrap();
+        let client_packet = Acknowledge::<BinaryBoolAck, HasBinary>::into_client_packet(
             |builder: &mut AttachmentsBuilder| {
                 let _p = builder.attach(Bytes::from_static(b"\xCA\xFE"));
                 BinaryBoolAck(true)
             },
-            id.get(),
+            id,
         )
         .unwrap();
-        let Directive::Ack {
+        let ClientPacket::Ack {
             payload,
             id,
             attachments,
-        } = directive
+        } = client_packet
         else {
-            panic!("expected Ack directive");
+            panic!("expected Ack packet");
         };
         assert_eq!(&payload[..], "[true]");
-        assert_eq!(id, 3);
+        assert_eq!(id.get(), 3);
         let att = attachments.expect("expected attachments");
         assert_eq!(att.len(), 1);
         assert_eq!(att[0], Bytes::from_static(b"\xCA\xFE"));
@@ -346,18 +345,22 @@ mod tests {
     }
 
     #[test]
-    fn send_ack_into_directive_no_binary() {
-        let directive = Acknowledge::<(), NoBinary>::into_directive((), 7).unwrap();
-        let Directive::Ack {
+    fn send_ack_into_client_packet_no_binary() {
+        let client_packet = Acknowledge::<(), NoBinary>::into_client_packet(
+            (),
+            HasAck::parse(Some(DynAckId::new(7))).unwrap(),
+        )
+        .unwrap();
+        let ClientPacket::Ack {
             payload,
             id,
             attachments,
-        } = directive
+        } = client_packet
         else {
-            panic!("expected Ack directive");
+            panic!("expected Ack packet");
         };
         assert_eq!(&payload[..], "[]");
-        assert_eq!(id, 7);
+        assert_eq!(id.get(), 7);
         assert!(attachments.is_none());
     }
 
@@ -400,6 +403,7 @@ mod tests {
     #[tokio::test]
     async fn ack_handle_timeout_at_resolves() {
         use std::time::Duration;
+
         use tokio::time::Instant;
         let (tx, rx) = oneshot::channel::<DynAck>();
         let handle = AckHandle::<()>::new(rx);
@@ -416,6 +420,7 @@ mod tests {
     #[tokio::test]
     async fn ack_handle_timeout_at_past_deadline_times_out() {
         use std::time::Duration;
+
         use tokio::time::Instant;
         let (_tx, rx) = oneshot::channel::<DynAck>();
         let handle = AckHandle::<()>::new(rx);

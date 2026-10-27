@@ -1,91 +1,173 @@
+# Recipe naming:
+# 1. Recipes without a suffix cover Rust and shared justfiles.
+# 2. The -all variants add Python, Oxfmt-managed files, TypeScript, and
+#    Bun-backed E2E tests.
+# 3. A few scoped recipes stay public: install-rustfmt, test-doc, and test-e2e.
+# 4. Private helpers run one tool each. Run one directly, such as
+#    `just _lint-py`, for a targeted run.
+# 5. Aggregate recipes take no arguments; pass arguments to a single-tool
+#    recipe instead.
+#
+# Dependency policy, coverage, and MSRV checks are independent.
+
 [windows]
 set shell := ["pwsh", "-NoLogo", "-NoProfile", "-Command"]
 
 set default-list
 
-quick_start := "cargo run --locked -p quick-start --example quick_start"
+# Example recipes, such as `just examples::quick-start`.
+mod examples
 
-# Run the local merge gate.
-ci: fmt-check lint lint-py lint-js test smoke doc deny
+# rustfmt.toml uses nightly-only options, so formatting pins one nightly.
+# Keep the CI and Zed toolchain pins in sync with this value.
+rustfmt_toolchain := "nightly-2026-07-20"
 
-# Format all sources.
-fmt: fmt-rs fmt-py fmt-js
+# Set up the pinned nightly formatter for basic Rust development.
+[group("installation")]
+install: install-rustfmt
 
-# Format Rust sources and this justfile.
-fmt-rs:
-    cargo fmt --all
-    just --fmt
+# Set up Rust formatting and all JavaScript and Python dependencies.
+[group("installation")]
+install-all: install _install-js _install-py
 
-# Format Python test servers.
-fmt-py:
-    uv run --locked ruff format -q
+# Install Python dependencies and the required Python version.
+_install-py *args:
+    uv sync --quiet --locked {{ args }}
 
-# Format JS, TS, JSON, YAML, and Markdown.
-fmt-js:
-    bunx oxfmt
+# Install JavaScript dependencies from the lockfile.
+_install-js *args:
+    bun install --quiet --frozen-lockfile {{ args }}
 
-# Check formatting of all sources without rewriting them.
-fmt-check: fmt-check-rs fmt-check-py fmt-check-js
+# Install the minimal nightly toolchain with rustfmt.
+[group("installation")]
+install-rustfmt *args:
+    rustup toolchain install "{{ rustfmt_toolchain }}" --profile minimal --component rustfmt {{ args }}
 
-# Check Rust and justfile formatting.
-fmt-check-rs:
-    cargo fmt --all --check
-    just --fmt --check
+# Check Rust and shared justfile formatting, and lint Rust targets.
+[group("checks")]
+[parallel]
+check: (_fmt-cargo "--check") (_fmt-just "--check") lint
 
-# Check Python formatting.
-fmt-check-py:
-    uv run --locked ruff format --check -q
+# Run format, lint, and type checks for every language.
+[group("checks")]
+[parallel]
+check-all: check _check-py _check-js
 
-# Check JS, TS, JSON, YAML, and Markdown formatting.
-fmt-check-js:
-    bunx oxfmt --check
+# Check Python formatting, linting, and types.
+[parallel]
+_check-py: (_fmt-ruff "--check") _lint-py _typecheck-py
+
+# Check Oxfmt-managed files, then lint and type-check the TypeScript servers.
+[parallel]
+_check-js: (_fmt-oxfmt "--check") _lint-js
 
 # Lint libraries, examples, and tests with warnings denied.
-lint:
-    cargo clippy --locked --workspace --all-targets -- -D warnings
+[group("checks")]
+lint *args:
+    cargo clippy --quiet --locked --workspace --all-targets {{ args }} -- -D warnings
 
-# Lint and type-check Python test servers.
-lint-py:
-    uv run --locked ruff check -q
-    uv run --locked pyrefly check --summary=none
+# Lint every language and type-check the Python and TypeScript sources.
+[group("checks")]
+[parallel]
+lint-all: lint _lint-py _typecheck-py _lint-js
 
-# Lint TypeScript test servers with type-aware rules.
-lint-js:
-    bunx oxlint
+# Lint the Python example with warnings treated as errors.
+_lint-py *args:
+    uv run --locked ruff check -q {{ args }}
 
-# Run all targets and documentation examples.
-test:
-    cargo test --locked --workspace --all-targets
-    cargo test --locked --workspace --doc
+# Type-check the Python example; pyrefly warnings fail too.
+_typecheck-py *args:
+    uv run --locked pyrefly check --summary=none --min-severity warn {{ args }}
 
-# Run every smoke test against a real Socket.IO server.
-smoke: smoke-py smoke-js
+# Lint and type-check the TypeScript servers with type-aware rules.
+_lint-js *args:
+    bun run oxlint {{ args }}
 
-# Run the quick-start client against the python-socketio server.
-smoke-py: _build-quick-start
-    uv run --locked python examples/quick-start/server.py --client "{{ quick_start }}"
+# Format Rust sources and shared justfiles.
+[group("formatting")]
+[parallel]
+fmt: _fmt-cargo _fmt-just
 
-# Run the quick-start client against the reference socket.io server.
-smoke-js: _build-quick-start
-    bun examples/quick-start/server.ts --client {{ quick_start }}
+# Format Rust, Python, Oxfmt-managed files, and shared justfiles.
+[group("formatting")]
+[parallel]
+fmt-all: fmt _fmt-ruff _fmt-oxfmt
 
-# Build the client first so the server's startup does not wait on cargo.
-_build-quick-start:
-    cargo build --locked -p quick-start --example quick_start
+_fmt-cargo *args:
+    cargo +{{ rustfmt_toolchain }} fmt --all {{ args }}
 
-# Check documentation with warnings denied.
+_fmt-ruff *args:
+    uv run --locked ruff format -q {{ args }}
+
+_fmt-oxfmt *args:
+    bun run oxfmt {{ args }}
+
+_fmt-just *args:
+    just --fmt {{ args }}
+    just --fmt --justfile examples/justfile {{ args }}
+
+# Run Rust unit and integration tests, then documentation examples.
+[group("tests")]
+test: _test-nextest test-doc
+
+# Run regular Rust and Bun-backed E2E tests in one pass, then doctests.
+[group("tests")]
+test-all: _test-nextest-all test-doc
+
+# Test Rust documentation examples.
+[group("tests")]
+test-doc *args:
+    cargo test --quiet --locked --workspace --doc {{ args }}
+
+# Run the end-to-end tests against the TypeScript reference server.
+[group("tests")]
+test-e2e *args: (_test-nextest "--run-ignored only -E 'binary(e2e)'" args)
+
+# CI runs regular and E2E tests in one pass. Review new ignored tests before
+# adding them, because this helper enables every ignored test.
+_test-nextest-all: (_test-nextest "--run-ignored all")
+
+_test-nextest *args:
+    cargo nextest run --locked --workspace --all-targets {{ args }}
+
+# Build documentation with warnings denied.
+[group("docs")]
+doc *args: (_doc args)
+
+# Build documentation with warnings denied and open it in the browser.
+[group("docs")]
+doc-open *args: (_doc "--open" args)
+
 [env("RUSTDOCFLAGS", "-D warnings")]
-doc:
-    cargo doc --locked --no-deps --workspace --examples
+_doc *args:
+    cargo doc --quiet --locked --no-deps --workspace --examples {{ args }}
+
+# Run the Rust merge gate, including doctests and documentation.
+[group("ci")]
+ci: check test doc
+
+# Run the full-project merge gate, including Bun-backed E2E tests.
+[group("ci")]
+ci-all: check-all test-all doc
 
 # Check dependency advisories, licenses, bans, and sources.
-deny:
-    cargo deny --locked check
+[group("extra")]
+deny *args:
+    cargo deny --locked check --hide-inclusion-graph {{ args }}
 
-# Check the minimum supported compiler; dev targets use stable Rust.
-msrv toolchain="1.88":
-    cargo +{{ toolchain }} check --locked --workspace
+# Check every target with the minimum supported compiler.
+[arg("toolchain", long, help="Rust toolchain to check with")]
+[group("extra")]
+check-msrv toolchain="1.88" *args:
+    cargo +{{ toolchain }} check --locked --workspace --all-targets {{ args }}
 
-# Generate an LCOV report; requires cargo-llvm-cov and llvm-tools-preview.
-coverage:
-    cargo llvm-cov --locked --workspace --all-targets --lcov --output-path lcov.info
+# Generate lcov.info for CI; requires cargo-llvm-cov and llvm-tools-preview.
+[group("extra")]
+coverage *args: (_coverage "--lcov --output-path lcov.info" args)
+
+# Generate an HTML coverage report and open it in the browser.
+[group("extra")]
+coverage-open *args: (_coverage "--open" args)
+
+_coverage *args:
+    cargo llvm-cov nextest --locked --workspace --all-targets {{ args }}

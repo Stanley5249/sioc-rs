@@ -1,0 +1,415 @@
+//! Full queues, stalled receivers, and floods: what the driver waits for and
+//! what it keeps serving meanwhile.
+
+use std::time::Duration;
+
+use bytestring::ByteString;
+use eioc::prelude::{ClientMessage, ServerMessage};
+use tokio::sync::mpsc;
+
+use super::harness::*;
+use crate::config::ChannelConfig;
+use crate::error::SocketError;
+use crate::manager::driver::Manager;
+use crate::manager::state::ManagerCore;
+use crate::manager::tests::rig::{event, event_ack};
+use crate::packet::ServerPacket;
+
+#[tokio::test(start_paused = true)]
+async fn emits_flow_while_receiver_is_full() {
+    let mut manager = TestManager::spawn().await;
+    let (client_packet_tx, mut server_packet_rx) =
+        manager.open_with("/", ByteString::new(), 1).await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    for _ in 0..4 {
+        manager.send_server_message(r#"2["flood"]"#).await;
+    }
+
+    client_packet_tx.send(event(r#"["out"]"#)).await.unwrap();
+    let text = tokio::time::timeout(Duration::from_secs(5), manager.recv_client_text())
+        .await
+        .expect("emit stalled behind a full receiver");
+    assert_eq!(&*text, r#"2["out"]"#);
+
+    assert!(matches!(
+        server_packet_rx.recv().await,
+        Some(ServerPacket::Connect(_))
+    ));
+}
+
+/// The application emits once per server event while the server floods and
+/// every queue holds two items, the deadlock that `44b0c3f` fixed.
+#[tokio::test(start_paused = true)]
+async fn emits_while_handling_a_server_flood() {
+    const FLOOD: usize = 2000;
+
+    let manager = Manager::new(ManagerCore::new(None, fastrand::Rng::new()));
+    let (session_tx, mut session_rx) = mpsc::channel(1);
+    let connect_engine = move || spawn_session(ChannelConfig::from(2), session_tx.clone());
+    let task = tokio::spawn(crate::manager::driver::run(
+        std::sync::Arc::clone(&manager),
+        connect_engine,
+    ));
+    let TestSession {
+        server_message_tx,
+        mut client_message_rx,
+        result_tx,
+    } = session_rx.recv().await.unwrap();
+
+    let (tx, mut rx) = crate::client::connect(
+        &manager,
+        "/".into(),
+        ByteString::new(),
+        ChannelConfig {
+            sender: 2,
+            receiver: 1,
+            ..ChannelConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // The engine reads client messages independently of the server direction.
+    let reader = tokio::spawn(async move {
+        let mut events = 0;
+        while events < FLOOD {
+            match client_message_rx.recv().await {
+                Some(ClientMessage::Text(text)) if text.starts_with('2') => events += 1,
+                Some(_) => {}
+                None => panic!("the manager closed the engine during the flood"),
+            }
+        }
+        client_message_rx
+    });
+    let flooder = tokio::spawn({
+        let server_message_tx = server_message_tx.clone();
+        async move {
+            let connect = ServerMessage::Text(CONNECT_RESPONSE.into());
+            server_message_tx.send(connect).await.unwrap();
+            for _ in 0..FLOOD {
+                let flood = ServerMessage::Text(r#"2["flood"]"#.into());
+                server_message_tx.send(flood).await.unwrap();
+            }
+        }
+    });
+    let app = tokio::spawn(async move {
+        let mut received = 0;
+        while received < FLOOD {
+            match rx.recv().await {
+                Some(ServerPacket::Event(_)) => {
+                    received += 1;
+                    tx.send(event(r#"["reply"]"#)).await.unwrap();
+                }
+                Some(_) => {}
+                None => panic!("the receiver ended during the flood"),
+            }
+        }
+        (tx, rx)
+    });
+
+    let finished = async {
+        flooder.await.unwrap();
+        let client_message_rx = reader.await.unwrap();
+        let handles = app.await.unwrap();
+        (client_message_rx, handles)
+    };
+    let (mut client_message_rx, handles) = tokio::time::timeout(Duration::from_secs(20), finished)
+        .await
+        .expect("emitting while handling a flood never deadlocks");
+
+    drop(handles);
+    manager.with_core(ManagerCore::drop_client);
+    drop(server_message_tx);
+    while client_message_rx.recv().await.is_some() {}
+    result_tx.send(Ok(())).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+/// A full receiver holds one packet, which stops reading the engine. The
+/// engine's hang-up must still close it, so an event emitted afterwards waits
+/// for the next engine instead of going into the session that only drains.
+#[tokio::test(start_paused = true)]
+async fn held_packet_keeps_later_events_for_the_next_engine() {
+    let mut manager = TestManager::spawn_reconnecting().await;
+    let (tx, mut rx) = manager.open_with("/", ByteString::new(), 1).await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    // The Connect packet fills the receiver, so the manager holds this one.
+    manager.send_server_message(r#"2["held"]"#).await;
+
+    let old = manager.session.take().expect("a session is open");
+    drop(old.server_message_tx);
+
+    // The old engine gets nothing more, and closes once the manager lets go.
+    let mut client_message_rx = old.client_message_rx;
+    assert!(client_message_rx.recv().await.is_none());
+    tx.send(event(r#"["late"]"#)).await.unwrap();
+    old.result_tx.send(Ok(())).unwrap();
+
+    tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("the original held packet survives cleanup")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("the original held packet survives cleanup")
+        .unwrap();
+    manager.session = tokio::time::timeout(Duration::from_secs(1), manager.session_rx.recv())
+        .await
+        .expect("the next engine opens after cleanup");
+    assert!(manager.recv_client_text().await.starts_with('0'));
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    assert_eq!(&*manager.recv_client_text().await, r#"2["late"]"#);
+}
+
+/// A held packet stops reading the engine, so the session's end arrives behind
+/// a message the manager has not read. The engine must still be released, and
+/// the next one opened, without the application reading its receiver.
+#[tokio::test(start_paused = true)]
+async fn an_engine_end_behind_unread_messages_needs_no_application_read() {
+    let mut manager = TestManager::spawn_reconnecting().await;
+    let (_tx, mut rx) = manager.open_with("/", ByteString::new(), 1).await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    // The Connect packet fills the receiver, so the manager holds this one.
+    manager.send_server_message(r#"2["held"]"#).await;
+    manager.send_server_message(r#"2["behind"]"#).await;
+    // The paused clock moves only once every task waits, so the manager has
+    // taken what it reads before the session ends behind it.
+    tokio::time::sleep(Duration::from_millis(1)).await;
+
+    let old = manager.session.take().expect("a session is open");
+    drop(old.server_message_tx);
+    let mut client_message_rx = old.client_message_rx;
+    tokio::time::timeout(Duration::from_secs(1), client_message_rx.recv())
+        .await
+        .expect("the manager hangs up the ended engine");
+    old.result_tx.send(Ok(())).unwrap();
+    manager.session = tokio::time::timeout(Duration::from_secs(1), manager.session_rx.recv())
+        .await
+        .expect("the next engine opens");
+
+    // The held packet keeps its receiver, and the overflow behind it is gone.
+    assert!(matches!(rx.recv().await, Some(ServerPacket::Connect(_))));
+    assert!(matches!(rx.recv().await, Some(ServerPacket::Event(_))));
+    assert_eq!(rx.try_recv().unwrap_err(), mpsc::error::TryRecvError::Empty);
+}
+
+/// Behind a held packet, an ended engine's last messages are drained without
+/// the application: an ACK still answers its waiter and the DISCONNECT still
+/// ends the namespace on its own channel. The events that need receiver
+/// capacity, the held one included, end with the namespace.
+#[tokio::test(start_paused = true)]
+async fn an_ended_engine_drains_acks_and_termination_behind_a_held_packet() {
+    let mut manager = TestManager::spawn().await;
+    let (tx, mut rx) = manager.open_with("/", ByteString::new(), 1).await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    let (packet, ack_rx) = event_ack(r#"["ask"]"#);
+    tx.send(packet).await.unwrap();
+    assert_eq!(&*manager.recv_client_text().await, r#"20["ask"]"#);
+    // The Connect packet fills the receiver, so the manager holds this one.
+    manager.send_server_message(r#"2["held"]"#).await;
+    for message in [r#"2["overflow"]"#, r#"30["answer"]"#, "1"] {
+        manager.send_server_message(message).await;
+    }
+    // The paused clock moves only once every task waits, so the manager has
+    // stopped reading before the session ends.
+    tokio::time::sleep(Duration::from_millis(1)).await;
+
+    let old = manager.session.take().expect("a session is open");
+    drop(old.server_message_tx);
+    let mut client_message_rx = old.client_message_rx;
+    tokio::time::timeout(Duration::from_secs(1), client_message_rx.recv())
+        .await
+        .expect("the manager hangs up the ended engine");
+    let ack = tokio::time::timeout(Duration::from_secs(1), ack_rx)
+        .await
+        .expect("the drained ACK answers its waiter")
+        .unwrap();
+    assert_eq!(&*ack.payload, r#"["answer"]"#);
+    old.result_tx.send(Ok(())).unwrap();
+
+    assert!(matches!(rx.recv().await, Some(ServerPacket::Connect(_))));
+    assert!(matches!(rx.recv().await, Some(ServerPacket::Disconnect)));
+    assert!(rx.recv().await.is_none());
+    drop(tx);
+    manager.join().await.unwrap();
+}
+
+/// Every queue holds one item. A receiver the application stops reading holds
+/// up what the server sends to the whole connection, as the README documents,
+/// but the other namespace still emits, and both flow again once it reads.
+#[tokio::test]
+async fn a_stalled_receiver_stops_only_incoming_data() {
+    let mut manager = TestManager::spawn_with_channels(None, ChannelConfig::from(1)).await;
+    let (_a_tx, mut a_rx) = manager.open_with("/a", ByteString::new(), 1).await;
+    let (b_tx, mut b_rx) = manager.open_with("/b", ByteString::new(), 1).await;
+    manager.send_server_message(r#"0/a,{"sid":"a"}"#).await;
+    manager.send_server_message(r#"0/b,{"sid":"b"}"#).await;
+    // `/a` holds its Connect, so this packet waits in the manager.
+    manager.send_server_message(r#"2/a,["held"]"#).await;
+    manager.send_server_message(r#"2/b,["queued"]"#).await;
+
+    b_tx.send(event(r#"["out"]"#)).await.unwrap();
+    assert_eq!(&*manager.recv_client_text().await, r#"2/b,["out"]"#);
+
+    assert!(matches!(b_rx.recv().await, Some(ServerPacket::Connect(_))));
+    assert!(matches!(a_rx.recv().await, Some(ServerPacket::Connect(_))));
+    assert!(matches!(a_rx.recv().await, Some(ServerPacket::Event(_))));
+    assert!(matches!(b_rx.recv().await, Some(ServerPacket::Event(_))));
+}
+
+#[tokio::test(start_paused = true)]
+async fn unconfirmed_namespace_applies_backpressure_and_flushes_in_order() {
+    let mut manager = TestManager::spawn().await;
+    let (tx, mut rx) = manager.open("/").await;
+    for _ in 0..32 {
+        tx.send(event(r#"["queued"]"#)).await.unwrap();
+    }
+    let pending = tx.send(event(r#"["last"]"#));
+    tokio::pin!(pending);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut pending)
+            .await
+            .is_err(),
+        "the unconfirmed buffer must apply backpressure"
+    );
+
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    let receive = async {
+        for _ in 0..32 {
+            assert_eq!(&*manager.recv_client_text().await, r#"2["queued"]"#);
+        }
+        assert_eq!(&*manager.recv_client_text().await, r#"2["last"]"#);
+    };
+    let ((), sent) = tokio::join!(receive, &mut pending);
+    sent.unwrap();
+    assert!(matches!(rx.recv().await, Some(ServerPacket::Connect(_))));
+    tx.disconnect();
+    manager.join().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn full_unconfirmed_buffer_does_not_block_other_namespaces() {
+    let mut manager = TestManager::spawn().await;
+    let (tx, _rx) = manager.open("/").await;
+    for _ in 0..32 {
+        tx.send(event(r#"["queued"]"#)).await.unwrap();
+    }
+    let pending = tx.send(event(r#"["blocked"]"#));
+    tokio::pin!(pending);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut pending)
+            .await
+            .is_err(),
+        "the first namespace must be backpressured"
+    );
+
+    let (other_tx, mut other_rx) = manager.open("/other").await;
+    manager
+        .send_server_message(r#"0/other,{"sid":"other"}"#)
+        .await;
+    other_rx.recv().await.unwrap();
+    other_tx.send(event(r#"["out"]"#)).await.unwrap();
+    assert_eq!(&*manager.recv_client_text().await, r#"2/other,["out"]"#);
+    tx.disconnect();
+    assert!(matches!(pending.await, Err(SocketError::Closed)));
+    other_tx.disconnect();
+    manager.join().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn dropping_last_sender_releases_a_full_unconfirmed_buffer() {
+    let mut manager = TestManager::spawn().await;
+    let (tx, _rx) = manager.open("/").await;
+    for _ in 0..32 {
+        tx.send(event(r#"["queued"]"#)).await.unwrap();
+    }
+    drop(tx);
+    tokio::time::timeout(Duration::from_secs(1), manager.join())
+        .await
+        .expect("dropping the final sender releases buffered work")
+        .unwrap();
+}
+
+/// Lets every task run until all are waiting, which paused time makes the only
+/// way the clock moves.
+async fn settle() {
+    tokio::time::sleep(Duration::from_secs(1)).await;
+}
+
+fn payloads(rx: &mut crate::client::SocketReceiver) -> Vec<String> {
+    let mut payloads = Vec::new();
+    while let Ok(packet) = rx.try_recv() {
+        match packet {
+            ServerPacket::Connect(_) => payloads.push("connect".to_owned()),
+            ServerPacket::Event(event) => payloads.push(event.payload.to_string()),
+            other => panic!("unexpected packet {other:?}"),
+        }
+    }
+    payloads
+}
+
+/// Only `receiver` sizes a namespace's receiver, so with every other capacity
+/// large, exactly `receiver` packets queue and the next one is held.
+#[tokio::test(start_paused = true)]
+async fn the_receiver_capacity_alone_bounds_queued_server_events() {
+    let channels = ChannelConfig {
+        receiver: 2,
+        ..ChannelConfig::from(64)
+    };
+    let mut manager = TestManager::spawn_with_channels(None, channels).await;
+    let (_tx, mut rx) = manager.open_with_channels("/", &channels).await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    for event in ["e1", "e2", "e3", "e4"] {
+        manager
+            .session()
+            .server_message_tx
+            .send(ServerMessage::Text(format!(r#"2["{event}"]"#).into()))
+            .await
+            .unwrap();
+    }
+    settle().await;
+
+    // CONNECT and `e1` fill the queue, and the driver holds `e2`.
+    assert_eq!(payloads(&mut rx), ["connect", r#"["e1"]"#]);
+
+    // The queue drained, so the held `e2` goes in first, and `e3` and `e4`
+    // follow in order.
+    assert!(matches!(rx.recv().await, Some(ServerPacket::Event(e)) if &*e.payload == r#"["e2"]"#));
+    settle().await;
+    assert_eq!(payloads(&mut rx), [r#"["e3"]"#, r#"["e4"]"#]);
+    settle().await;
+    assert_eq!(payloads(&mut rx), Vec::<String>::new());
+}
+
+/// A small `sender` leaves a large `receiver` alone, so every packet queues.
+#[tokio::test(start_paused = true)]
+async fn a_small_sender_capacity_does_not_hold_server_events() {
+    let channels = ChannelConfig {
+        sender: 1,
+        receiver: 8,
+        ..ChannelConfig::from(64)
+    };
+    let mut manager = TestManager::spawn_with_channels(None, channels).await;
+    let (_tx, mut rx) = manager.open_with_channels("/", &channels).await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    for event in ["e1", "e2", "e3", "e4"] {
+        manager
+            .session()
+            .server_message_tx
+            .send(ServerMessage::Text(format!(r#"2["{event}"]"#).into()))
+            .await
+            .unwrap();
+    }
+    settle().await;
+
+    assert_eq!(
+        payloads(&mut rx),
+        [
+            "connect",
+            r#"["e1"]"#,
+            r#"["e2"]"#,
+            r#"["e3"]"#,
+            r#"["e4"]"#
+        ]
+    );
+}
