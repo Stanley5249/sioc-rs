@@ -48,8 +48,9 @@
 //!   replacement.
 //! - Ended handles have a closed capacity, which makes every later call of
 //!   theirs fail or do nothing, so they never touch new handles of the name.
-//! - A reply is accepted only for the connection it captured before waiting for
-//!   capacity, and engine loss discards queued replies and returns unsent
+//! - A reply is accepted only for the connection that delivered its event,
+//!   whose token the event's ack id carries, and only from the handles that own
+//!   that connection. Engine loss discards queued replies and returns unsent
 //!   events to their send buffer.
 //! - A blocked server packet keeps its original receiver and token, and the
 //!   driver reads no engine message until it is delivered or its handles end.

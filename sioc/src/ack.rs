@@ -27,7 +27,7 @@ use tokio::time::Instant;
 
 use crate::binary::AttachmentsBuilder;
 use crate::error::{AckError, PayloadError};
-use crate::marker::{AckType, BinaryMarker, HasBinary, NoBinary};
+use crate::marker::{AckId, AckType, BinaryMarker, HasBinary, NoBinary};
 use crate::packet::{ClientPacket, DynAck};
 use crate::payload::{DeserializePayload, SerializePayload};
 
@@ -42,7 +42,7 @@ where
     /// # Errors
     ///
     /// Returns an error if payload serialization fails.
-    fn into_client_packet(self, id: u64) -> Result<ClientPacket, PayloadError>;
+    fn into_client_packet(self, id: AckId<A>) -> Result<ClientPacket, PayloadError>;
 }
 
 /// A typed inbound acknowledgement with a compile-time binary policy marker.
@@ -91,11 +91,11 @@ impl<A> Acknowledge<A, NoBinary> for A
 where
     A: AckType<Binary = NoBinary> + SerializePayload,
 {
-    fn into_client_packet(self, id: u64) -> Result<ClientPacket, PayloadError> {
+    fn into_client_packet(self, id: AckId<A>) -> Result<ClientPacket, PayloadError> {
         let payload = crate::payload::ack_to_json(&self)?.into();
         Ok(ClientPacket::Ack {
             payload,
-            id,
+            id: id.into_dyn(),
             attachments: None,
         })
     }
@@ -106,12 +106,12 @@ where
     F: FnOnce(&mut AttachmentsBuilder) -> A,
     A: AckType<Binary = HasBinary> + SerializePayload,
 {
-    fn into_client_packet(self, id: u64) -> Result<ClientPacket, PayloadError> {
+    fn into_client_packet(self, id: AckId<A>) -> Result<ClientPacket, PayloadError> {
         let mut builder = AttachmentsBuilder::new();
         let payload = crate::payload::ack_to_json(&self(&mut builder))?.into();
         Ok(ClientPacket::Ack {
             payload,
-            id,
+            id: id.into_dyn(),
             attachments: Some(builder.finish()),
         })
     }
@@ -224,6 +224,7 @@ mod tests {
     use super::*;
     use crate::error::AckError;
     use crate::marker::{AckMarker, HasAck, HasBinary, NoBinary};
+    use crate::packet::DynAckId;
 
     #[derive(Debug, PartialEq)]
     struct BinaryBoolAck(bool);
@@ -309,13 +310,13 @@ mod tests {
     }
     #[test]
     fn send_ack_into_client_packet_binary() {
-        let id = <HasAck<BinaryBoolAck>>::parse(Some(3)).unwrap();
+        let id = <HasAck<BinaryBoolAck>>::parse(Some(DynAckId::new(3))).unwrap();
         let client_packet = Acknowledge::<BinaryBoolAck, HasBinary>::into_client_packet(
             |builder: &mut AttachmentsBuilder| {
                 let _p = builder.attach(Bytes::from_static(b"\xCA\xFE"));
                 BinaryBoolAck(true)
             },
-            id.get(),
+            id,
         )
         .unwrap();
         let ClientPacket::Ack {
@@ -327,7 +328,7 @@ mod tests {
             panic!("expected Ack packet");
         };
         assert_eq!(&payload[..], "[true]");
-        assert_eq!(id, 3);
+        assert_eq!(id.get(), 3);
         let att = attachments.expect("expected attachments");
         assert_eq!(att.len(), 1);
         assert_eq!(att[0], Bytes::from_static(b"\xCA\xFE"));
@@ -345,7 +346,11 @@ mod tests {
 
     #[test]
     fn send_ack_into_client_packet_no_binary() {
-        let client_packet = Acknowledge::<(), NoBinary>::into_client_packet((), 7).unwrap();
+        let client_packet = Acknowledge::<(), NoBinary>::into_client_packet(
+            (),
+            HasAck::parse(Some(DynAckId::new(7))).unwrap(),
+        )
+        .unwrap();
         let ClientPacket::Ack {
             payload,
             id,
@@ -355,7 +360,7 @@ mod tests {
             panic!("expected Ack packet");
         };
         assert_eq!(&payload[..], "[]");
-        assert_eq!(id, 7);
+        assert_eq!(id.get(), 7);
         assert!(attachments.is_none());
     }
 

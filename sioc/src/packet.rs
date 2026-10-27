@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 use thiserror::Error;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 /// Server payload confirming a successful namespace connection.
 #[derive(Debug, Deserialize)]
@@ -43,7 +44,7 @@ pub struct DynEvent {
     /// Raw JSON payload (includes the event name as the first array element).
     pub payload: ByteString,
     /// Ack ID assigned by the sender, if any.
-    pub id: Option<u64>,
+    pub id: Option<DynAckId>,
     /// Reassembled binary attachments, if any.
     pub attachments: Option<Vec<Bytes>>,
 }
@@ -52,8 +53,8 @@ impl std::fmt::Display for DynEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut map = f.debug_map();
         map.entry(&"payload", &format_args!("{}", self.payload));
-        if let Some(id) = self.id {
-            map.entry(&"id", &id);
+        if let Some(id) = &self.id {
+            map.entry(&"id", &id.get());
         }
         if let Some(attachments) = &self.attachments {
             map.entry(&"count", &attachments.len());
@@ -63,14 +64,15 @@ impl std::fmt::Display for DynEvent {
 }
 
 impl DynEvent {
-    /// Creates a `DynEvent` with no attachments.
+    /// Creates a `DynEvent` with no attachments. Its ack id belongs to no
+    /// connection, so a reply to it is always rejected.
     pub fn new<T>(payload: T, id: Option<u64>) -> Self
     where
         T: Into<ByteString>,
     {
         Self {
             payload: payload.into(),
-            id,
+            id: id.map(DynAckId::new),
             attachments: None,
         }
     }
@@ -80,6 +82,58 @@ impl DynEvent {
     pub fn with_attachments(mut self, attachments: Vec<Bytes>) -> Self {
         self.attachments = Some(attachments);
         self
+    }
+}
+
+/// Type-erased ack ID of a received event, which
+/// [`AckMarker::parse`](crate::marker::AckMarker::parse) turns into a typed
+/// [`AckId`](crate::marker::AckId).
+///
+/// It remembers the namespace connection that delivered its event, so a
+/// reply goes only to that connection. A server may count ack ids per
+/// connection, as python-socketio and socketioxide do, so a reply on a later
+/// connection could answer a different request.
+#[derive(Clone)]
+pub struct DynAckId {
+    id: u64,
+    /// The namespace and connection token of the participation that
+    /// delivered the event. `None` for an id made outside the manager, whose
+    /// reply is always rejected.
+    connection: Option<(ByteString, CancellationToken)>,
+}
+
+impl std::fmt::Debug for DynAckId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("DynAckId").field(&self.id).finish()
+    }
+}
+
+impl DynAckId {
+    /// An id that belongs to no connection.
+    pub(crate) fn new(id: u64) -> Self {
+        Self {
+            id,
+            connection: None,
+        }
+    }
+
+    /// Returns the raw wire-level `u64` ID.
+    #[must_use]
+    pub fn get(&self) -> u64 {
+        self.id
+    }
+
+    /// Ties the id to the connection of `ns` that delivers its event.
+    pub(crate) fn bind(&mut self, ns: &ByteString, connection: &CancellationToken) {
+        self.connection = Some((ns.clone(), connection.clone()));
+    }
+
+    /// Returns the delivering connection's token if the event came to `ns`.
+    pub(crate) fn connection(&self, ns: &str) -> Option<&CancellationToken> {
+        self.connection
+            .as_ref()
+            .filter(|(origin, _)| origin == ns)
+            .map(|(_, connection)| connection)
     }
 }
 
@@ -226,8 +280,9 @@ pub enum ClientPacket {
     Ack {
         /// The JSON array of the ack arguments.
         payload: ByteString,
-        /// The ack ID of the event being acknowledged.
-        id: u64,
+        /// The ack ID of the event being acknowledged, which also names the
+        /// connection the reply may go to.
+        id: DynAckId,
         /// Binary attachments, sent as frames after the packet.
         attachments: Option<Vec<Bytes>>,
     },

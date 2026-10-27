@@ -128,7 +128,8 @@ impl SocketSender {
     ///
     /// Returns [`SocketError::AttachmentCount`] if a binary packet has zero or
     /// more than [`MAX_ATTACHMENTS`](crate::binary::MAX_ATTACHMENTS)
-    /// attachments, or [`SocketError::Closed`] once the namespace is closed.
+    /// attachments, or [`SocketError::Closed`] once the namespace is closed
+    /// or, for an ack, once the connection that delivered its event ended.
     pub async fn send(&self, packet: ClientPacket) -> Result<(), SocketError> {
         let SenderShared {
             manager,
@@ -153,31 +154,26 @@ impl SocketSender {
             }
         }
 
-        if matches!(&packet, ClientPacket::Ack { .. }) {
-            // A reply belongs to the current connection, so capture it before
-            // waiting for capacity, and give up when that connection ends.
-            let connection = manager
-                .with_core(|core| core.connection(ns, capacity))
-                .ok_or(SocketError::Closed)?;
-            let Some(connection) = connection else {
-                if closed.is_cancelled() {
-                    return Err(SocketError::Closed);
-                }
-                tracing::debug!("discarded ack for an ended engine");
-                return Ok(());
-            };
-            let slot = tokio::select! {
-                slot = Arc::clone(reply_capacity).acquire_owned() => {
-                    slot.map_err(|_| SocketError::Closed)?
-                }
-                () = connection.cancelled() => {
-                    tracing::debug!("discarded ack for an ended engine");
-                    return Ok(());
-                }
-            };
+        if let ClientPacket::Ack { id, .. } = &packet {
+            // A reply belongs to the connection that delivered its event, and
+            // the core checks that again once it holds a slot.
+            if id
+                .connection(ns)
+                .is_none_or(CancellationToken::is_cancelled)
+            {
+                tracing::debug!(%ns, id = id.get(), "rejected ack for an ended connection");
+                return Err(SocketError::Closed);
+            }
+            // Ending the connection never strands this wait: engine loss
+            // discards the queued replies, which returns their slots, and
+            // ending the handles closes the capacity.
+            let slot = Arc::clone(reply_capacity)
+                .acquire_owned()
+                .await
+                .map_err(|_| SocketError::Closed)?;
             manager
-                .with_core(|core| core.acknowledge(ns, packet, slot, &connection))
-                .ok_or(SocketError::Closed)
+                .with_core(|core| core.acknowledge(ns, packet, slot))
+                .ok_or(SocketError::Closed)?
         } else {
             let slot = Arc::clone(capacity)
                 .acquire_owned()
@@ -219,10 +215,18 @@ impl SocketSender {
 
     /// Acknowledges a received event.
     ///
-    /// Replies use separate bounded capacity for the currently confirmed
-    /// Engine. Replies made while unconfirmed are discarded, and queued
-    /// replies are discarded when that engine ends. They do not survive
-    /// reconnection with events.
+    /// The reply goes only to the namespace connection that delivered the
+    /// event. If that connection has ended, because the Engine.IO session
+    /// dropped, the namespace disconnected, or new handles replaced these,
+    /// the call fails with [`SocketError::Closed`] while the namespace may
+    /// still be open, so a receive loop that propagates this error with `?`
+    /// ends after a reconnection. socket.io-client's ack callback instead
+    /// writes to whatever engine is current, but a server may count ack ids
+    /// per connection, so that reply could answer a different request.
+    ///
+    /// A successful call means the reply was accepted, not delivered. Replies
+    /// use separate bounded capacity, and accepted replies are discarded when
+    /// their engine ends before they leave.
     ///
     /// # Errors
     ///
@@ -234,7 +238,7 @@ impl SocketSender {
         A: AckType,
         B: BinaryMarker,
     {
-        let client_packet = payload.into_client_packet(id.get())?;
+        let client_packet = payload.into_client_packet(id)?;
         self.send(client_packet).await
     }
 

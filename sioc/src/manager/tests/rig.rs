@@ -12,7 +12,7 @@ use crate::error::SocketError;
 use crate::manager::backoff::Backoff;
 use crate::manager::socket::{Auth, Blocked, Handles, Release};
 use crate::manager::state::{ManagerCore, ManagerOutput};
-use crate::packet::{ClientPacket, DynAck, ServerPacket};
+use crate::packet::{ClientPacket, DynAck, DynAckId, ServerPacket};
 
 /// An effect for the engine or the timer.
 #[derive(Debug, PartialEq, Eq)]
@@ -174,18 +174,23 @@ impl Rig {
         self.try_send(ns, packet).expect("the handles are live");
     }
 
+    /// A reply that the core rejects, because the connection that delivered
+    /// its event has ended or never existed.
+    pub fn send_stale(&mut self, ns: &str, packet: ClientPacket) {
+        assert!(matches!(
+            self.try_send(ns, packet),
+            Err(SocketError::Closed)
+        ));
+    }
+
     pub fn try_send(&mut self, ns: &str, packet: ClientPacket) -> Result<(), SocketError> {
         let (capacity, reply_capacity) = self.capacities[ns].clone();
         let ns = ByteString::from(ns);
         if matches!(packet, ClientPacket::Ack { .. }) {
-            let Some(connection) = self.core.connection(&ns, &capacity) else {
-                return Ok(());
-            };
             let slot = reply_capacity
                 .try_acquire_owned()
-                .expect("the rig never fills the reply capacity");
-            self.core.acknowledge(&ns, packet, slot, &connection);
-            Ok(())
+                .map_err(|_| SocketError::Closed)?;
+            self.core.acknowledge(&ns, packet, slot)
         } else {
             let slot = capacity
                 .try_acquire_owned()
@@ -205,6 +210,16 @@ impl Rig {
     pub fn drop_client(&mut self) -> Vec<Effect> {
         self.core.drop_client();
         self.effects()
+    }
+
+    /// The server's ack id `id`, as an event delivered to `ns` now would carry
+    /// it: bound to the confirmed connection, or to none.
+    pub fn ack_id(&self, ns: &str, id: u64) -> DynAckId {
+        let mut ack_id = DynAckId::new(id);
+        if let Some(connection) = self.core.connection(ns) {
+            ack_id.bind(&ns.into(), &connection);
+        }
+        ack_id
     }
 
     /// The engine finishes without an error.
@@ -244,7 +259,7 @@ pub fn event_ack(payload: &'static str) -> (ClientPacket, oneshot::Receiver<DynA
 }
 
 /// An ack the handle sends for the server's event `id`.
-pub fn ack(id: u64) -> ClientPacket {
+pub fn ack(id: DynAckId) -> ClientPacket {
     ClientPacket::Ack {
         payload: ByteString::from_static("[]"),
         id,

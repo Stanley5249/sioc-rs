@@ -31,7 +31,7 @@ use crate::error::{EventError, PayloadError};
 use crate::marker::{
     AckMarker, AckType, BinaryMarker, EventType, HasAck, HasBinary, NoAck, NoBinary,
 };
-use crate::packet::{ClientPacket, DynEvent};
+use crate::packet::{ClientPacket, DynAckId, DynEvent};
 use crate::payload::{DeserializePayload, SerializePayload};
 
 /// Converts a typed event into a [`ClientPacket`] for emission.
@@ -117,7 +117,7 @@ pub trait EventHandler: Sized {
     /// deserialization fails.
     fn handle(
         payload: Self::Payload,
-        id: Option<u64>,
+        id: Option<DynAckId>,
         attachments: Option<Vec<Bytes>>,
     ) -> Result<Self, EventError>;
 }
@@ -139,7 +139,7 @@ where
 
     fn handle(
         payload: Self::Payload,
-        id: Option<u64>,
+        id: Option<DynAckId>,
         attachments: Option<Vec<Bytes>>,
     ) -> Result<Self, EventError> {
         let id = E::Ack::parse(id)?;
@@ -293,7 +293,7 @@ mod tests {
     fn ping_event(id: Option<u64>, attachments: Option<Vec<Bytes>>) -> DynEvent {
         DynEvent {
             payload: bss(r#"["ping"]"#),
-            id,
+            id: id.map(DynAckId::new),
             attachments,
         }
     }
@@ -303,7 +303,7 @@ mod tests {
         let att = vec![Bytes::from_static(b"\xFF")];
         let ev: Event<PingWithAckAndBinary> = DynEvent {
             payload: bss(r#"["ping"]"#),
-            id: Some(1),
+            id: Some(DynAckId::new(1)),
             attachments: Some(att),
         }
         .try_into()
@@ -383,7 +383,7 @@ mod tests {
 
     #[test]
     fn event_handler_handle_bad_ack_fails() {
-        Event::<Ping>::handle(Ping, Some(1), None).unwrap_err();
+        Event::<Ping>::handle(Ping, Some(DynAckId::new(1)), None).unwrap_err();
     }
 
     #[test]
