@@ -270,7 +270,7 @@ async fn the_sender_capacity_bounds_events_before_confirmation() {
     assert!(pin!(tx.send(event())).now_or_never().is_none());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn handshake_timeout_fails_the_attempt() {
     let client = ClientBuilder::new(Url::parse("http://localhost:3000/").unwrap())
         .transport(TransportStrategy::WebSocket)
