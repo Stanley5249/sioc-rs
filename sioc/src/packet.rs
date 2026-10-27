@@ -24,7 +24,7 @@ pub struct Connect {
 #[derive(Debug, Error, Diagnostic, Deserialize)]
 #[error("{message}")]
 #[diagnostic(
-    code(sioc::connect_error),
+    code(sioc::socket::connect_error),
     help(
         "Server rejected the namespace connection. Verify your auth payload and server middleware."
     ),

@@ -15,7 +15,7 @@ use tokio::time::error::Elapsed;
 /// JSON serialization or deserialization failure.
 #[derive(Debug, Error, Diagnostic)]
 #[error("payload error for `{type_name}`: {source}")]
-#[diagnostic(code(sioc::payload))]
+#[diagnostic(code(sioc::payload::json))]
 pub struct PayloadError {
     type_name: &'static str,
     #[source]
