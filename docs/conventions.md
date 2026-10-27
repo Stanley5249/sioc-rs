@@ -1,93 +1,59 @@
 # Conventions
 
-## Design
+Invariants protect correctness, so a change that breaks one needs a new entry in `docs/decisions.md`. Everything else is a default that gives way when a design is simpler, with the reason in the module docs. `docs/decisions.md` holds the incidents behind these rules, and module docs hold how each component applies them.
 
-`mpsc` below refers to `tokio::sync::mpsc`. A component is a unit with its own state and lifecycle, such as the manager, the engine, or a transport.
+## Async invariants
 
-### Invariants
+- **Ownership:** Each piece of mutable state has one owner, such as a task or a synchronous core, and others act through it. Handles may share a core through one mutex when each call applies a whole synchronous transition, no lock spans an await or a user connector, and a panic wakes the driver for shutdown.
+- **Bounded memory:** Every channel the server can fill is bounded. An unbounded channel needs a library limit on its items, stated in a comment on the channel.
+- **Progress:** A full output holds up only the data bound for it, never other inputs, shutdown, or cleanup. A `select!` loop with several data inputs waits for each output, such as a permit or a timer, as its own branch instead of awaiting inside a handler. Every branch future is cancel safe, and a future that must survive, such as an HTTP request in flight, is owned outside the `select!` and polled by reference.
+- **Shutdown:** A component shuts down by dropping its senders and finishes after every input channel returns `None`. A failed send between library components is therefore a bug, and an item is discarded only when its destination has ended or the application dropped its receiver.
+- **Wakeups:** Every wait has a wakeup that its condition triggers, and no two components wait on each other. A channel's end hides behind its unread items, so a reader that can stall under backpressure also watches a signal that ends with the sender, such as a value-less `watch` channel.
+- **Accounting:** A queued item and its permit have one holder until submission or cancellation. A closing participation stays unusable until its old work is gone.
 
-These protect correctness. A change that breaks one needs a new decision in `docs/decisions.md`.
+## Design defaults
 
-- Each piece of mutable state has one owner. The owner can be a task, a future inside a task, or a synchronous core. Handles may share that core through one mutex when each method applies a whole synchronous transition, no lock spans an await or user connector operation, and unwinding wakes the driver for shutdown. Other components act through the owner instead of keeping partial copies of its lifecycle.
-- Use `mpsc::channel` to give every channel fed by the server a bounded capacity. Use `mpsc::unbounded_channel` only if library state limits the number of queued items. Document that limit in a comment on the channel.
-- A `select!` loop that serves more than one data input never awaits inside a handler. The loop waits for each output, such as a channel permit or a timer, as its own branch beside the inputs, so a full queue holds up only the data that needs it. Prove that every branch future is safe to cancel. A future that another branch must not cancel, such as an HTTP request in flight, is owned outside the `select!` and polled by reference. Dropping it on purpose, such as to cancel an opening, is cleanup, not cancellation by a branch. A loop with one data input and a stop signal, such as the WebSocket write loop, may await its write, because only that input waits behind it.
-- Shut down through half-close. A component drops its channel senders with `drop` to initiate shutdown, then waits until `mpsc::Receiver::recv` or `mpsc::UnboundedReceiver::recv` returns `None` for every input channel before finishing. Under this protocol, sends between library components succeed, so treat any send failure as an error. If delivery fails because the caller dropped a receiver, discard the item. Discard an item only when its destination has ended, such as a closed session or namespace.
-- No two components wait on each other in a cycle. The module docs at each channel boundary state why the two sides cannot wait on each other.
-- Every wait has a wakeup that the awaited condition triggers. A channel's end stays hidden behind its unread items, so a reader that may stop reading under backpressure learns of the sender's end from another channel that ends with it, such as a `watch` channel that carries no value. Backpressure may hold up data, but never the lifecycle progress or cleanup of a component.
-- Queued work in a shared core keeps its accepting participation and its permit until submission or cancellation, and a closing participation cannot become reusable while its old work is unowned. Releasing either one early orphaned queued events and let a stalled engine collect unlimited capacity pools.
+- Put protocol rules in a synchronous core that takes and returns plain data when they are worth testing apart from I/O. Concurrency that belongs to one component, such as a transport's requests, may stay in its async code.
+- Run independent I/O directions as separate futures, so a stall in one never holds up the other.
+- Add a task, channel, buffer, lifecycle flag, or manual `poll` only for a responsibility nothing else holds, and say why in a doc comment when it is not obvious.
 
-### Preferences
+## Protocol and naming
 
-These are defaults. Depart from one when the design is simpler, and say why in the module docs. Never add a layer only to satisfy a convention.
-
-- Put protocol rules in a synchronous core that never awaits when their state and branches are worth testing apart from I/O. A core takes and returns plain data. Concurrency that belongs to one component, such as a transport's requests, may stay in that component's async code.
-- Run independent I/O directions, such as a transport's read and write halves, as separate futures, so a stall in one never holds up the other. Join them with `tokio::join!`, or race them with `select!` and then await the other when the first one's end decides what the other does, as the transports do.
-- Inside a component, items waiting in one direction wait in one place. A bounded channel between two components is that boundary's buffer and does not count as a second one.
-- Wait with `select!`, channels, permits, and task handles. A manual `poll`, `poll_fn`, or `Future` implementation needs a reason in its doc comment, such as reading a dynamic set of receivers, because each one has to prove its own wakeups and cancel safety. A `Future` implementation that only forwards to one inner future, such as `AckHandle`, needs no reason.
-- Add a buffer, task, channel, or piece of lifecycle state only for a responsibility that nothing else holds. A forwarding task or extra queue that only replaces manual polling moves the problem instead of removing it.
-
-## JS parity and naming
-
-- Match the observable wire behavior of the JS reference. Internal structure follows Rust ownership and need not mirror the JS objects.
-- A doc comment states what the item is for. Name the JS counterpart when it helps a reader map the item to JS, such as a configuration field, and leave it out otherwise.
-- Four optional tags name common purposes that JS gets for free. `Rust channel` is a channel between tasks where JS calls a method, `Rust bound` is a limit where JS queues are unbounded, `Rust cleanup` is a reclamation step where JS has GC and a synchronous `close`, and `Rust wait` is a wait where JS writes at once. Plain prose works as well.
-- Start from the JS name, adapt it to Rust conventions, and keep it distinct from similar names in std, the dependencies, and this codebase.
-- Name a module after the concept it holds, as the JS files do, rather than after one of its types.
-- Use frame for transport data, packet for a wire unit of either protocol, and message for what Engine.IO carries between the two layers.
-- Engine sessions open and close, and namespaces connect and disconnect. Use shutdown for a component's termination, join for awaiting a task's completion, and drain for consuming the items left in a channel. These are vocabulary conventions, not a list of methods every component must expose.
-- Prefix Engine.IO message and frame types with `Client` or `Server` for the side that produces them, such as `ClientMessage` and `ServerFrame`. Name each channel's sender and receiver after the values the channel carries, such as `client_message_tx`.
+- Match the observable wire behavior of the JS reference. Internal structure follows Rust ownership.
+- Start a name from its JS counterpart and keep it distinct from similar names in std, the dependencies, and this codebase. Mention the JS name in a doc comment when it helps, such as on a configuration field.
+- Use frame for transport data, packet for a wire unit of either protocol, and message for what Engine.IO carries between the layers. Prefix Engine.IO message and frame types with `Client` or `Server` for the side that produces them, and name a channel's ends after what it carries, such as `client_message_tx`.
+- Engine sessions open and close, and namespaces connect and disconnect. Shutdown ends a component, join awaits a task, and drain consumes the items left in a channel.
 
 ## Public API
 
-- Each public item has one public path. Its definition may live in a private module that its public parent re-exports, and `prelude` is the only other re-export. Add no aliases or forwarding modules.
-- Make an item public only for a caller outside the workspace, such as a user, a derive expansion, or an implementation of a public trait. A test in another workspace crate builds its fakes from that crate's own types instead.
-- Use `pub(crate)` for an item that other modules of the crate need but callers outside it must not, such as `PayloadError::new`, instead of moving a type away from its natural module.
-- A diagnostic code names the origin and category of a failure as `crate::component::failure`, with stable conceptual components instead of Rust module paths, such as `sioc::parse`, `eioc::engine`, `eioc::packet`, or `eioc::transport::websocket`. Socket.IO, Engine.IO, and transport failures keep separate components. A transparent wrapper keeps the inner code with `#[diagnostic(transparent)]`, while a wrapper that adds context, or whose source has no code, has its own. Codes are stable identifiers for users, so a refactor never renames them, and only a breaking release fixes one that breaks this shape.
-- Mark every public error enum `#[non_exhaustive]`, because new failure modes come with new features. Mark a configuration type or an endpoint bundle `#[non_exhaustive]` when later releases will likely add fields or variants, and give a struct a constructor with documented defaults so callers can still build it.
-- Keep a type that mirrors a fixed protocol set exhaustive, such as a packet, a message, or the handshake, and so is a type that callers must build with a struct literal, such as `ClientPacket`. Say why in its doc comment when the choice is not obvious.
-- Name a public type by its role. `Config` holds the settings of a subsystem, such as `ChannelConfig` and `ReconnectionConfig`. `Options` holds the parameters of one operation, such as `EngineOptions` for `open`. `Builder` constructs a value step by step, such as `ClientBuilder` and `SocketBuilder`.
+- Each public item has one public path, and `prelude` is the only other re-export. `Result` and `Error` aliases stay out of `prelude` so they do not shadow `std`.
+- Make an item public only for callers outside the workspace, such as users, derive expansions, and implementations of public traits. Use `pub(crate)` for a crate-internal item that belongs in a public type's module, such as `PayloadError::new`.
+- A diagnostic code reads `crate::component::failure` with stable conceptual components, such as `sioc::parse` or `eioc::transport::websocket`. A transparent wrapper keeps the inner code, and a wrapper that adds context has its own. Users match on codes, so only a breaking release renames one.
+- Public error enums are `#[non_exhaustive]`. So is a configuration type or endpoint bundle likely to grow, with a constructor that documents its defaults. A type that mirrors a fixed protocol set, such as a packet, stays exhaustive.
+- `Config` holds a subsystem's settings, `Options` holds one operation's parameters, and `Builder` builds a value step by step.
 
-## Code style
+## Style
 
-- Re-export the public API through `prelude`. Keep `Result` and `Error` aliases outside `prelude` so they do not shadow the corresponding `std` types.
-- Import types and traits by name, or glob-import a `prelude`. To call a function in another module of the same crate, use its full `crate::` path instead of importing that module.
-- For a module with child files, use `<name>/mod.rs` as the module file. Keep that file limited to documentation, `mod` declarations, and public API re-exports.
-- Write each third-party Cargo requirement up to its leftmost nonzero component, such as `"1"` or `"0.7"`, and each Bun requirement as `bun add` writes it, such as `"^1.4.2"`. A wide requirement lets a downstream crate share one compatible version with its other dependencies, and the lockfiles pin exact versions.
+`rustfmt.toml`, Clippy, and the workspace lints cover formatting, imports, and missing docs. Beyond them:
+
+- A `mod.rs` holds only module docs, `mod` declarations, and re-exports.
+- Call a function in another module of the same crate by its `crate::` path instead of importing the module.
+- Write a Cargo requirement to its leftmost nonzero component, such as `"1"` or `"0.7"`, so downstream crates can share a compatible version. The lockfile pins exact versions.
 
 ## Tests
 
-- **Unit tests:** Put them at the bottom of the source file.
-- **Component tests:** Put them in the submodule's `tests.rs`, or in a `tests/` directory with one file for each behavior they protect, such as `ack` or `namespace`, so a reader can find a test without knowing the private types.
-- **End-to-end and derive macro tests:** Put them in `sioc/tests/`.
-
-Split a test file when it holds groups that a reader cannot predict from its name, not when it reaches a size. Keep a helper in the file that uses it, and move it to the component's shared builders or harness once a second file needs it, so each builder has one copy. A harness drives the real core or actor and fakes only what lies outside it, such as an engine or a transport, and never copies its routing, scheduling, or state.
-
-Move tests unchanged before rewriting them, so a review can tell a move from a change. Delete or merge a test only after naming the test that still catches its bug, with the same order and absence checks.
-
-Each test protects a contract and catches a bug you can name. Assert the whole outcome the test controls, including order and the absence of extra outputs, so a regression cannot pass by adding or reordering packets.
-
-Test each behavior at the layer that decides it. Add a test at a higher layer only for what the lower one cannot see.
-
-- **Core tests:** A rule that a synchronous core decides, such as ordering, acks, reconnection, namespace lifecycle, and binary packets, is a plain `#[test]` on that core. It sends inputs and asserts outputs and queries, using builders only. The core tests in `sioc/src/manager/tests/` show the shape.
-- **I/O tests:** Cover what a core cannot see, which is cancel safety, permits and backpressure, hang-up detection, and cleanup that never waits on the application, and the rules of a component without a core, such as a transport. Use a small fake peer, such as the harness in `sioc/src/manager/tests/driver/`, or bare channels for a client handle, as `sioc/src/client/tests/` does.
-- **End-to-end tests:** Check the wiring against the reference servers, one scenario per feature.
-
-Under backpressure, test safety and progress apart. Safety means a full queue loses and reorders nothing, and a core test checks it. Progress means a full queue holds up only the data that needs it, and only an I/O test can check it, as `emits_flow_while_receiver_is_full` does.
-
-Synchronize a test on an explicit event, such as a message, a channel end, or the virtual clock, because a fixed wait fails on a slow machine, and a check that something did not happen still passes when it happens after the wait.
-
-- A test that needs time runs on Tokio's paused clock with `#[tokio::test(start_paused = true)]`.
-- Check that nothing happened in a core test, where an empty output needs no wait.
-- An end-to-end test waits for the server's next event. A real-time timeout there only guards against a hang.
-
-Name a test after its condition and expected behavior, such as `dropping_the_ack_handle_keeps_the_event`. When patches have hidden what a test checks, rewrite the test or its group and keep the guarantees it protected.
+- **Placement:** Unit tests sit at the bottom of their file, component tests in the module's `tests.rs` or a `tests/` directory split by behavior, and end-to-end and derive tests in `sioc/tests/`.
+- **Layers:** Test a rule at the layer that decides it. Core tests are plain `#[test]` cases that feed inputs and assert outputs, as in `sioc/src/manager/tests/`. I/O tests cover what a core cannot see, such as wakeups, cancellation, backpressure progress, and cleanup, using a small fake peer like `sioc/src/manager/tests/driver/`. End-to-end tests check one scenario per feature against the reference servers.
+- **Outcomes:** Each test protects a contract you can name, after which it is named. Assert the whole outcome, including order and the absence of extra outputs.
+- **Time:** Synchronize on an explicit event or Tokio's paused clock, never a fixed wait. A real-time timeout only guards against a hang.
+- **Harnesses:** Fake only what lies outside the code under test, never its routing, scheduling, or state. A helper moves to the shared harness once a second file needs it.
+- **Changes:** Move tests unchanged before rewriting them, and delete a test only after naming the test that still catches its bug.
 
 ## Changes that go together
 
-- A fix or a rejected approach that teaches a lesson: `docs/decisions.md`, in the same commit.
+- A lesson from a fix or a rejected approach: `docs/decisions.md`, in the same commit.
 - A change of structure: the module docs, in the same commit.
 - A public API change: the `README.md` examples and the doc tests.
-- `justfile` or `.github/workflows/ci.yml`: keep their checks equivalent in tool versions, workspace and target selection, lockfile enforcement, warning policies, test filters, and coverage options. Local recipes stay quiet, and CI may print progress.
-- A renamed or removed `justfile` recipe: every reference to it.
-- The rustfmt nightly toolchain version: `justfile`, `.github/workflows/ci.yml`, and `.zed/settings.json`.
+- `justfile` and `.github/workflows/ci.yml`: the same tool versions, targets, lockfile enforcement, warning policy, test filters, and coverage options, with quiet local recipes. A renamed or removed recipe: every reference to it.
+- The rustfmt nightly version: `justfile`, `.github/workflows/ci.yml`, and `.zed/settings.json`.
 - The MSRV: `rust-version` in `Cargo.toml`, the `check-msrv` recipe, and `.github/workflows/ci.yml`.
