@@ -158,10 +158,11 @@ impl EngineCore {
 
     /// Takes the pong to send on a transport permit already in hand.
     pub fn take_pong(&mut self) -> Option<ClientFrame> {
-        let payload = self.pong.take()?;
-        tracing::trace!("sent pong");
+        let frame = ClientFrame::Pong(self.pong.take()?);
+        let (packet, bytes) = frame.summary();
+        tracing::trace!(packet, bytes, "sent packet");
 
-        Some(ClientFrame::Pong(payload))
+        Some(frame)
     }
 
     /// When the session fails if nothing else happens first.

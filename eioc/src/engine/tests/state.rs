@@ -306,9 +306,12 @@ fn logs_name_message_frames_by_type_and_length_without_the_payload() {
     core.on_frame(ServerFrame::Message(payload.into()), now);
     core.on_message(ClientMessage::Text(payload.into()));
     core.on_message(ClientMessage::Binary(Bytes::from_static(b"secret")));
+    core.on_frame(ServerFrame::Ping("probe".into()), now);
+    core.take_pong();
 
     let logs = logs.lock().unwrap().join("\n");
     assert!(!logs.contains("secret"), "{logs}");
     assert!(logs.contains("packet=\"message\" bytes=20"), "{logs}");
     assert!(logs.contains("packet=\"binary\" bytes=6"), "{logs}");
+    assert!(logs.contains("packet=\"pong\" bytes=5"), "{logs}");
 }
