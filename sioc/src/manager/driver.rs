@@ -86,7 +86,10 @@ where
             connect_engine,
         };
         let result = driver.drive().await;
-        driver.shutdown(result.is_err()).await;
+        // `drive` returns only once no engine is left, and dropping the
+        // driver runs its shutdown guard, which ends every socket without
+        // waiting for the application.
+        tracing::debug!("client ended");
         result
     }
 }
@@ -265,25 +268,6 @@ where
             },
         }
         Ok(())
-    }
-
-    /// Releases every resource. After an internal error, ends every socket
-    /// without waiting for the application. Then closes the engine and waits
-    /// for its task, reading what the server still sends, so it never sees a
-    /// failed send.
-    async fn shutdown(mut self, failed: bool) {
-        self.blocked = None;
-        if failed {
-            self.manager.lock().shutdown();
-        }
-        tracing::debug!("client ended");
-        if let Some(mut engine) = self.engine.take() {
-            engine.close(Drain::Discard);
-            while !matches!(engine.next(false, false).await, EngineStep::Closed) {}
-            if let Err(error) = engine.into_result() {
-                tracing::warn!(%error, "engine failed");
-            }
-        }
     }
 }
 

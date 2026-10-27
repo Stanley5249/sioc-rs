@@ -2,17 +2,21 @@
 
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
+use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use bytestring::ByteString;
 use eioc::prelude::TransportStrategy;
+use futures_util::FutureExt;
 use tokio::sync::{Semaphore, mpsc};
 use url::Url;
 
 use crate::client::{Client, ClientBuilder};
 use crate::config::{ChannelConfig, ReconnectionConfig};
 use crate::error::{ClientBuilderError, SocketError};
+use crate::packet::ClientPacket;
 
 #[tokio::test]
 async fn builder_preserves_connection_query_parameters() {
@@ -67,7 +71,11 @@ async fn builder_rejects_zero_channel_capacities() {
             ..ChannelConfig::default()
         },
         ChannelConfig {
-            socket: 0,
+            sender: 0,
+            ..ChannelConfig::default()
+        },
+        ChannelConfig {
+            receiver: 0,
             ..ChannelConfig::default()
         },
     ] {
@@ -236,6 +244,30 @@ async fn debug_output_hides_the_auth_payload() {
     for debug in [format!("{client:?}"), format!("{tx:?}"), format!("{rx:?}")] {
         assert!(!debug.contains("hunter2"), "{debug}");
     }
+}
+
+/// Only `sender` sizes a namespace's send buffer, so the other capacities can
+/// stay large while emits wait for the engine.
+#[tokio::test]
+async fn the_sender_capacity_bounds_events_before_confirmation() {
+    let client = ClientBuilder::new(Url::parse("http://localhost:3000/").unwrap())
+        .transport(TransportStrategy::WebSocket)
+        .websocket_connector(async |_| std::future::pending().await)
+        .channels(ChannelConfig {
+            sender: 1,
+            ..ChannelConfig::default()
+        })
+        .open()
+        .unwrap();
+
+    let (tx, _rx) = client.connect("/").await.unwrap();
+    let event = || ClientPacket::Event {
+        payload: ByteString::from_static(r#"["e"]"#),
+        ack_tx: None,
+        attachments: None,
+    };
+    tx.send(event()).await.unwrap();
+    assert!(pin!(tx.send(event())).now_or_never().is_none());
 }
 
 #[tokio::test]

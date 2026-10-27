@@ -196,7 +196,7 @@ impl SocketSender {
     ///
     /// The event waits in the core until the server confirms the namespace,
     /// also after a reconnection. A semaphore bounds accepted, unsubmitted
-    /// events to [`ChannelConfig::manager`](crate::config::ChannelConfig::manager)
+    /// events to [`ChannelConfig::sender`](crate::config::ChannelConfig::sender)
     /// packets, so emitting awaits space when full. Successful emission means
     /// acceptance, not Engine submission or delivery to the server.
     /// The [`AckHandle`](crate::ack::AckHandle) fails if the Engine.IO session
