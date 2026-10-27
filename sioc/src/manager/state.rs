@@ -1,62 +1,29 @@
 //! The manager's state and its transitions, like socket.io-client's `Manager`
 //! without the engine it owns.
 //!
-//! [`ManagerCore`] never awaits and spawns nothing. It touches the
-//! application's channels only through `try_send`, `oneshot::Sender::send`,
-//! and permits its caller hands in, so plain `#[test]`s drive it.
-//! Engine and namespace transitions remain together because their ordering is
-//! the core's contract; route ownership and wire reconstruction live in
-//! [`super::namespace`] and [`super::decoder`].
+//! [`ManagerCore`] never awaits and spawns nothing. The socket handles call
+//! its transitions directly under the manager's lock, and the driver calls
+//! the rest. It touches the application's channels only through `try_send`,
+//! `oneshot::Sender::send`, semaphores, and permits its caller hands in, so
+//! plain `#[test]`s drive it.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytestring::ByteString;
 use eioc::prelude::{ClientMessage, ServerMessage};
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
-use crate::error::ManagerError;
+use crate::error::{ManagerError, SocketError};
 use crate::manager::backoff::Backoff;
-use crate::manager::connect_request::ConnectRequest;
 use crate::manager::decoder::{Decoded, Decoder};
-use crate::manager::namespace::{Delivery, Namespace, Read};
+use crate::manager::socket::{Blocked, Handles, Queued, Socket, SocketState};
 use crate::packet::{ClientPacket, ServerPacket};
 use crate::parser::packet::{Ns, Packet};
 
-/// One transition for the core, like an event reaching a `Manager` or
-/// `Socket` handler.
-#[derive(Debug)]
-pub enum ManagerInput {
-    /// The application opens a namespace, like `Manager.socket` followed by
-    /// `Socket.connect`.
-    Connect(ConnectRequest),
-    /// A handle's packet that [`ManagerCore::read`] asked for, like
-    /// `Socket.packet`.
-    Packet {
-        /// The namespace the packet belongs to, like `Socket.nsp`.
-        ns: ByteString,
-        /// What the handle sent.
-        packet: ClientPacket,
-    },
-    /// The handles' channel of a namespace ended, like `Socket.disconnect`.
-    Disconnect(ByteString),
-    /// The engine delivered a message, like `Manager.onopen` and `ondata`.
-    /// The caller passes none while [`ManagerCore::held_sender`] is `Some`.
-    Message(ServerMessage),
-    /// Remaining engine messages during reclamation. Rust cleanup: processing
-    /// final control packets must not await an application's full receiver.
-    Drain(ServerMessage),
-    /// The engine finished, like `Manager.onclose`.
-    Closed(Result<(), ManagerError>),
-    /// The reconnection delay is over, like the timer in `Manager.reconnect`.
-    Reconnect,
-    /// The client handle dropped, like `Manager._destroy` once no socket is
-    /// left. The engine closes once no namespace needs it.
-    Release,
-}
-
-/// One effect for the caller, like the `Manager` acting on the engine or a
+/// One effect for the driver, like the `Manager` acting on the engine or a
 /// timer.
 #[derive(Debug)]
 pub enum ManagerOutput {
@@ -64,32 +31,11 @@ pub enum ManagerOutput {
     Open,
     /// Close the running engine, like `engine.close`.
     Close,
-    /// Wait, then pass [`ManagerInput::Reconnect`], like the `setTimeout` in
+    /// Wait, then call [`ManagerCore::reconnect`], like the `setTimeout` in
     /// `Manager.reconnect`.
     Schedule(Duration),
     /// Stop waiting, like clearing that timer in `Manager._destroy`.
     Cancel,
-    /// Read the event input of a namespace that became active, as
-    /// [`ManagerCore::read`] says, and pass its end as
-    /// [`ManagerInput::Disconnect`]. Rust channel: JS handles call the
-    /// `Socket` directly.
-    Listen {
-        /// The namespace the channel belongs to.
-        ns: ByteString,
-        /// Events emitted by the handles, like `Socket.sendBuffer`.
-        client_packet_rx: mpsc::Receiver<ClientPacket>,
-        /// Cancelled once the handles leave or the namespace ends, which turns
-        /// [`Read::Wait`] into [`Read::Discard`].
-        closed: CancellationToken,
-    },
-    /// Installs one confirmed engine's reply input. Rust channel: JS sends
-    /// ACK replies directly rather than buffering them across connections.
-    ListenAcks {
-        /// The connected namespace, like `Socket.nsp`.
-        ns: ByteString,
-        /// Replies for this engine only, discarded when it ends.
-        ack_packet_rx: mpsc::Receiver<ClientPacket>,
-    },
 }
 
 /// Where the engine is, like `Manager._readyState` and `_reconnecting`.
@@ -103,11 +49,11 @@ enum ReadyState {
     Opening,
     /// An engine runs after its handshake, like `"open"`.
     Open,
-    /// An engine runs that no namespace needs. It closes once its write
-    /// buffer empties, like `Manager._destroy` after the last DISCONNECT.
+    /// An engine runs that no socket needs. It closes once its write buffer
+    /// empties, like `Manager._destroy` after the last DISCONNECT.
     Flushing,
     /// The engine was asked to close and its resources are still owned. Rust
-    /// wait: JS `engine.close()` returns immediately; this actor waits for the
+    /// wait: JS `engine.close()` returns immediately; the driver waits for the
     /// engine task and channels to finish before opening a successor.
     Closing {
         /// Whether the next engine waits for the backoff delay, unlike
@@ -123,22 +69,27 @@ enum ReadyState {
 #[derive(Debug)]
 enum Write {
     /// CONNECT with the auth payload, like `Socket.onopen` sending it. Kept
-    /// unencoded, so a namespace that leaves first can take it back.
+    /// unencoded, so a socket that disconnects first can take it back.
     Connect { ns: ByteString, auth: ByteString },
-    /// Any other message, already encoded.
+    /// An event or ACK reply of a socket, like `Socket.packet`. Encoded when
+    /// the engine takes it, so its ack id is assigned in send order.
+    Packet {
+        ns: ByteString,
+        packet: ClientPacket,
+        slot: OwnedSemaphorePermit,
+    },
+    /// The current participation's final packet, still cancellable.
+    Disconnect { ns: ByteString },
+    /// An attachment whose header was already submitted. Namespace termination
+    /// cannot cancel it without breaking Engine stream framing.
     Encoded(ClientMessage),
 }
 
 /// The synchronous core of the manager, like socket.io-client's `Manager`.
-///
-/// One caller applies one [`ManagerInput`] at a time with
-/// [`handle`](Self::handle) and drains [`next_output`](Self::next_output)
-/// after every call. Outgoing messages leave one at a time through
-/// [`next_message`](Self::next_message), each with an engine permit.
 #[derive(Debug)]
 pub struct ManagerCore {
-    /// Every namespace name, like `Manager.nsps`.
-    namespaces: BTreeMap<ByteString, Namespace>,
+    /// Every socket, like `Manager.nsps`.
+    sockets: BTreeMap<ByteString, Socket>,
     /// Where the engine is, like `Manager._readyState`.
     ready_state: ReadyState,
     /// The reconnection delays, like `Manager.backoff`. `None` when
@@ -148,123 +99,277 @@ pub struct ManagerCore {
     rng: fastrand::Rng,
     /// Rebuilds server packets, like `Manager.decoder`.
     decoder: Decoder,
-    /// One server packet whose receiver is full. Rust bound: JS emits
-    /// synchronously.
-    held_packet: Option<Delivery>,
-    /// Messages waiting for the engine, like the engine's `writeBuffer`: the
-    /// CONNECT and DISCONNECT packets and the attachments of the one packet
-    /// in flight. Packets of the handles wait in their channels instead.
+    /// Messages waiting for the engine, like the engine's `writeBuffer`. Each
+    /// packet holds a capacity slot of its socket, so the buffer is bounded
+    /// by the sockets' capacities and their CONNECT and DISCONNECT packets.
     write_buffer: VecDeque<Write>,
-    /// Effects for the caller, drained after every call. Rust wait: the JS
-    /// `Manager` acts at once.
+    /// Effects for the driver. Rust wait: the JS `Manager` acts at once.
     outputs: VecDeque<ManagerOutput>,
+    /// Whether the `Client` handle lives. Rust cleanup: the driver needs a
+    /// completion point for `Client::join`.
+    has_client: bool,
+    /// Set once the driver shut down, so no handle connects again.
+    shut_down: bool,
 }
 
 impl ManagerCore {
-    /// Creates a core with no namespace and asks for the first engine at once,
+    /// Creates a core with no socket and asks for the first engine at once,
     /// like the `Manager` constructor calling `open` with `autoConnect`.
     #[must_use]
     pub fn new(backoff: Option<Backoff>, rng: fastrand::Rng) -> Self {
         let mut core = Self {
-            namespaces: BTreeMap::new(),
+            sockets: BTreeMap::new(),
             ready_state: ReadyState::Closed,
             backoff,
             rng,
             decoder: Decoder::default(),
-            held_packet: None,
             write_buffer: VecDeque::new(),
             outputs: VecDeque::new(),
+            has_client: true,
+            shut_down: false,
         };
         core.open_engine();
         core
     }
 
-    /// Applies one transition, like a `Manager` or `Socket` handler running.
+    /// Takes new handles for `ns`, like `Manager.socket` followed by
+    /// `Socket.connect`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SocketError::NamespaceConflict`] while live handles hold the
+    /// name, or [`SocketError::Closed`] after the driver shut down.
+    pub fn connect(&mut self, ns: ByteString, handles: Handles) -> Result<(), SocketError> {
+        if self.shut_down {
+            return Err(SocketError::Closed);
+        }
+        let socket = self.sockets.entry(ns.clone()).or_default();
+        if !socket.can_connect() {
+            return Err(SocketError::NamespaceConflict { ns });
+        }
+        tracing::debug!(%ns, "namespace opening");
+        // A partial binary packet of the old handles never reaches new ones.
+        self.decoder.disconnect(&ns);
+        let auth = handles.auth.clone();
+        let activated = socket.connect(handles);
+        if activated && self.engine_runs() {
+            self.write_buffer.push_back(Write::Connect { ns, auth });
+        }
+        self.settle();
+        Ok(())
+    }
+
+    /// Accepts an event from the handles that own `slot`, like `Socket.emit`:
+    /// it waits in the send buffer until the server confirms the socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SocketError::Closed`] if those handles have ended.
+    pub fn emit(
+        &mut self,
+        ns: &ByteString,
+        packet: ClientPacket,
+        slot: OwnedSemaphorePermit,
+    ) -> Result<(), SocketError> {
+        let Some(socket) = self.sockets.get_mut(ns) else {
+            return Err(SocketError::Closed);
+        };
+        if let Some(pending) = &mut socket.pending
+            && pending.handles.owns(&slot)
+        {
+            pending.send_buffer.push_back((packet, slot));
+            return Ok(());
+        }
+        match &mut socket.state {
+            SocketState::Connecting {
+                handles,
+                send_buffer,
+            } if handles.owns(&slot) => send_buffer.push_back((packet, slot)),
+            SocketState::Connected { handles, .. } if handles.owns(&slot) => {
+                self.write_buffer.push_back(Write::Packet {
+                    ns: ns.clone(),
+                    packet,
+                    slot,
+                });
+            }
+            _ => return Err(SocketError::Closed),
+        }
+        Ok(())
+    }
+
+    /// Returns the current connection of the handles that own `capacity`, so
+    /// a reply can wait for capacity without outliving that connection.
+    #[must_use]
+    pub fn connection(&self, ns: &str, capacity: &Arc<Semaphore>) -> Option<CancellationToken> {
+        match &self.sockets.get(ns)?.state {
+            SocketState::Connected {
+                handles,
+                connection,
+                ..
+            } if Arc::ptr_eq(&handles.capacity, capacity) => Some(connection.clone()),
+            _ => None,
+        }
+    }
+
+    /// Accepts an ACK reply, like the function `Socket.ack` returns, if the
+    /// connection it answers is still current. Otherwise discards it, like
+    /// writing to a closed engine.
+    pub fn acknowledge(
+        &mut self,
+        ns: &ByteString,
+        packet: ClientPacket,
+        slot: OwnedSemaphorePermit,
+        connection: &CancellationToken,
+    ) {
+        let current = self.sockets.get(ns).is_some_and(|socket| {
+            matches!(&socket.state, SocketState::Connected { handles, .. } if handles.owns(&slot))
+        });
+        if !current || connection.is_cancelled() {
+            tracing::debug!(%ns, "discarded ack for an ended connection");
+            return;
+        }
+        self.write_buffer.push_back(Write::Packet {
+            ns: ns.clone(),
+            packet,
+            slot,
+        });
+    }
+
+    /// Disconnects the handles that own `capacity`, like `Socket.disconnect`.
+    /// A confirmed socket sends its accepted packets, then DISCONNECT. An
+    /// unconfirmed one discards them and takes back its CONNECT. Repeated
+    /// calls and calls from ended handles do nothing.
+    pub fn disconnect(&mut self, ns: &ByteString, capacity: &Arc<Semaphore>) {
+        let Some(socket) = self.sockets.get_mut(ns) else {
+            return;
+        };
+        if socket.disconnect_pending(ns, capacity) {
+            self.release();
+            return;
+        }
+        if !socket.handles().is_some_and(|handles| {
+            Arc::ptr_eq(&handles.capacity, capacity) && !handles.closed.is_cancelled()
+        }) {
+            return;
+        }
+        tracing::debug!(%ns, "client closed");
+        self.decoder.disconnect(ns);
+        if socket.disconnect(ns) {
+            self.write_buffer
+                .push_back(Write::Disconnect { ns: ns.clone() });
+        } else {
+            // The server never heard of the socket, so its CONNECT stays home.
+            self.write_buffer.retain(
+                |write| !matches!(write, Write::Connect { ns: queued, .. } if queued == ns),
+            );
+        }
+        self.release();
+    }
+
+    /// The client handle dropped, like `Manager._destroy` once no socket is
+    /// left. The engine closes once no socket needs it.
+    pub fn drop_client(&mut self) {
+        self.has_client = false;
+        self.release();
+    }
+
+    /// Handles an engine message, like `Manager.onopen` and `ondata`. Returns
+    /// a server packet whose receiver is full, for the driver to deliver.
+    pub fn receive(&mut self, message: ServerMessage) -> Option<Blocked> {
+        if !self.engine_runs() {
+            tracing::debug!("discarded server message for a closing engine");
+            return None;
+        }
+
+        let decoded = match message {
+            ServerMessage::Open(handshake) => {
+                tracing::debug!(sid = %handshake.sid, "engine opened");
+                if self.ready_state == ReadyState::Opening {
+                    self.ready_state = ReadyState::Open;
+                }
+                // The handshake succeeded, so the next drop counts attempts
+                // from zero, like `Manager.onreconnect`.
+                self.reset_backoff();
+                return None;
+            }
+            ServerMessage::Text(text) => self.decoder.add_text(text),
+            ServerMessage::Binary(bytes) => self.decoder.add_binary(bytes),
+        };
+
+        match decoded {
+            Ok(Some(Ns(ns, decoded))) => self.route(&ns, decoded),
+            Ok(None) => None,
+            Err(error) => {
+                // The server's fault, not a library bug, so the client
+                // reconnects.
+                tracing::warn!(%error, "server broke the protocol");
+                self.decoder.reset();
+                self.close_engine(true);
+                None
+            }
+        }
+    }
+
+    /// Handles the end of the engine and picks the next state, like
+    /// `Manager.onclose` and `reconnect`.
     ///
     /// # Errors
     ///
     /// Returns the engine's error if it is internal, which is a library bug.
     /// The caller then calls [`shutdown`](Self::shutdown).
-    ///
-    /// # Panics
-    ///
-    /// Panics if a server message arrives while the core holds a packet, which
-    /// the caller rules out.
-    pub fn handle(&mut self, input: ManagerInput) -> Result<(), ManagerError> {
-        let release = matches!(input, ManagerInput::Disconnect(_) | ManagerInput::Release);
-        match input {
-            ManagerInput::Connect(request) => {
-                let ns = request.ns.clone();
-                tracing::debug!(%ns, "namespace opening");
-                let engine_runs = self.engine_runs();
-                let namespace = self.namespaces.entry(ns.clone()).or_default();
-                if namespace.is_inactive() {
-                    self.decoder.disconnect(&ns);
-                }
-                if let Some(auth) = namespace.open(request)
-                    && engine_runs
-                {
-                    self.write_buffer.push_back(Write::Connect { ns, auth });
-                }
+    pub fn close(&mut self, result: Result<(), ManagerError>) -> Result<(), ManagerError> {
+        let reconnect = match self.ready_state {
+            ReadyState::Opening | ReadyState::Open | ReadyState::Flushing => true,
+            ReadyState::Closing { reconnect } => reconnect,
+            ReadyState::Closed | ReadyState::Reconnecting => {
+                tracing::debug!("ignored close of an engine that is gone");
+                return Ok(());
             }
-            ManagerInput::Packet { ns, packet } => self.send(&ns, packet),
-            ManagerInput::Disconnect(ns) => self.disconnect(&ns),
-            ManagerInput::Message(message) => {
-                assert!(
-                    self.held_packet.is_none(),
-                    "the caller waits for the held delivery before reading more data"
-                );
-                self.message(message);
-            }
-            ManagerInput::Drain(message) => self.message(message),
-            ManagerInput::Closed(result) => {
-                // After an internal error the caller shuts down, so no engine
-                // opens.
-                self.finish_engine(result)?;
-            }
-            ManagerInput::Reconnect => self.reconnect(),
-            ManagerInput::Release => {}
+        };
+
+        tracing::debug!("engine closed");
+        self.ready_state = ReadyState::Closed;
+        self.decoder.reset();
+        self.return_unsent();
+
+        match result {
+            Err(error) if error.is_internal() => return Err(error),
+            Err(error) => tracing::warn!(%error, "engine failed"),
+            Ok(()) => {}
         }
 
-        self.settle();
-        if release {
-            self.release();
+        if reconnect && self.needs_engine() {
+            if let Some(delay) = self.next_delay() {
+                self.ready_state = ReadyState::Reconnecting;
+                self.outputs.push_back(ManagerOutput::Schedule(delay));
+            } else {
+                // The sockets end but the client stays, like the JS `Manager`
+                // and `Socket`s outliving `reconnect_failed`.
+                for (ns, socket) in &mut self.sockets {
+                    socket.shutdown(ns);
+                }
+            }
         }
+        // Without reconnect, a socket that connected meanwhile opens the next
+        // engine at once, like `Socket.connect` calling `Manager.open`.
+        self.settle();
         Ok(())
     }
 
-    /// Takes the next effect, or `None` once the call has none left. Rust
-    /// wait: the JS `Manager` acts at once.
-    pub fn next_output(&mut self) -> Option<ManagerOutput> {
-        self.outputs.pop_front().or_else(|| {
-            self.namespaces.iter_mut().find_map(|(ns, namespace)| {
-                if let Some((client_packet_rx, closed)) = namespace.take_listen() {
-                    return Some(ManagerOutput::Listen {
-                        ns: ns.clone(),
-                        client_packet_rx,
-                        closed,
-                    });
-                }
-                namespace
-                    .take_acks()
-                    .map(|ack_packet_rx| ManagerOutput::ListenAcks {
-                        ns: ns.clone(),
-                        ack_packet_rx,
-                    })
-            })
-        })
+    /// The reconnection delay is over, like the timer in `Manager.reconnect`.
+    pub fn reconnect(&mut self) {
+        if self.ready_state != ReadyState::Reconnecting {
+            tracing::debug!("ignored reconnect with no wait pending");
+            return;
+        }
+        // `release` cancels the wait once no socket needs an engine.
+        debug_assert!(self.needs_engine(), "a pending wait has a socket");
+        self.open_engine();
     }
 
-    /// Returns what the caller does with the next packet of `ns`, given
-    /// whether it holds an engine permit, like `Socket.emitBuffered` running
-    /// once connected. A packet goes out only when nothing waits before it,
-    /// so the write buffer holds the messages of one packet at most.
-    #[must_use]
-    pub fn read(&self, ns: &str, has_permit: bool) -> Read {
-        let engine_ready = has_permit && self.engine_writes() && self.write_buffer.is_empty();
-        self.namespaces
-            .get(ns)
-            .map_or(Read::Discard, |namespace| namespace.read(engine_ready))
+    /// Takes the next effect, or `None` once there is none left.
+    pub fn next_output(&mut self) -> Option<ManagerOutput> {
+        self.outputs.pop_front()
     }
 
     /// Returns whether a message waits for an engine permit, like a nonempty
@@ -274,7 +379,10 @@ impl ManagerCore {
         self.engine_writes() && !self.write_buffer.is_empty()
     }
 
-    /// Takes one message for the engine, like `engine.write`.
+    /// Takes one message for the engine, like `engine.write`. The caller holds
+    /// the permit it goes out on. An event registers its ack waiter now, so an
+    /// engine's end fails exactly the waiters of events it took, and a
+    /// binary packet's attachments go next, before anything else.
     pub fn next_message(&mut self) -> Option<ClientMessage> {
         if !self.engine_writes() {
             return None;
@@ -282,61 +390,62 @@ impl ManagerCore {
         let message = match self.write_buffer.pop_front()? {
             Write::Connect { ns, auth } => encode(&ns, &Packet::Connect(auth)),
             Write::Encoded(message) => message,
+            Write::Disconnect { ns } => {
+                let socket = self.sockets.get_mut(&ns).expect("DISCONNECT has an owner");
+                socket.end(&ns, None);
+                if let Some(auth) = socket.activate_pending() {
+                    self.decoder.disconnect(&ns);
+                    self.write_buffer.push_back(Write::Connect {
+                        ns: ns.clone(),
+                        auth,
+                    });
+                }
+                encode(&ns, &Packet::Disconnect)
+            }
+            Write::Packet { ns, packet, slot } => {
+                let socket = self
+                    .sockets
+                    .get_mut(&ns)
+                    .expect("a queued packet belongs to a socket");
+                assert!(
+                    socket.handles().is_some_and(|handles| handles.owns(&slot)),
+                    "queued packets keep their accepting participation until submission"
+                );
+                let (packet, attachments) = wire_packet(socket, packet);
+                tracing::trace!(%ns, %packet, "sent packet");
+                for attachment in attachments.into_iter().flatten().rev() {
+                    self.write_buffer
+                        .push_front(Write::Encoded(ClientMessage::Binary(attachment)));
+                }
+                // The engine owns the packet now, so its handles may queue
+                // another one.
+                drop(slot);
+                encode(&ns, &packet)
+            }
         };
+        self.release();
         self.finish_flushing();
         Some(message)
     }
 
-    /// Returns a sender to reserve a slot on while the core holds a server
-    /// packet for a full receiver. Rust bound: JS emits synchronously.
-    #[must_use]
-    pub fn held_sender(&self) -> Option<mpsc::Sender<ServerPacket>> {
-        self.held_packet
-            .as_ref()
-            .map(|delivery| delivery.sender.clone())
-    }
-
-    /// Sends the held packet through the reserved slot, or discards it if the
-    /// receiver dropped or the namespace ended first.
-    pub fn deliver_held(
-        &mut self,
-        permit: Result<mpsc::OwnedPermit<ServerPacket>, mpsc::error::SendError<()>>,
-    ) {
-        let Some(Delivery {
-            ns, packet, closed, ..
-        }) = self.held_packet.take()
-        else {
-            return;
-        };
-        if let Ok(permit) = permit
-            && !closed.is_cancelled()
-        {
-            permit.send(packet);
-        } else {
-            tracing::debug!(%ns, "discarded server packet for a dropped receiver");
-        }
-    }
-
-    /// Ends every namespace without waiting for the application, after an
-    /// internal error. The caller then closes the engine itself. Rust cleanup:
-    /// task termination must close handles that the application still owns.
+    /// Ends every socket without waiting for the application, after an
+    /// internal error. The caller then closes the engine itself.
     pub fn shutdown(&mut self) {
-        for namespace in self.namespaces.values_mut() {
-            namespace.shutdown();
+        for (ns, socket) in &mut self.sockets {
+            socket.shutdown(ns);
         }
-        self.held_packet = None;
         self.write_buffer.clear();
         self.decoder.reset();
         self.ready_state = ReadyState::Closed;
+        self.shut_down = true;
     }
 
-    /// Returns whether every namespace is inactive and no engine runs. Rust
-    /// wait: the actor needs a completion point for `Client::join`; the JS
-    /// manager is an event emitter rather than a joinable task.
+    /// Returns whether the client handle and every socket are gone and no
+    /// engine runs. Rust wait: the driver needs a completion point for
+    /// `Client::join`.
     #[must_use]
-    pub fn is_idle(&self) -> bool {
-        self.ready_state == ReadyState::Closed
-            && self.namespaces.values().all(Namespace::is_inactive)
+    pub fn is_finished(&self) -> bool {
+        !self.has_client && self.ready_state == ReadyState::Closed && !self.needs_engine()
     }
 
     fn engine_runs(&self) -> bool {
@@ -352,131 +461,104 @@ impl ManagerCore {
     }
 
     fn needs_engine(&self) -> bool {
-        self.namespaces.values().any(Namespace::is_active)
+        self.sockets.values().any(Socket::needs_engine)
     }
 
-    /// Encodes a packet the caller read, like `Socket.packet` calling
-    /// `Manager._packet`. The header leaves on the permit the caller holds;
-    /// attachments follow before any other message.
-    fn send(&mut self, ns: &ByteString, packet: ClientPacket) {
-        let engine_writes = self.engine_writes();
-        let Some(namespace) = self
-            .namespaces
-            .get_mut(ns)
-            .filter(|namespace| namespace.is_connected() && engine_writes)
-        else {
-            // The namespace or its handles are gone, so nothing sends it.
-            tracing::debug!(%ns, "discarded client packet for a closed namespace");
-            return;
+    /// Routes one decoded server packet, like `Socket.onpacket`.
+    fn route(&mut self, ns: &ByteString, decoded: Decoded) -> Option<Blocked> {
+        let Some(socket) = self.sockets.get_mut(ns) else {
+            tracing::debug!(%ns, "discarded server packet for an unknown namespace");
+            return None;
         };
 
-        let (packet, attachments) = match packet {
-            ClientPacket::Event {
-                payload,
-                ack_tx,
-                attachments,
-            } => {
-                let id = ack_tx.map(|ack_tx| namespace.register_ack(ack_tx));
-                let packet = match &attachments {
-                    None => Packet::Event { payload, id },
-                    Some(attachments) => Packet::BinaryEvent {
-                        payload,
-                        id,
-                        count: attachments.len(),
-                    },
-                };
-                (packet, attachments)
+        let packet = match decoded {
+            Decoded::Ack { id, ack } => {
+                socket.receive_ack(ns, id, ack);
+                return None;
             }
-            ClientPacket::Ack {
-                payload,
-                id,
-                attachments,
-            } => {
-                let packet = match &attachments {
-                    None => Packet::Ack { payload, id },
-                    Some(attachments) => Packet::BinaryAck {
-                        payload,
-                        id,
-                        count: attachments.len(),
-                    },
-                };
-                (packet, attachments)
-            }
+            Decoded::Packet(packet) => packet,
         };
 
-        tracing::trace!(%ns, %packet, "sent packet");
-        self.write_buffer
-            .push_back(Write::Encoded(encode(ns, &packet)));
-        let attachments = attachments.into_iter().flatten();
-        self.write_buffer.extend(
-            attachments.map(|attachment| Write::Encoded(ClientMessage::Binary(attachment))),
-        );
-    }
-
-    fn disconnect(&mut self, ns: &ByteString) {
-        tracing::debug!(%ns, "client closed");
-        self.decoder.disconnect(ns);
-        let namespace = self
-            .namespaces
-            .get_mut(ns)
-            .expect("a channel only exists for a namespace with an entry");
-
-        if namespace.disconnect() {
-            self.write_buffer
-                .push_back(Write::Encoded(encode(ns, &Packet::Disconnect)));
-        } else {
-            // The server never heard of the namespace, so its CONNECT stays
-            // home.
-            self.write_buffer.retain(
-                |write| !matches!(write, Write::Connect { ns: queued, .. } if queued == ns),
-            );
-        }
-    }
-
-    /// Runs after every transition: drops a held packet whose namespace ended,
-    /// gives an engine to namespaces that need one, and queues CONNECT for
-    /// namespaces that became active, like `Socket.connect`.
-    fn settle(&mut self) {
-        if let Some(delivery) = &self.held_packet
-            && delivery.closed.is_cancelled()
-        {
-            tracing::debug!(ns = %delivery.ns, "discarded held server packet for a closed namespace");
-            self.held_packet = None;
-        }
-
-        // Reopening is a core transition after old delivery cleanup, never a
-        // side effect of a namespace cleanup helper.
-        let engine_runs = self.engine_runs();
-        for (ns, namespace) in &mut self.namespaces {
-            if let Some(request) = namespace.take_reopen() {
+        match &packet {
+            ServerPacket::Connect(connect) => {
+                tracing::debug!(%ns, sid = %connect.sid, "connected");
+                let send_buffer = socket.receive_connect();
+                self.write_buffer
+                    .extend(send_buffer.into_iter().map(|(packet, slot)| Write::Packet {
+                        ns: ns.clone(),
+                        packet,
+                        slot,
+                    }));
+            }
+            ServerPacket::Disconnect | ServerPacket::ConnectError(_) => {
+                tracing::debug!(%ns, %packet, "namespace ended by the server");
+                // The server refused the socket or left it, so both end it
+                // without sending what its handles queued.
+                self.write_buffer.retain(|write| match write {
+                    Write::Connect { ns: owner, .. }
+                    | Write::Packet { ns: owner, .. }
+                    | Write::Disconnect { ns: owner } => owner != ns,
+                    Write::Encoded(_) => true,
+                });
                 self.decoder.disconnect(ns);
-                if let Some(auth) = namespace.open(request)
-                    && engine_runs
-                {
+                socket.end(ns, Some(packet));
+                if let Some(auth) = socket.activate_pending() {
                     self.write_buffer.push_back(Write::Connect {
                         ns: ns.clone(),
                         auth,
                     });
                 }
+                self.settle();
+                self.release();
+                return None;
             }
+            ServerPacket::Event(_) => {}
         }
 
-        if self.needs_engine() {
-            match self.ready_state {
-                ReadyState::Closed => {
-                    self.reset_backoff();
-                    self.open_engine();
-                }
-                ReadyState::Flushing => self.ready_state = ReadyState::Open,
-                ReadyState::Opening
-                | ReadyState::Open
-                | ReadyState::Closing { .. }
-                | ReadyState::Reconnecting => {}
+        socket.deliver(ns, packet)
+    }
+
+    /// Puts the unsent events of each confirmed socket back into its send
+    /// buffer and discards the rest of the write buffer, like `Socket.onclose`
+    /// keeping `sendBuffer`. Replies never outlive their engine.
+    fn return_unsent(&mut self) {
+        let mut unsent: BTreeMap<ByteString, VecDeque<Queued>> = BTreeMap::new();
+        for write in std::mem::take(&mut self.write_buffer) {
+            let Write::Packet { ns, packet, slot } = write else {
+                continue;
+            };
+            let current = self.sockets.get(&ns).is_some_and(|socket| {
+                matches!(&socket.state, SocketState::Connected { handles, .. } if handles.owns(&slot))
+            });
+            if current && matches!(packet, ClientPacket::Event { .. }) {
+                unsent.entry(ns).or_default().push_back((packet, slot));
             }
+        }
+        for (ns, socket) in &mut self.sockets {
+            socket.close_connection(ns, unsent.remove(ns).unwrap_or_default());
         }
     }
 
-    /// Lets the engine go once no namespace needs it, like `Manager._destroy`:
+    /// Runs after every transition that can need an engine: gives an engine
+    /// to sockets that need one.
+    fn settle(&mut self) {
+        if !self.needs_engine() {
+            return;
+        }
+        match self.ready_state {
+            ReadyState::Closed => {
+                self.reset_backoff();
+                self.open_engine();
+            }
+            ReadyState::Flushing => self.ready_state = ReadyState::Open,
+            ReadyState::Opening
+            | ReadyState::Open
+            | ReadyState::Closing { .. }
+            | ReadyState::Reconnecting => {}
+        }
+    }
+
+    /// Lets the engine go once no socket needs it, like `Manager._destroy`:
     /// a pending wait stops, and a running engine closes after its write
     /// buffer empties.
     fn release(&mut self) {
@@ -495,7 +577,8 @@ impl ManagerCore {
                 self.ready_state = ReadyState::Closed;
                 self.outputs.push_back(ManagerOutput::Cancel);
             }
-            ReadyState::Closed | ReadyState::Flushing | ReadyState::Closing { .. } => {}
+            ReadyState::Flushing => self.finish_flushing(),
+            ReadyState::Closed | ReadyState::Closing { .. } => {}
         }
     }
 
@@ -511,7 +594,7 @@ impl ManagerCore {
         self.outputs.push_back(ManagerOutput::Close);
     }
 
-    /// Asks for an engine, with CONNECT queued for every active namespace so
+    /// Asks for an engine, with CONNECT queued for every connecting socket so
     /// they go out first once it opens, like `Manager.open` followed by
     /// `Socket.onopen`.
     fn open_engine(&mut self) {
@@ -519,11 +602,11 @@ impl ManagerCore {
         self.ready_state = ReadyState::Opening;
         self.outputs.push_back(ManagerOutput::Open);
 
-        for (ns, namespace) in &self.namespaces {
-            if let Some(auth) = namespace.auth() {
+        for (ns, socket) in &self.sockets {
+            if let Some(handles) = socket.handles() {
                 self.write_buffer.push_back(Write::Connect {
                     ns: ns.clone(),
-                    auth: auth.clone(),
+                    auth: handles.auth.clone(),
                 });
             }
         }
@@ -533,126 +616,6 @@ impl ManagerCore {
         if let Some(backoff) = &mut self.backoff {
             backoff.reset();
         }
-    }
-
-    fn message(&mut self, message: ServerMessage) {
-        if !self.engine_runs() {
-            tracing::debug!("discarded server message for a closing engine");
-            return;
-        }
-
-        let decoded = match message {
-            ServerMessage::Open(handshake) => {
-                tracing::debug!(sid = %handshake.sid, "engine opened");
-                if self.ready_state == ReadyState::Opening {
-                    self.ready_state = ReadyState::Open;
-                }
-                // The handshake succeeded, so the next drop counts attempts
-                // from zero, like `Manager.onreconnect`.
-                self.reset_backoff();
-                return;
-            }
-            ServerMessage::Text(text) => self.decoder.add_text(text),
-            ServerMessage::Binary(bytes) => self.decoder.add_binary(bytes),
-        };
-
-        match decoded {
-            Ok(Some(Ns(ns, decoded))) => self.receive(&ns, decoded),
-            Ok(None) => {}
-            Err(error) => {
-                // The server's fault, not a library bug, so the client
-                // reconnects.
-                tracing::warn!(%error, "server broke the protocol");
-                self.decoder.reset();
-                self.close_engine(true);
-            }
-        }
-    }
-
-    /// Routes one decoded server packet, like `Socket.onpacket`.
-    fn receive(&mut self, ns: &ByteString, decoded: Decoded) {
-        let Some(namespace) = self.namespaces.get_mut(ns) else {
-            tracing::debug!(%ns, "discarded server packet for an unknown namespace");
-            return;
-        };
-
-        let packet = match decoded {
-            Decoded::Ack { id, ack } => return namespace.resolve_ack(ns, id, ack),
-            Decoded::Packet(packet) => packet,
-        };
-
-        match &packet {
-            ServerPacket::Connect(connect) => {
-                tracing::debug!(%ns, sid = %connect.sid, "connected");
-                namespace.confirm();
-            }
-            ServerPacket::Disconnect | ServerPacket::ConnectError(_) => {
-                tracing::debug!(%ns, %packet, "namespace ended by the server");
-                // The server refused the namespace or left it, so both end it.
-                namespace.end(ns, Some(packet));
-                return;
-            }
-            ServerPacket::Event(_) => {}
-        }
-
-        if let Some(delivery) = namespace.deliver(ns, packet) {
-            if self.held_packet.is_none() {
-                tracing::debug!(%ns, "holding server packet for a full receiver");
-                self.held_packet = Some(delivery);
-            } else {
-                // Only Drain inputs can reach a full receiver while another
-                // packet is held. Keep that original delivery, and reclaim
-                // later overflow without waiting for the application.
-                tracing::debug!(%ns, "discarded overflow during engine cleanup");
-            }
-        }
-    }
-
-    /// Handles the end of the engine and picks the next state, like
-    /// `Manager.onclose` and `reconnect`.
-    fn finish_engine(&mut self, result: Result<(), ManagerError>) -> Result<(), ManagerError> {
-        let reconnect = match self.ready_state {
-            ReadyState::Opening | ReadyState::Open | ReadyState::Flushing => true,
-            ReadyState::Closing { reconnect } => reconnect,
-            ReadyState::Closed | ReadyState::Reconnecting => {
-                tracing::debug!("ignored close of an engine that is gone");
-                return Ok(());
-            }
-        };
-
-        tracing::debug!("engine closed");
-        self.ready_state = ReadyState::Closed;
-        self.decoder.reset();
-        self.write_buffer.clear();
-        for (ns, namespace) in &mut self.namespaces {
-            namespace.engine_closed(ns);
-        }
-
-        match result {
-            Err(error) if error.is_internal() => return Err(error),
-            Err(error) => tracing::warn!(%error, "engine failed"),
-            Ok(()) => {}
-        }
-
-        // Without reconnect, `settle` opens the next engine at once for a
-        // namespace that opened meanwhile, like `Socket.connect` calling
-        // `Manager.open`. Without a namespace, wait for the next one, like
-        // `Manager._destroy`.
-        if !reconnect || !self.needs_engine() {
-            return Ok(());
-        }
-
-        if let Some(delay) = self.next_delay() {
-            self.ready_state = ReadyState::Reconnecting;
-            self.outputs.push_back(ManagerOutput::Schedule(delay));
-        } else {
-            // The namespaces end but the client stays, like the JS `Manager`
-            // and `Socket`s outliving `reconnect_failed`.
-            for (ns, namespace) in &mut self.namespaces {
-                namespace.end(ns, None);
-            }
-        }
-        Ok(())
     }
 
     /// Counts an attempt and returns its delay, or `None` if reconnection is
@@ -670,15 +633,43 @@ impl ManagerCore {
         }
         delay
     }
+}
 
-    fn reconnect(&mut self) {
-        if self.ready_state != ReadyState::Reconnecting {
-            tracing::debug!("ignored reconnect with no wait pending");
-            return;
+/// Builds the wire packet for a socket's packet, like `Socket.packet`, and
+/// assigns an event's ack id. Returns the attachments that follow it.
+fn wire_packet(socket: &mut Socket, packet: ClientPacket) -> (Packet, Option<Vec<bytes::Bytes>>) {
+    match packet {
+        ClientPacket::Event {
+            payload,
+            ack_tx,
+            attachments,
+        } => {
+            let id = ack_tx.map(|ack_tx| socket.add_ack(ack_tx));
+            let packet = match &attachments {
+                None => Packet::Event { payload, id },
+                Some(attachments) => Packet::BinaryEvent {
+                    payload,
+                    id,
+                    count: attachments.len(),
+                },
+            };
+            (packet, attachments)
         }
-        // `release` cancels the wait once no namespace needs an engine.
-        debug_assert!(self.needs_engine(), "a pending wait has a namespace");
-        self.open_engine();
+        ClientPacket::Ack {
+            payload,
+            id,
+            attachments,
+        } => {
+            let packet = match &attachments {
+                None => Packet::Ack { payload, id },
+                Some(attachments) => Packet::BinaryAck {
+                    payload,
+                    id,
+                    count: attachments.len(),
+                },
+            };
+            (packet, attachments)
+        }
     }
 }
 

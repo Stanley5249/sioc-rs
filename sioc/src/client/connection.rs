@@ -1,13 +1,13 @@
 //! Connection setup and manager lifecycle, like socket.io-client's `Manager`.
 //! The builder and client stay together so opening transfers the owned task
-//! and request channel directly into a handle with private fields.
+//! and shared manager directly into a handle with private fields.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytestring::ByteString;
 use eioc::engine::EngineOptions;
 use eioc::prelude::{TransportStrategy, WebSocketConnector};
-use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use url::Url;
 
@@ -15,7 +15,8 @@ use crate::client::{SocketReceiver, SocketSender};
 use crate::config::{ChannelConfig, ReconnectionConfig};
 use crate::error::{ClientBuilderError, ClientError, ManagerError, SocketError};
 use crate::manager::backoff::Backoff;
-use crate::manager::connect_request::ConnectRequest;
+use crate::manager::driver::Manager;
+use crate::manager::state::ManagerCore;
 
 /// Connection options, like socket.io-client's `Manager` options.
 /// The builder creates a [`Client`] and its manager task.
@@ -209,7 +210,7 @@ where
             url.query_pairs_mut().extend_pairs(self.url.query_pairs());
         }
 
-        let (connect_request_tx, connect_request_rx) = mpsc::channel(channels.manager);
+        let manager = Manager::new(ManagerCore::new(backoff, fastrand::Rng::new()));
 
         // Each engine gets its own connector.
         let connect_engine = move || {
@@ -224,14 +225,13 @@ where
             eioc::engine::open(options).into()
         };
 
-        let task = tokio::spawn(crate::manager::actor::run(
-            connect_request_rx,
+        let task = tokio::spawn(crate::manager::driver::run(
+            Arc::clone(&manager),
             connect_engine,
-            backoff,
         ));
 
         Ok(Client {
-            connect_request_tx,
+            handle: ClientHandle(manager),
             task,
             channels: self.channels,
         })
@@ -239,12 +239,22 @@ where
 }
 
 /// A Socket.IO manager handle, like socket.io-client's `Manager`.
-/// Rust channel: namespace requests reach its one task through this handle.
 #[derive(Debug)]
 pub struct Client {
-    connect_request_tx: mpsc::Sender<ConnectRequest>,
+    handle: ClientHandle,
     task: JoinHandle<Result<(), ManagerError>>,
     channels: ChannelConfig,
+}
+
+/// Tells the manager that the client handle is gone once it drops, so the
+/// manager ends with its last socket. Rust cleanup.
+#[derive(Debug)]
+struct ClientHandle(Arc<Manager>);
+
+impl Drop for ClientHandle {
+    fn drop(&mut self) {
+        self.0.with_core(ManagerCore::drop_client);
+    }
 }
 
 impl Client {
@@ -275,6 +285,11 @@ impl Client {
     ///
     /// Returns [`SocketError::NamespaceConflict`] if the namespace is already
     /// open, or [`SocketError::Closed`] if the client has ended.
+    #[expect(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "the public API stays async, although the manager now accepts a namespace synchronously"
+    )]
     pub async fn connect_with<S, B>(
         &self,
         ns: S,
@@ -284,21 +299,13 @@ impl Client {
         S: Into<ByteString>,
         B: Into<ByteString>,
     {
-        let (connect_request, handles) = ConnectRequest::new(
+        crate::client::connect(
+            &self.handle.0,
             ns.into(),
             payload.into(),
             self.channels.manager,
             self.channels.socket,
-        );
-
-        self.connect_request_tx
-            .send(connect_request)
-            .await
-            .map_err(|_| SocketError::Closed)?;
-
-        let (tx, rx, reply_rx) = handles.into_socket();
-        reply_rx.await.map_err(|_| SocketError::Closed)??;
-        Ok((tx, rx))
+        )
     }
 
     /// Drops the client handle and waits for the client to end.
@@ -314,8 +321,9 @@ impl Client {
     /// Call this method to collect those errors; dropping the handle detaches
     /// the task, which continues while namespace senders remain alive.
     pub async fn join(self) -> Result<(), ClientError> {
-        drop(self.connect_request_tx);
-        self.task.await??;
+        let Self { handle, task, .. } = self;
+        drop(handle);
+        task.await??;
         Ok(())
     }
 }

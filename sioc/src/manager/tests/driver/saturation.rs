@@ -1,4 +1,4 @@
-//! Full queues, stalled receivers, and floods: what the actor waits for and
+//! Full queues, stalled receivers, and floods: what the driver waits for and
 //! what it keeps serving meanwhile.
 
 use std::time::Duration;
@@ -10,7 +10,8 @@ use tokio::sync::mpsc;
 use super::harness::*;
 use crate::config::ChannelConfig;
 use crate::error::SocketError;
-use crate::manager::connect_request::ConnectRequest;
+use crate::manager::driver::Manager;
+use crate::manager::state::ManagerCore;
 use crate::manager::tests::rig::{event, event_ack};
 use crate::packet::ServerPacket;
 
@@ -42,13 +43,12 @@ async fn emits_flow_while_receiver_is_full() {
 async fn emits_while_handling_a_server_flood() {
     const FLOOD: usize = 2000;
 
-    let (connect_request_tx, connect_request_rx) = mpsc::channel(4);
+    let manager = Manager::new(ManagerCore::new(None, fastrand::Rng::new()));
     let (session_tx, mut session_rx) = mpsc::channel(1);
     let connect_engine = move || spawn_session(ChannelConfig::from(2), session_tx.clone());
-    let task = tokio::spawn(crate::manager::actor::run(
-        connect_request_rx,
+    let task = tokio::spawn(crate::manager::driver::run(
+        std::sync::Arc::clone(&manager),
         connect_engine,
-        None,
     ));
     let TestSession {
         server_message_tx,
@@ -56,10 +56,8 @@ async fn emits_while_handling_a_server_flood() {
         result_tx,
     } = session_rx.recv().await.unwrap();
 
-    let (connect_request, handles) = ConnectRequest::new("/".into(), ByteString::new(), 2, 1);
-    connect_request_tx.send(connect_request).await.unwrap();
-    let (tx, mut rx, reply_rx) = handles.into_socket();
-    reply_rx.await.unwrap().unwrap();
+    let (tx, mut rx) =
+        crate::client::connect(&manager, "/".into(), ByteString::new(), 2, 1).unwrap();
 
     // The engine reads client messages independently of the server direction.
     let reader = tokio::spawn(async move {
@@ -110,7 +108,7 @@ async fn emits_while_handling_a_server_flood() {
         .expect("emitting while handling a flood never deadlocks");
 
     drop(handles);
-    drop(connect_request_tx);
+    manager.with_core(ManagerCore::drop_client);
     drop(server_message_tx);
     while client_message_rx.recv().await.is_some() {}
     result_tx.send(Ok(())).unwrap();

@@ -1,4 +1,4 @@
-//! How the actor ends: the client handle and namespaces leaving, internal
+//! How the driver ends: the client handle and namespaces leaving, internal
 //! errors, and an aborted task, none of which waits on the application.
 
 use std::time::Duration;
@@ -8,20 +8,15 @@ use eioc::prelude::ClientMessage;
 
 use super::harness::*;
 use crate::error::{ManagerError, SocketError};
-use crate::manager::connect_request::ConnectRequest;
 use crate::manager::tests::rig::event;
 use crate::packet::ServerPacket;
 
 #[tokio::test]
 async fn closes_when_client_handle_drops_with_no_namespace() {
-    let TestManager {
-        connect_request_tx,
-        session,
-        task,
-        ..
-    } = TestManager::spawn().await;
+    let manager = TestManager::spawn().await;
+    manager.drop_client();
+    let TestManager { session, task, .. } = manager;
     let mut session = session.unwrap();
-    drop(connect_request_tx);
     assert!(session.client_message_rx.recv().await.is_none());
     session.close().await;
     task.await.unwrap().unwrap();
@@ -33,14 +28,9 @@ async fn closes_after_client_handle_and_last_namespace_drop() {
     let (client_packet_tx, mut server_packet_rx) = manager.open("/").await;
     manager.send_server_message(CONNECT_RESPONSE).await;
     server_packet_rx.recv().await.unwrap();
-    let TestManager {
-        connect_request_tx,
-        session,
-        task,
-        ..
-    } = manager;
+    manager.drop_client();
+    let TestManager { session, task, .. } = manager;
     let mut session = session.unwrap();
-    drop(connect_request_tx);
 
     drop(client_packet_tx);
     assert!(matches!(
@@ -56,23 +46,21 @@ async fn closes_after_client_handle_and_last_namespace_drop() {
 /// client ends with instead of a closed channel.
 #[tokio::test]
 async fn an_engine_that_stops_reading_ends_the_client_with_its_error() {
-    let TestManager {
-        connect_request_tx,
-        session,
-        session_rx: _session_rx,
-        task,
-    } = TestManager::spawn().await;
+    let mut manager = TestManager::spawn().await;
     let TestSession {
         server_message_tx,
         client_message_rx,
         result_tx,
-    } = session.unwrap();
+    } = manager.session.take().unwrap();
     drop(client_message_rx);
-    let (connect_request, handles) = ConnectRequest::new("/".into(), ByteString::new(), 1, 1);
-    connect_request_tx.send(connect_request).await.unwrap();
-    // The namespace opens before its CONNECT fails, so the reply succeeds and
-    // the client ends with the error.
-    handles.reply_rx.await.unwrap().unwrap();
+    // The namespace connects before its CONNECT fails, so the client ends
+    // with the error.
+    let _handles = manager.connect("/", ByteString::new(), 1).unwrap();
+    let TestManager {
+        task,
+        session_rx: _session_rx,
+        ..
+    } = manager;
 
     drop(server_message_tx);
     result_tx
@@ -161,12 +149,7 @@ async fn no_session_reopens_without_namespaces_until_one_opens() {
     let reopened = tokio::time::timeout(Duration::from_secs(3600), manager.session_rx.recv()).await;
     assert!(reopened.is_err(), "no namespace needs a new session");
 
-    let (connect_request, _handles) = ConnectRequest::new("/".into(), ByteString::new(), 32, 32);
-    manager
-        .connect_request_tx
-        .send(connect_request)
-        .await
-        .unwrap();
+    let _handles = manager.connect("/", ByteString::new(), 32).unwrap();
     let reopened = tokio::time::timeout(Duration::from_secs(1), manager.session_rx.recv()).await;
     assert!(matches!(reopened, Ok(Some(_))));
 }

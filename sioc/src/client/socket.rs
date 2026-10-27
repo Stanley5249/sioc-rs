@@ -1,72 +1,102 @@
 //! Namespace I/O, like the send and receive directions of socket.io-client's
-//! `Socket`. Both handles and their channel handoff stay together so endpoint
-//! fields and construction remain private.
+//! `Socket`. Both handles stay together so their fields and construction
+//! remain private.
 
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, oneshot, watch};
-use tokio_util::sync::{CancellationToken, DropGuard};
+use bytestring::ByteString;
+use tokio::sync::{Semaphore, mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 use crate::ack::Acknowledge;
 use crate::error::SocketError;
 use crate::event::Emit;
-use crate::manager::connect_request::ConnectHandles;
+use crate::manager::driver::Manager;
+use crate::manager::socket::Handles;
 use crate::marker::{AckId, AckMarker, AckType, BinaryMarker};
 use crate::packet::{ClientPacket, DynEvent, ServerPacket};
 
-impl ConnectHandles {
-    /// Converts the manager's channel ends into the public namespace handles.
-    pub fn into_socket(
-        self,
-    ) -> (
-        SocketSender,
-        SocketReceiver,
-        oneshot::Receiver<Result<(), SocketError>>,
-    ) {
-        (
-            SocketSender::with_ack_channel(self.client_packet_tx, self.closed, self.ack_route_rx),
-            SocketReceiver {
-                server_packet_rx: self.server_packet_rx,
-                terminal_packet_rx: Some(self.terminal_packet_rx),
-            },
-            self.reply_rx,
-        )
-    }
-}
-
 /// Sender for a Socket.IO namespace, like `Socket.emit` and `Socket.ack`.
-/// Rust channel: sends packets to the manager task.
+/// Each call runs one transition of the shared manager core.
 ///
 /// Clone it to emit from several tasks: clones share the namespace.
 /// Disconnecting any clone closes all of them, and dropping the last clone
 /// also disconnects the namespace.
 #[derive(Clone, Debug)]
 pub struct SocketSender {
-    /// Carries packets to the manager task, which encodes and sends them.
-    client_packet_tx: mpsc::Sender<ClientPacket>,
-    /// The confirmed engine's bounded reply input. Rust channel: JS
-    /// `Socket.ack` writes at once and discards replies while unconfirmed.
-    ack_route_rx: watch::Receiver<Option<mpsc::Sender<ClientPacket>>>,
+    shared: Arc<SenderShared>,
+}
+
+/// What every clone of one [`SocketSender`] shares. Dropping the last clone
+/// disconnects the namespace.
+#[derive(Debug)]
+struct SenderShared {
+    manager: Arc<Manager>,
+    ns: ByteString,
+    /// The namespace's event capacity, which the manager closes when the
+    /// namespace ends, and which identifies these handles. Rust bound.
+    capacity: Arc<Semaphore>,
+    /// The namespace's ACK reply capacity. Rust bound.
+    reply_capacity: Arc<Semaphore>,
     closed: CancellationToken,
-    // Last-handle drop also wakes a namespace whose send buffer is full.
-    _closed: Arc<DropGuard>,
+}
+
+impl Drop for SenderShared {
+    fn drop(&mut self) {
+        self.manager
+            .with_core(|core| core.disconnect(&self.ns, &self.capacity));
+    }
+}
+
+/// Opens `ns` on `manager` and returns its handles, like `Manager.socket`
+/// followed by `Socket.connect`. `capacity` bounds the queued events and,
+/// separately, the queued replies, and `server_capacity` the receiver.
+///
+/// # Errors
+///
+/// Returns [`SocketError::NamespaceConflict`] while live handles hold the
+/// name, or [`SocketError::Closed`] once the manager has ended.
+pub(crate) fn connect(
+    manager: &Arc<Manager>,
+    ns: ByteString,
+    auth: ByteString,
+    capacity: usize,
+    server_capacity: usize,
+) -> Result<(SocketSender, SocketReceiver), SocketError> {
+    let capacity = Arc::new(Semaphore::new(capacity));
+    let reply_capacity = Arc::new(Semaphore::new(capacity.available_permits()));
+    let closed = CancellationToken::new();
+    let (server_packet_tx, server_packet_rx) = mpsc::channel(server_capacity);
+    let (terminal_packet_tx, terminal_packet_rx) = oneshot::channel();
+    let handles = Handles {
+        auth,
+        capacity: Arc::clone(&capacity),
+        reply_capacity: Arc::clone(&reply_capacity),
+        closed: closed.clone(),
+        server_packet_tx,
+        terminal_packet_tx,
+    };
+    manager
+        .with_core(|core| core.connect(ns.clone(), handles))
+        .ok_or(SocketError::Closed)??;
+
+    let sender = SocketSender {
+        shared: Arc::new(SenderShared {
+            manager: Arc::clone(manager),
+            ns,
+            capacity,
+            reply_capacity,
+            closed,
+        }),
+    };
+    let receiver = SocketReceiver {
+        server_packet_rx,
+        terminal_packet_rx: Some(terminal_packet_rx),
+    };
+    Ok((sender, receiver))
 }
 
 impl SocketSender {
-    /// Wraps the event input, current ACK route, and shared close token.
-    fn with_ack_channel(
-        client_packet_tx: mpsc::Sender<ClientPacket>,
-        closed: CancellationToken,
-        ack_route_rx: watch::Receiver<Option<mpsc::Sender<ClientPacket>>>,
-    ) -> Self {
-        Self {
-            client_packet_tx,
-            ack_route_rx,
-            _closed: Arc::new(closed.clone().drop_guard()),
-            closed,
-        }
-    }
-
     /// Sends one raw client packet; [`emit`](Self::emit) and
     /// [`acknowledge`](Self::acknowledge) build theirs and call this.
     ///
@@ -76,7 +106,14 @@ impl SocketSender {
     /// more than [`MAX_ATTACHMENTS`](crate::binary::MAX_ATTACHMENTS)
     /// attachments, or [`SocketError::Closed`] once the namespace is closed.
     pub async fn send(&self, packet: ClientPacket) -> Result<(), SocketError> {
-        if self.closed.is_cancelled() {
+        let SenderShared {
+            manager,
+            ns,
+            capacity,
+            reply_capacity,
+            closed,
+        } = &*self.shared;
+        if closed.is_cancelled() {
             return Err(SocketError::Closed);
         }
 
@@ -93,23 +130,38 @@ impl SocketSender {
         }
 
         if matches!(&packet, ClientPacket::Ack { .. }) {
-            // Capture the route before waiting for capacity. A queued or
-            // blocked reply stays with that engine, never its successor.
-            let sender = self.ack_route_rx.borrow().clone();
-            if let Some(sender) = sender
-                && sender.send(packet).await.is_err()
-            {
-                if self.closed.is_cancelled() || self.client_packet_tx.is_closed() {
+            // A reply belongs to the current connection, so capture it before
+            // waiting for capacity, and give up when that connection ends.
+            let connection = manager
+                .with_core(|core| core.connection(ns, capacity))
+                .ok_or(SocketError::Closed)?;
+            let Some(connection) = connection else {
+                if closed.is_cancelled() {
                     return Err(SocketError::Closed);
                 }
                 tracing::debug!("discarded ack for an ended engine");
-            }
-            Ok(())
+                return Ok(());
+            };
+            let slot = tokio::select! {
+                slot = Arc::clone(reply_capacity).acquire_owned() => {
+                    slot.map_err(|_| SocketError::Closed)?
+                }
+                () = connection.cancelled() => {
+                    tracing::debug!("discarded ack for an ended engine");
+                    return Ok(());
+                }
+            };
+            manager
+                .with_core(|core| core.acknowledge(ns, packet, slot, &connection))
+                .ok_or(SocketError::Closed)
         } else {
-            self.client_packet_tx
-                .send(packet)
+            let slot = Arc::clone(capacity)
+                .acquire_owned()
                 .await
-                .map_err(|_| SocketError::Closed)
+                .map_err(|_| SocketError::Closed)?;
+            manager
+                .with_core(|core| core.emit(ns, packet, slot))
+                .ok_or(SocketError::Closed)?
         }
     }
 }
@@ -118,13 +170,13 @@ impl SocketSender {
     /// Emits an event; returns `()` or an [`AckHandle`](crate::ack::AckHandle)
     /// depending on the ack policy.
     ///
-    /// The event waits in the namespace's channel until the server confirms
-    /// the namespace, also after a reconnection. The channel holds
-    /// [`ChannelConfig::manager`](crate::config::ChannelConfig::manager)
-    /// packets, so emitting awaits space when it is full.
-    /// The [`AckHandle`](crate::ack::AckHandle) fails if the
-    /// Engine.IO session drops after the event went out, like
-    /// socket.io-client's `Socket._clearAcks`.
+    /// The event waits in the core until the server confirms the namespace,
+    /// also after a reconnection. A semaphore bounds accepted, unsubmitted
+    /// events to [`ChannelConfig::manager`](crate::config::ChannelConfig::manager)
+    /// packets, so emitting awaits space when full. Successful emission means
+    /// acceptance, not Engine submission or delivery to the server.
+    /// The [`AckHandle`](crate::ack::AckHandle) fails if the Engine.IO session
+    /// drops after submission, like socket.io-client's `Socket._clearAcks`.
     ///
     /// # Errors
     ///
@@ -143,9 +195,10 @@ impl SocketSender {
 
     /// Acknowledges a received event.
     ///
-    /// Replies use the currently confirmed engine's bounded channel. Replies
-    /// made while unconfirmed are discarded, and queued replies are discarded
-    /// when that engine ends. They do not survive reconnection with events.
+    /// Replies use separate bounded capacity for the currently confirmed
+    /// Engine. Replies made while unconfirmed are discarded, and queued
+    /// replies are discarded when that engine ends. They do not survive
+    /// reconnection with events.
     ///
     /// # Errors
     ///
@@ -164,22 +217,32 @@ impl SocketSender {
     /// Disconnects the namespace for every clone.
     ///
     /// Once the server has confirmed the namespace, events and acks sent
-    /// before the call still go out, followed by a DISCONNECT packet. Before
-    /// that, buffered events are discarded and no DISCONNECT goes out, because
-    /// socket.io-client's `Socket.disconnect` sends one only to a connected
-    /// namespace. Later sends fail with [`SocketError::Closed`].
-    /// Calling it after the namespace has closed, by either side, does
-    /// nothing.
+    /// before the call are submitted to Engine in order, then DISCONNECT.
+    /// Server termination or Engine loss cancels the remaining local flush.
+    /// Before confirmation, buffered events are discarded and no DISCONNECT
+    /// goes out, because socket.io-client's `Socket.disconnect` sends one
+    /// only to a connected namespace. Later sends fail with
+    /// [`SocketError::Closed`]. Calling it after the namespace has closed,
+    /// by either side, does nothing.
     pub fn disconnect(&self) {
-        self.closed.cancel();
+        let SenderShared {
+            manager,
+            ns,
+            capacity,
+            closed,
+            ..
+        } = &*self.shared;
+        manager.with_core(|core| core.disconnect(ns, capacity));
+        // The manager cancels it too, unless a panic already ended it.
+        closed.cancel();
     }
 
     /// Waits until the namespace closes, by either side, or the client ends.
     ///
     /// Resolves as soon as the namespace stops accepting packets, which can be
-    /// before its DISCONNECT packet reaches the server.
+    /// before its DISCONNECT packet is submitted to Engine.
     pub async fn closed(&self) {
-        self.closed.cancelled().await;
+        self.shared.closed.cancelled().await;
     }
 }
 

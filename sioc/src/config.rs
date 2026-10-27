@@ -23,11 +23,11 @@ pub struct ChannelConfig {
     pub engine: usize,
     /// Transport channel: encoded frames to send to the transport.
     pub transport: usize,
-    /// Manager channels: messages from the engine, new namespaces, and each
-    /// namespace's event inbox and confirmed engine's ACK reply inbox. The
-    /// event inbox retains emits before confirmation and across reconnect;
-    /// the separate reply inbox is discarded when its engine ends. Each has
-    /// this capacity.
+    /// Manager capacities: the channel of messages from the engine, and for
+    /// each namespace the events and, separately, the ACK replies that the
+    /// manager holds for the engine. Events wait before confirmation and
+    /// across reconnect, and replies are discarded when their engine ends.
+    /// Each has this capacity.
     pub manager: usize,
     /// Per-namespace inbox: server packets delivered to each
     /// [`SocketReceiver`](crate::client::SocketReceiver), plus one separate
