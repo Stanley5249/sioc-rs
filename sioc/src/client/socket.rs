@@ -283,12 +283,33 @@ impl SocketSender {
 /// Rust channel: receives packets from the manager task.
 ///
 /// Read it continuously: bounded queues apply backpressure to the server.
-/// A stalled consumer can delay heartbeat responses until the server times out.
 ///
-/// Every namespace of a [`Client`](crate::client::Client) shares one
-/// connection, as with one socket.io-client `Manager`, so a stalled receiver
-/// also holds up the other namespaces of that client. Open a separate
-/// [`Client`](crate::client::Client) for a namespace that
+/// # Backpressure
+///
+/// Rust bound: socket.io-client runs handlers as packets arrive and has no
+/// limit. Here, once this receiver holds
+/// [`ChannelConfig::receiver`](crate::config::ChannelConfig::receiver)
+/// packets, the client holds the next one and reads nothing else from the
+/// connection until this receiver takes it. Nothing is lost while the
+/// Engine.IO session lives, but meanwhile:
+///
+/// - Every namespace of the same [`Client`](crate::client::Client) waits,
+///   because they share one connection, as with one socket.io-client `Manager`.
+///   That includes their events, the server's acks for their emits, CONNECT
+///   confirmations, and server `DISCONNECT` or `CONNECT_ERROR`. While this
+///   namespace's own `DISCONNECT` waits, [`SocketSender::closed`] stays pending
+///   and emits still go out, which the socket.io server answers by closing the
+///   whole connection.
+/// - Heartbeat answers stop once the queues behind the held packet fill. A
+///   receiver left unread for a whole ping window, 45 seconds with the server's
+///   defaults, ends the session for every namespace, and the cycle repeats
+///   after each reconnection while it stays unread.
+/// - When a session has ended, the client drains it without waiting for the
+///   application. Events that then find this receiver full are discarded,
+///   including the held one, even if the server's `DISCONNECT` for this
+///   namespace follows them. socket.io-client would have delivered them.
+///
+/// Open a separate [`Client`](crate::client::Client) for a namespace that
 /// must stay independent, like socket.io-client's `multiplex: false`.
 ///
 /// # Items and reconnection

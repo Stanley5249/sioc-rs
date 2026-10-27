@@ -47,6 +47,9 @@ Each section covers one area or component. A rejected approach records why it fa
 - Server packets for a closed namespace are discarded. Treating them as errors failed the whole client, because the server may still send them after the client left.
 - DISCONNECT and ACK go out only for a namespace the server confirmed to the current engine, and each engine gets new channels. The socket.io server closes the whole connection on any other packet for a namespace it has not joined, so a stale packet from an earlier engine killed the new one.
 - Events emitted before confirmation wait in a bounded buffer. The unbounded buffer let an unconfirmed namespace grow without limit.
+- A full receiver holds one packet and stops all reading from the connection, which is lossless and bounded but gives no namespace isolation. Ending only the overflowing namespace loses data on any burst larger than the receiver, and holding one packet per namespace only delays the stall, so isolation waits for a hold deadline that would end a namespace stalled past it.
+- When an ended session drains, events that find a full receiver are discarded, including the held one, even ahead of that namespace's server DISCONNECT. Keeping only the held event would still lose the overflow behind it, and keeping all of it needs an unbounded queue or a cleanup that waits for the application.
+- Server termination cancels a namespace's unsent events. socket.io-client still sends packets already in the engine's write buffer, and the socket.io server answers a packet for a namespace it left by closing the whole connection.
 
 ## Acks
 
