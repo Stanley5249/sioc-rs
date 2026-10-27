@@ -56,8 +56,9 @@ async fn emits_while_handling_a_server_flood() {
         result_tx,
     } = session_rx.recv().await.unwrap();
 
-    let (tx, mut rx) =
-        crate::client::connect(&manager, "/".into(), ByteString::new(), 2, 1).unwrap();
+    let (tx, mut rx) = crate::client::connect(&manager, "/".into(), ByteString::new(), 2, 1)
+        .await
+        .unwrap();
 
     // The engine reads client messages independently of the server direction.
     let reader = tokio::spawn(async move {

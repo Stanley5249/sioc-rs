@@ -334,9 +334,56 @@ mod tests {
     #[test]
     fn dropping_an_unpolled_driver_closes_its_handles() {
         let manager = Manager::new(ManagerCore::new(None, fastrand::Rng::new()));
-        let (tx, _rx) = crate::client::connect(&manager, "/".into(), "{}".into(), 1, 1).unwrap();
+        let (tx, _rx) = crate::client::connect(&manager, "/".into(), "{}".into(), 1, 1)
+            .now_or_never()
+            .unwrap()
+            .unwrap();
         let driver = run(Arc::clone(&manager), || panic!("driver must not be polled"));
         drop(driver);
         assert!(tx.closed().now_or_never().is_some());
+    }
+
+    #[tokio::test]
+    async fn the_shutdown_guard_wakes_a_waiting_connect_after_a_panicked_transition() {
+        let manager = Manager::new(ManagerCore::new(None, fastrand::Rng::new()));
+        let (tx, _rx) = crate::client::connect(&manager, "/".into(), "{}".into(), 1, 1)
+            .now_or_never()
+            .unwrap()
+            .unwrap();
+        manager.with_core(|core| {
+            core.receive(eioc::prelude::ServerMessage::Open(
+                eioc::prelude::Handshake {
+                    sid: "engine".into(),
+                    upgrades: Vec::new(),
+                    ping_interval: 25_000,
+                    ping_timeout: 20_000,
+                    max_payload: 1_000_000,
+                },
+            ));
+            core.next_message();
+            core.receive(eioc::prelude::ServerMessage::Text(r#"0{"sid":"s"}"#.into()));
+        });
+        tx.disconnect();
+        let mut waiting = Box::pin(crate::client::connect(
+            &manager,
+            "/".into(),
+            "{}".into(),
+            1,
+            1,
+        ));
+        assert!(waiting.as_mut().now_or_never().is_none());
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                manager.with_core(|_| panic!("transition failed"));
+            }))
+            .is_err()
+        );
+        drop(run(Arc::clone(&manager), || {
+            panic!("driver must not be polled")
+        }));
+        assert!(matches!(
+            waiting.await,
+            Err(crate::error::SocketError::Closed)
+        ));
     }
 }

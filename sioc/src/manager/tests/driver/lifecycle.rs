@@ -165,6 +165,7 @@ async fn aborting_the_manager_ends_the_handles() {
     manager.task.abort();
     assert!(manager.task.await.unwrap_err().is_cancelled());
     assert!(rx.recv().await.is_none());
+    tx.closed().await;
     assert!(matches!(
         tx.send(event(r#"["after"]"#)).await,
         Err(SocketError::Closed)

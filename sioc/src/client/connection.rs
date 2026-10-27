@@ -263,15 +263,13 @@ impl Client {
         ClientBuilder::new(url)
     }
 
-    /// Opens a namespace and returns a sender/receiver pair.
-    ///
-    /// The namespace is not confirmed until a
-    /// [`ServerPacket::Connect`](crate::packet::ServerPacket::Connect) arrives
-    /// on the [`SocketReceiver`].
+    /// Opens a namespace and returns a sender/receiver pair, like
+    /// socket.io-client's `Manager.socket` followed by `Socket.connect`.
+    /// See [`connect_with`](Self::connect_with).
     ///
     /// # Errors
     ///
-    /// Returns an error if the client has ended.
+    /// Returns any error from [`connect_with`](Self::connect_with).
     pub async fn connect<S>(&self, ns: S) -> Result<(SocketSender, SocketReceiver), SocketError>
     where
         S: Into<ByteString>,
@@ -281,15 +279,29 @@ impl Client {
 
     /// Opens a namespace with a connection payload.
     ///
+    /// Returns once the new handles own the namespace, not once the server
+    /// confirms it. Confirmation arrives as a
+    /// [`ServerPacket::Connect`](crate::packet::ServerPacket::Connect) on the
+    /// [`SocketReceiver`], and events emitted before it wait in the bounded
+    /// send buffer.
+    ///
+    /// If earlier handles of the namespace disconnected and still flush their
+    /// accepted packets and DISCONNECT, waits until that flush is submitted to
+    /// Engine or cancelled, so the new CONNECT follows their DISCONNECT. Rust
+    /// wait: socket.io-client writes DISCONNECT at once. The wait has no
+    /// timeout of its own and lasts as long as the flush, which a stalled
+    /// Engine extends until its session ends. Of several calls that wait for
+    /// one name, one takes it and the others fail with
+    /// [`SocketError::NamespaceConflict`]. Cancel safe: a waiting call holds
+    /// no ownership.
+    ///
+    /// Keep a [`SocketSender`] alive while the receiver is in use, because
+    /// dropping the last one disconnects the namespace.
+    ///
     /// # Errors
     ///
     /// Returns [`SocketError::NamespaceConflict`] if the namespace is already
     /// open, or [`SocketError::Closed`] if the client has ended.
-    #[expect(
-        clippy::unused_async,
-        clippy::unused_async_trait_impl,
-        reason = "the public API stays async, although the manager now accepts a namespace synchronously"
-    )]
     pub async fn connect_with<S, B>(
         &self,
         ns: S,
@@ -306,6 +318,7 @@ impl Client {
             self.channels.manager,
             self.channels.socket,
         )
+        .await
     }
 
     /// Drops the client handle and waits for the client to end.

@@ -126,7 +126,14 @@ impl TestManager {
         auth: ByteString,
         server_packet_capacity: usize,
     ) -> Result<(SocketSender, SocketReceiver), SocketError> {
-        crate::client::connect(&self.manager, ns.into(), auth, 32, server_packet_capacity)
+        futures_util::FutureExt::now_or_never(crate::client::connect(
+            &self.manager,
+            ns.into(),
+            auth,
+            32,
+            server_packet_capacity,
+        ))
+        .expect("the harness never reuses a flushing name")
     }
 
     /// Drops the client handle, as `Client::join` does.

@@ -178,9 +178,17 @@ fn connecting_again_after_disconnect_follows_the_remaining_packets_and_disconnec
     rig.send("/", event("[\"e1\"]"));
     rig.disconnect("/");
 
-    let again = rig.connect("/", "{\"n\":2}", 32);
-    again.result.unwrap();
-    assert_eq!(rig.messages(), ["2[\"e1\"]", "1", "0{\"n\":2}"]);
+    let busy = rig.connect("/", "{\"n\":2}", 32);
+    let release = busy.result.unwrap().expect("the old flush owns the name");
+    assert_eq!(rig.messages(), ["2[\"e1\"]", "1"]);
+    assert!(release.is_cancelled());
+    // The last socket left, so the engine closes and the next one opens,
+    // like `Manager._destroy` followed by `Socket.connect`.
+    assert_eq!(rig.effects(), [Effect::Close]);
+    assert!(rig.connect("/", "{\"n\":2}", 32).result.unwrap().is_none());
+    assert_eq!(rig.close(), [Effect::Open]);
+    rig.handshake();
+    assert_eq!(rig.messages(), ["0{\"n\":2}"]);
 }
 
 #[test]
@@ -256,8 +264,9 @@ fn a_blocked_packet_of_old_handles_never_reaches_new_ones() {
     let blocked = rig.server("2[\"old\"]").expect("the packet is blocked");
 
     rig.disconnect("/");
+    rig.messages();
     let mut new = rig.connect("/", "{}", 1);
-    new.result.unwrap();
+    assert!(new.result.unwrap().is_none());
 
     // The blocked packet keeps the old receiver, and its token tells the
     // driver to discard it.

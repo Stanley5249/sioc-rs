@@ -12,7 +12,7 @@ use crate::ack::Acknowledge;
 use crate::error::SocketError;
 use crate::event::Emit;
 use crate::manager::driver::Manager;
-use crate::manager::socket::Handles;
+use crate::manager::socket::{Handles, Release};
 use crate::marker::{AckId, AckMarker, AckType, BinaryMarker};
 use crate::packet::{ClientPacket, DynEvent, ServerPacket};
 
@@ -52,17 +52,37 @@ impl Drop for SenderShared {
 /// followed by `Socket.connect`. `capacity` bounds the queued events and,
 /// separately, the queued replies, and `server_capacity` the receiver.
 ///
+/// While the previous handles of `ns` still flush, waits for their release
+/// and tries again. Cancel safe: a waiting call holds only a token clone.
+///
 /// # Errors
 ///
 /// Returns [`SocketError::NamespaceConflict`] while live handles hold the
 /// name, or [`SocketError::Closed`] once the manager has ended.
-pub(crate) fn connect(
+pub(crate) async fn connect(
     manager: &Arc<Manager>,
     ns: ByteString,
     auth: ByteString,
     capacity: usize,
     server_capacity: usize,
 ) -> Result<(SocketSender, SocketReceiver), SocketError> {
+    loop {
+        match try_connect(manager, ns.clone(), auth.clone(), capacity, server_capacity)? {
+            Ok(handles) => return Ok(handles),
+            Err(release) => release.cancelled().await,
+        }
+    }
+}
+
+/// One attempt of [`connect`]. Returns the previous participation's release
+/// token while it still flushes.
+fn try_connect(
+    manager: &Arc<Manager>,
+    ns: ByteString,
+    auth: ByteString,
+    capacity: usize,
+    server_capacity: usize,
+) -> Result<Result<(SocketSender, SocketReceiver), CancellationToken>, SocketError> {
     let capacity = Arc::new(Semaphore::new(capacity));
     let reply_capacity = Arc::new(Semaphore::new(capacity.available_permits()));
     let closed = CancellationToken::new();
@@ -75,10 +95,14 @@ pub(crate) fn connect(
         closed: closed.clone(),
         server_packet_tx,
         terminal_packet_tx,
+        release: Release::default(),
     };
-    manager
+    if let Some(busy) = manager
         .with_core(|core| core.connect(ns.clone(), handles))
-        .ok_or(SocketError::Closed)??;
+        .ok_or(SocketError::Closed)??
+    {
+        return Ok(Err(busy));
+    }
 
     let sender = SocketSender {
         shared: Arc::new(SenderShared {
@@ -93,7 +117,7 @@ pub(crate) fn connect(
         server_packet_rx,
         terminal_packet_rx: Some(terminal_packet_rx),
     };
-    Ok((sender, receiver))
+    Ok(Ok((sender, receiver)))
 }
 
 impl SocketSender {
@@ -237,10 +261,15 @@ impl SocketSender {
         closed.cancel();
     }
 
-    /// Waits until the namespace closes, by either side, or the client ends.
+    /// Waits until these handles stop accepting packets for good, like
+    /// socket.io-client's `Socket.active` turning false.
     ///
-    /// Resolves as soon as the namespace stops accepting packets, which can be
-    /// before its DISCONNECT packet is submitted to Engine.
+    /// Resolves after [`disconnect`](Self::disconnect) or the drop of the last
+    /// clone, a server `DISCONNECT` or `CONNECT_ERROR`, reconnection giving up
+    /// or being off, or the end of the client. An Engine.IO session that
+    /// drops and reconnects does not resolve it. It resolves as soon as
+    /// admission closes, so accepted packets and DISCONNECT may still be on
+    /// their way to Engine.
     pub async fn closed(&self) {
         self.shared.closed.cancelled().await;
     }
@@ -274,8 +303,13 @@ impl SocketSender {
 ///
 /// `None` ends the receiver after a server `DISCONNECT`, a `CONNECT_ERROR`, a
 /// client disconnect, an internal error, or when reconnection gives up or is
-/// off. The client logs engine errors with `tracing`, and
+/// off, once the packets queued before the end are consumed. The client logs
+/// engine errors with `tracing`, and
 /// [`Client::join`](crate::client::Client::join) reports internal errors.
+///
+/// Dropping the receiver does not disconnect the namespace. Later server
+/// events are discarded, while the [`SocketSender`] keeps working until it
+/// disconnects or its last clone drops.
 #[derive(Debug)]
 pub struct SocketReceiver {
     server_packet_rx: mpsc::Receiver<ServerPacket>,

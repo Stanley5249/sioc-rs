@@ -25,10 +25,11 @@
 //!   the change. Poisoned state is recovered only to shut down, never to
 //!   resume.
 //! - Each queued event or reply holds a slot of its accepting handles'
-//!   capacity. One Socket owns the current participation and at most one
-//!   bounded waiting replacement. Replacing a waiting participation discards
-//!   its buffer rather than adding another capacity generation to the write
-//!   buffer. Server traffic cannot create sockets or capacity pools.
+//!   capacity. One Socket owns exactly one participation at a time, so each
+//!   name has one capacity pool. A replacement waits outside the core for the
+//!   flushing participation's release token and then retries, so a cancelled
+//!   wait leaves nothing behind. Server traffic cannot create sockets or
+//!   capacity pools.
 //! - A slot returns on header submission or cancellation. At most one packet's
 //!   remaining attachments also occupy the write buffer, bounded by
 //!   `MAX_ATTACHMENTS`. Capacities count packets, not retained bytes.
@@ -38,10 +39,10 @@
 //!   took.
 //! - Local disconnect closes admission but retains a `Disconnecting` owner and
 //!   its ACK map until its FIFO events and DISCONNECT are submitted or
-//!   cancelled. Only then can waiting handles activate and queue CONNECT.
-//!   Server termination cancels that owner's unsubmitted packets and
-//!   DISCONNECT, but never attachments whose header was already submitted.
-//!   Engine loss cancels a local flush.
+//!   cancelled. Only then is the name free for new handles. Server termination
+//!   cancels that owner's unsubmitted packets and DISCONNECT, but never
+//!   attachments whose header was already submitted. Engine loss cancels a
+//!   local flush.
 //! - A queued packet is resolved only to its still-owned participation, never a
 //!   replacement's ACK map. The per-Socket ACK counter survives every
 //!   replacement.
