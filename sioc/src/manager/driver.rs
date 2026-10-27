@@ -278,6 +278,7 @@ mod tests {
     use futures_util::FutureExt;
 
     use super::*;
+    use crate::config::ChannelConfig;
 
     #[test]
     fn a_panicking_transition_stores_a_driver_wakeup() {
@@ -318,10 +319,11 @@ mod tests {
     #[test]
     fn dropping_an_unpolled_driver_closes_its_handles() {
         let manager = Manager::new(ManagerCore::new(None, fastrand::Rng::new()));
-        let (tx, _rx) = crate::client::connect(&manager, "/".into(), "{}".into(), 1, 1)
-            .now_or_never()
-            .unwrap()
-            .unwrap();
+        let (tx, _rx) =
+            crate::client::connect(&manager, "/".into(), "{}".into(), ChannelConfig::from(1))
+                .now_or_never()
+                .unwrap()
+                .unwrap();
         let driver = run(Arc::clone(&manager), || panic!("driver must not be polled"));
         drop(driver);
         assert!(tx.closed().now_or_never().is_some());
@@ -330,10 +332,11 @@ mod tests {
     #[tokio::test]
     async fn the_shutdown_guard_wakes_a_waiting_connect_after_a_panicked_transition() {
         let manager = Manager::new(ManagerCore::new(None, fastrand::Rng::new()));
-        let (tx, _rx) = crate::client::connect(&manager, "/".into(), "{}".into(), 1, 1)
-            .now_or_never()
-            .unwrap()
-            .unwrap();
+        let (tx, _rx) =
+            crate::client::connect(&manager, "/".into(), "{}".into(), ChannelConfig::from(1))
+                .now_or_never()
+                .unwrap()
+                .unwrap();
         manager.with_core(|core| {
             core.receive(eioc::prelude::ServerMessage::Open(
                 eioc::prelude::Handshake {
@@ -352,8 +355,7 @@ mod tests {
             &manager,
             "/".into(),
             "{}".into(),
-            1,
-            1,
+            ChannelConfig::from(1),
         ));
         assert!(waiting.as_mut().now_or_never().is_none());
         assert!(
