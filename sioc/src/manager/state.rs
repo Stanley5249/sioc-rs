@@ -103,10 +103,11 @@ pub struct ManagerCore {
     /// packet holds a capacity slot of its socket, so the buffer is bounded
     /// by the sockets' capacities and their CONNECT and DISCONNECT packets.
     write_buffer: VecDeque<Write>,
-    /// Effects for the driver. Rust wait: the JS `Manager` acts at once.
+    /// Effects for the driver to carry out. The JS `Manager` acts at once
+    /// instead.
     outputs: VecDeque<ManagerOutput>,
-    /// Whether the `Client` handle lives. Rust cleanup: the driver needs a
-    /// completion point for `Client::join`.
+    /// Whether the `Client` handle lives, which gives the driver a completion
+    /// point for `Client::join`.
     has_client: bool,
     /// Set once the driver shut down, so no handle connects again.
     shut_down: bool,
@@ -442,8 +443,7 @@ impl ManagerCore {
     }
 
     /// Returns whether the client handle and every socket are gone and no
-    /// engine runs. Rust wait: the driver needs a completion point for
-    /// `Client::join`.
+    /// engine runs, which is the driver's completion point for `Client::join`.
     #[must_use]
     pub fn is_finished(&self) -> bool {
         !self.has_client && self.ready_state == ReadyState::Closed && !self.needs_engine()

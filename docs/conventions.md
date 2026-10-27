@@ -20,7 +20,8 @@ Invariants protect correctness, so a change that breaks one needs a new entry in
 ## Protocol and naming
 
 - Match the observable wire behavior of the JS reference. Internal structure follows Rust ownership.
-- Start a name from its JS counterpart and keep it distinct from similar names in std, the dependencies, and this codebase. Mention the JS name in a doc comment when it helps, such as on a configuration field.
+- Start a name from its JS counterpart and keep it distinct from similar names in std, the dependencies, and this codebase.
+- A doc comment says what the item is for and names its JS counterpart when one exists. When an item exists only because Rust lacks what JS has, such as a garbage collector, unbounded queues, or direct calls between objects, say so in plain words. Write a reason that several items share once on their parent instead of on each item.
 - Use frame for transport data, packet for a wire unit of either protocol, and message for what Engine.IO carries between the layers. Prefix Engine.IO message and frame types with `Client` or `Server` for the side that produces them, and name a channel's ends after what it carries, such as `client_message_tx`.
 - Engine sessions open and close, and namespaces connect and disconnect. Shutdown ends a component, join awaits a task, and drain consumes the items left in a channel.
 

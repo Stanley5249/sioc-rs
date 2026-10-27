@@ -247,7 +247,7 @@ pub struct Client {
 }
 
 /// Tells the manager that the client handle is gone once it drops, so the
-/// manager ends with its last socket. Rust cleanup.
+/// manager ends with its last socket.
 #[derive(Debug)]
 struct ClientHandle(Arc<Manager>);
 

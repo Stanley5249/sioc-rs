@@ -69,9 +69,9 @@ impl std::fmt::Debug for Auth {
 #[derive(Debug)]
 pub struct Handles {
     pub auth: Auth,
-    /// Event admission capacity and participation identity. Rust bound.
+    /// Event admission capacity and participation identity.
     pub capacity: Arc<Semaphore>,
-    /// Independent reply capacity. Rust bound.
+    /// Independent reply capacity.
     pub reply_capacity: Arc<Semaphore>,
     pub closed: CancellationToken,
     pub server_packet_tx: mpsc::Sender<ServerPacket>,
@@ -114,7 +114,7 @@ impl Handles {
     }
 }
 
-/// One server packet held for its original application receiver. Rust bound.
+/// One server packet held for its original application receiver.
 #[derive(Debug)]
 pub struct Blocked {
     pub ns: ByteString,

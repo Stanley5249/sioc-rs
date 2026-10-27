@@ -145,7 +145,7 @@ impl Decoder {
     }
 
     /// Detaches a namespace's partial packet while consuming its remaining
-    /// attachments. Rust cleanup: reuse cannot inherit the old reconstruction,
+    /// attachments. Reuse cannot inherit the old reconstruction,
     /// and the current engine still needs its binary frame alignment.
     pub fn disconnect(&mut self, ns: &str) {
         if let Some(reconstruction) = &mut self.reconstructor

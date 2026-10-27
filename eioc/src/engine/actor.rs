@@ -20,6 +20,9 @@ use crate::transport::{ClientFrame, ServerFrame, TransportStrategy};
 ///
 /// Start from [`EngineOptions::new`] and set the fields that differ. Later
 /// releases may add options with defaults, so the type is non-exhaustive.
+///
+/// The four capacities bound the channels between the layers, where the JS
+/// client queues without a limit.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct EngineOptions<C> {
@@ -41,14 +44,14 @@ pub struct EngineOptions<C> {
     /// `timeout` option of socket.io-client's `Manager`. `None` waits without
     /// a limit.
     pub handshake_timeout: Option<Duration>,
-    /// Slots of the channel to the upper layer. Rust bound.
+    /// Slots of the channel to the upper layer.
     pub server_message_capacity: usize,
-    /// Slots of the channel from the upper layer. Rust bound.
+    /// Slots of the channel from the upper layer.
     pub client_message_capacity: usize,
-    /// Slots of the channel from the transport. Rust bound.
+    /// Slots of the channel from the transport.
     pub server_frame_capacity: usize,
     /// Slots of the channel to the transport, which also holds messages sent
-    /// before the handshake, like `writeBuffer`. Rust bound.
+    /// before the handshake, like `writeBuffer`.
     pub client_frame_capacity: usize,
 }
 
@@ -80,9 +83,9 @@ impl<C> EngineOptions<C> {
     }
 }
 
-/// A running engine, like engine.io-client's `Socket`. Rust channel: the JS
-/// `Socket` is called directly, while here its one task is reached through
-/// these channels.
+/// A running engine, like engine.io-client's `Socket`. The JS `Socket` is
+/// called directly, while here its one task is reached through these
+/// channels.
 ///
 /// The first message on `server_message_rx` is [`ServerMessage::Open`], and
 /// its end is the end of the session, whichever side closed it. Dropping
@@ -112,11 +115,11 @@ pub struct Engine {
     /// What the server sends, like the `"open"` and `"message"` events.
     pub server_message_rx: mpsc::Receiver<ServerMessage>,
     /// Ends when the session closes, like the `"close"` event, and never
-    /// carries a value. Rust wait: a channel's end stays hidden behind its
-    /// unread items, while JS emits `"close"` at once.
+    /// carries a value. A channel's end stays hidden behind its unread items,
+    /// while JS emits `"close"` at once.
     pub closed_rx: watch::Receiver<()>,
-    /// The session's result, like the `"error"` and `"close"` events. Rust
-    /// cleanup: dropping it aborts the task, so an owner that is itself
+    /// The session's result, like the `"error"` and `"close"` events.
+    /// Dropping it aborts the task, so an owner that is itself
     /// dropped leaves no task behind.
     pub task: AbortOnDropHandle<Result<(), Error>>,
 }

@@ -261,7 +261,7 @@ impl<E> ServerPacket<E> {
 
 /// A packet this client sends to one namespace, like `Socket.packet`.
 ///
-/// Rust channel: public [`Emit`](crate::event::Emit) and
+/// Public [`Emit`](crate::event::Emit) and
 /// [`Acknowledge`](crate::ack::Acknowledge) implementations construct these
 /// values before the manager encodes them.
 #[derive(Debug)]

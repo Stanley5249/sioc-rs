@@ -34,7 +34,7 @@ pub struct EngineCore {
     state: SessionState,
     /// The pong owed to the server's last ping. A later ping replaces it,
     /// because the server needs one pong within its window, not one per ping.
-    /// Rust bound: JS writes each pong at once.
+    /// JS writes each pong at once and never holds one.
     pong: Option<ByteString>,
 }
 

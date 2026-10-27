@@ -35,9 +35,9 @@ struct SenderShared {
     manager: Arc<Manager>,
     ns: ByteString,
     /// The namespace's event capacity, which the manager closes when the
-    /// namespace ends, and which identifies these handles. Rust bound.
+    /// namespace ends, and which identifies these handles.
     capacity: Arc<Semaphore>,
-    /// The namespace's ACK reply capacity. Rust bound.
+    /// The namespace's ACK reply capacity.
     reply_capacity: Arc<Semaphore>,
     closed: CancellationToken,
 }
@@ -280,13 +280,13 @@ impl SocketSender {
 }
 
 /// Receiver for a Socket.IO namespace, like `Socket.emitEvent` listeners.
-/// Rust channel: receives packets from the manager task.
+/// It receives packets from the manager task.
 ///
 /// Read it continuously: bounded queues apply backpressure to the server.
 ///
 /// # Backpressure
 ///
-/// Rust bound: socket.io-client runs handlers as packets arrive and has no
+/// socket.io-client runs handlers as packets arrive and has no
 /// limit. Here, once this receiver holds
 /// [`ChannelConfig::receiver`](crate::config::ChannelConfig::receiver)
 /// packets, the client holds the next one and reads nothing else from the

@@ -15,7 +15,7 @@ use tokio_util::task::AbortOnDropHandle;
 
 use crate::error::ManagerError;
 
-/// The engine task, until it finishes. Rust cleanup: the result waits here
+/// The engine task, until it finishes. The result waits here
 /// until the server direction has ended, independently of when the task
 /// itself finishes.
 enum Task {
@@ -47,7 +47,7 @@ enum Admission {
         /// `engine.write`.
         client_message_tx: mpsc::Sender<ClientMessage>,
         /// One immediately writable message slot. It holds a sender, so it
-        /// lives and drops with `client_message_tx`. Rust bound.
+        /// lives and drops with `client_message_tx`.
         permit: Option<mpsc::OwnedPermit<ClientMessage>>,
     },
     /// Admission ended, with the policy for unread engine messages.
@@ -76,7 +76,7 @@ pub enum EngineStep {
         draining: bool,
     },
     /// A permit, the task's result, or the session's end became ready.
-    /// Rust wait: every ownership change wakes the caller before waiting again.
+    /// Every ownership change wakes the caller before waiting again.
     Progress,
     /// The task and its server direction have both finished. Take the result
     /// with [`Engine::into_result`].
@@ -164,8 +164,8 @@ impl Engine {
         }
     }
 
-    /// Returns an unused slot after another input won the wait. Rust wait:
-    /// packet selection owns its slot so engine cleanup cannot revoke it.
+    /// Returns an unused slot after another input won the wait.
+    /// Packet selection owns its slot so engine cleanup cannot revoke it.
     pub fn return_permit(&mut self, returned: mpsc::OwnedPermit<ClientMessage>) {
         if let Admission::Open { permit, .. } = &mut self.admission {
             assert!(

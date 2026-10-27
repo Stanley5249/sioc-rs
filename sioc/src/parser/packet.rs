@@ -3,7 +3,7 @@
 use bytestring::ByteString;
 
 /// A value tagged with the `nsp` of a socket.io-parser packet.
-/// Rust channel: namespace identity travels with the value between owners.
+/// The namespace identity travels with the value between owners.
 #[derive(Debug)]
 pub struct Ns<T>(pub ByteString, pub T);
 
