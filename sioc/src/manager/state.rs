@@ -314,7 +314,8 @@ impl ManagerCore {
     /// # Errors
     ///
     /// Returns the engine's error if it is internal, which is a library bug.
-    /// The caller then calls [`shutdown`](Self::shutdown).
+    /// The driver then stops, and its shutdown guard calls
+    /// [`shutdown`](Self::shutdown).
     pub fn close(&mut self, result: Result<(), ManagerError>) -> Result<(), ManagerError> {
         let reconnect = match self.ready_state {
             ReadyState::Opening | ReadyState::Open | ReadyState::Flushing => true,
@@ -419,8 +420,8 @@ impl ManagerCore {
         Some(message)
     }
 
-    /// Ends every socket without waiting for the application, after an
-    /// internal error. The caller then closes the engine itself.
+    /// Ends every socket without waiting for the application, once the
+    /// driver stops for any reason, including an internal error.
     pub fn shutdown(&mut self) {
         for (ns, socket) in &mut self.sockets {
             socket.end(ns, None);
