@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
+use tokio::sync::mpsc::error::TryRecvError;
 
 use super::rig::{Effect, Rig, event, event_ack};
 use crate::packet::{ClientPacket, ServerPacket};
@@ -88,9 +89,13 @@ fn incoming_binary_packets_are_rebuilt() {
 
 #[test]
 fn server_protocol_errors_close_the_engine_without_an_internal_error() {
-    let cases: [&dyn Fn(&mut Rig); 4] = [
+    let cases: [&dyn Fn(&mut Rig); 5] = [
         &|rig| {
             rig.server("51-[\"e\",{\"_placeholder\":true,\"num\":3}]");
+        },
+        // A placeholder inside an object field, as JS servers send it.
+        &|rig| {
+            rig.server("51-[\"e\",{\"file\":{\"_placeholder\":true,\"num\":3}}]");
         },
         &|rig| rig.server_binary(b"z"),
         &|rig| {
@@ -104,10 +109,22 @@ fn server_protocol_errors_close_the_engine_without_an_internal_error() {
 
     for case in cases {
         let mut rig = Rig::reconnecting();
-        rig.connected("/");
+        let mut handles = rig.connected("/");
+        assert!(matches!(
+            handles.server_packet_rx.try_recv(),
+            Ok(ServerPacket::Connect(_))
+        ));
         case(&mut rig);
         assert_eq!(rig.effects(), [Effect::Close]);
         assert!(!rig.core.has_message());
+
+        // A frame the broken engine still delivers reaches no handles.
+        assert!(rig.server("2[\"late\"]").is_none());
+        assert_eq!(rig.effects(), []);
+        assert_eq!(
+            handles.server_packet_rx.try_recv().unwrap_err(),
+            TryRecvError::Empty
+        );
 
         // The engine then finishes without an error, and the client reconnects.
         assert_eq!(rig.close(), [Effect::Schedule(Duration::ZERO)]);
