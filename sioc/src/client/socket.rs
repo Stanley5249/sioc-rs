@@ -12,7 +12,7 @@ use crate::ack::Acknowledge;
 use crate::error::SocketError;
 use crate::event::Emit;
 use crate::manager::driver::Manager;
-use crate::manager::socket::{Handles, Release};
+use crate::manager::socket::{Auth, Handles, Release};
 use crate::marker::{AckId, AckMarker, AckType, BinaryMarker};
 use crate::packet::{ClientPacket, DynEvent, ServerPacket};
 
@@ -89,7 +89,7 @@ fn try_connect(
     let (server_packet_tx, server_packet_rx) = mpsc::channel(server_capacity);
     let (terminal_packet_tx, terminal_packet_rx) = oneshot::channel();
     let handles = Handles {
-        auth,
+        auth: Auth(auth),
         capacity: Arc::clone(&capacity),
         reply_capacity: Arc::clone(&reply_capacity),
         closed: closed.clone(),

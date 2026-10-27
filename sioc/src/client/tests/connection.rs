@@ -219,6 +219,25 @@ async fn auth_must_serialize_to_an_object() {
         .unwrap();
 }
 
+/// Auth often holds a secret, and `Debug` of the client and its handles
+/// reaches every stored CONNECT payload.
+#[tokio::test]
+async fn debug_output_hides_the_auth_payload() {
+    let client = ClientBuilder::new(Url::parse("http://localhost:3000/").unwrap())
+        .transport(TransportStrategy::WebSocket)
+        .websocket_connector(async |_| std::future::pending().await)
+        .open()
+        .unwrap();
+    let auth = serde_json::json!({ "token": "hunter2" });
+
+    let builder = client.socket("/").auth(&auth);
+    assert!(!format!("{builder:?}").contains("hunter2"));
+    let (tx, rx) = builder.connect().await.unwrap();
+    for debug in [format!("{client:?}"), format!("{tx:?}"), format!("{rx:?}")] {
+        assert!(!debug.contains("hunter2"), "{debug}");
+    }
+}
+
 #[tokio::test]
 async fn handshake_timeout_fails_the_attempt() {
     let client = ClientBuilder::new(Url::parse("http://localhost:3000/").unwrap())

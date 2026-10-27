@@ -54,10 +54,21 @@ pub enum SocketState {
     },
 }
 
+/// A CONNECT payload, empty for none. Its `Debug` hides the content, because
+/// auth often holds a secret and `Debug` of every handle reaches the core.
+#[derive(Clone)]
+pub struct Auth(pub ByteString);
+
+impl std::fmt::Debug for Auth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Auth(..)")
+    }
+}
+
 /// Core-owned ends of one sender/receiver pair.
 #[derive(Debug)]
 pub struct Handles {
-    pub auth: ByteString,
+    pub auth: Auth,
     /// Event admission capacity and participation identity. Rust bound.
     pub capacity: Arc<Semaphore>,
     /// Independent reply capacity. Rust bound.
@@ -304,7 +315,7 @@ mod tests {
         let (terminal_packet_tx, _) = oneshot::channel();
         let mut socket = Socket::default();
         socket.connect(Handles {
-            auth: "{}".into(),
+            auth: Auth("{}".into()),
             capacity: Arc::new(Semaphore::new(1)),
             reply_capacity: Arc::new(Semaphore::new(1)),
             closed: CancellationToken::new(),

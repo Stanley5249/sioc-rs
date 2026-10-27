@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use crate::error::{ManagerError, SocketError};
 use crate::manager::backoff::Backoff;
 use crate::manager::decoder::{Decoded, Decoder};
-use crate::manager::socket::{Availability, Blocked, Handles, Queued, Socket, SocketState};
+use crate::manager::socket::{Auth, Availability, Blocked, Handles, Queued, Socket, SocketState};
 use crate::packet::{ClientPacket, ServerPacket};
 use crate::parser::packet::{Ns, Packet};
 
@@ -70,7 +70,7 @@ enum ReadyState {
 enum Write {
     /// CONNECT with the auth payload, like `Socket.onopen` sending it. Kept
     /// unencoded, so a socket that disconnects first can take it back.
-    Connect { ns: ByteString, auth: ByteString },
+    Connect { ns: ByteString, auth: Auth },
     /// An event or ACK reply of a socket, like `Socket.packet`. Encoded when
     /// the engine takes it, so its ack id is assigned in send order.
     Packet {
@@ -386,7 +386,7 @@ impl ManagerCore {
             return None;
         }
         let message = match self.write_buffer.pop_front()? {
-            Write::Connect { ns, auth } => encode(&ns, &Packet::Connect(auth)),
+            Write::Connect { ns, auth } => encode(&ns, &Packet::Connect(auth.0)),
             Write::Encoded(message) => message,
             Write::Disconnect { ns } => {
                 let socket = self.sockets.get_mut(&ns).expect("DISCONNECT has an owner");

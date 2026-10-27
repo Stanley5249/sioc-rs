@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::SocketError;
 use crate::manager::backoff::Backoff;
-use crate::manager::socket::{Blocked, Handles, Release};
+use crate::manager::socket::{Auth, Blocked, Handles, Release};
 use crate::manager::state::{ManagerCore, ManagerOutput};
 use crate::packet::{ClientPacket, DynAck, ServerPacket};
 
@@ -101,7 +101,7 @@ impl Rig {
         let (terminal_packet_tx, terminal_packet_rx) = oneshot::channel();
         let release = CancellationToken::new();
         let handles = Handles {
-            auth: auth.into(),
+            auth: Auth(auth.into()),
             capacity: Arc::clone(&capacity),
             reply_capacity: Arc::clone(&reply_capacity),
             closed: closed.clone(),
