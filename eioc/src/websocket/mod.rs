@@ -10,4 +10,4 @@ pub mod session;
 pub mod stream;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

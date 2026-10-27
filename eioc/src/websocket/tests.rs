@@ -77,7 +77,7 @@ async fn forward_client_frames_drains_after_peer_close() {
     .unwrap();
 }
 
-async fn ws_pair() -> (
+pub(crate) async fn ws_pair() -> (
     WebSocketStream,
     tokio_tungstenite::WebSocketStream<TcpStream>,
 ) {
