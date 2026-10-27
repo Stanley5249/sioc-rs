@@ -1,6 +1,6 @@
 //! Persistent per-namespace state, like socket.io-client's `Socket`.
 //! A locally disconnecting participation owns its work until submission or
-//! cancellation. At most one replacement can wait behind that participation.
+//! cancellation. A replacement waits outside the core for its release.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -21,15 +21,15 @@ pub struct Socket {
     /// Like `Socket.ids`, never reset by handle replacement or Engine loss.
     next_ack_id: u64,
     pub state: SocketState,
-    /// One bounded replacement, matching the actor's waiting reopen request.
-    pub pending: Option<Pending>,
 }
 
-/// Handles waiting for the previous participation's cleanup, not confirmation.
+/// Whether a name can take new handles.
 #[derive(Debug)]
-pub struct Pending {
-    pub handles: Handles,
-    pub send_buffer: VecDeque<Queued>,
+pub enum Availability {
+    Free,
+    /// The previous participation still flushes. The token is its release.
+    Busy(CancellationToken),
+    Taken,
 }
 
 /// Socket.IO participation lifecycle. Engine lifecycle belongs to the manager.
@@ -66,6 +66,19 @@ pub struct Handles {
     pub server_packet_tx: mpsc::Sender<ServerPacket>,
     /// Terminal packets bypass a full data queue.
     pub terminal_packet_tx: oneshot::Sender<ServerPacket>,
+    pub release: Release,
+}
+
+/// Cancels its token when the core drops the handles that own it, on every
+/// end and during unwinding, so a waiting connect never outlives the
+/// participation it waits for.
+#[derive(Debug, Default)]
+pub struct Release(pub CancellationToken);
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
 }
 
 impl Handles {
@@ -110,11 +123,14 @@ impl Socket {
         }
     }
 
-    pub fn can_connect(&self) -> bool {
-        matches!(
-            self.state,
-            SocketState::Disconnected | SocketState::Disconnecting { .. }
-        ) && self.pending.is_none()
+    pub fn availability(&self) -> Availability {
+        match &self.state {
+            SocketState::Disconnected => Availability::Free,
+            SocketState::Disconnecting { handles, .. } => {
+                Availability::Busy(handles.release.0.clone())
+            }
+            SocketState::Connecting { .. } | SocketState::Connected { .. } => Availability::Taken,
+        }
     }
 
     /// Whether live handles need an Engine, rather than just the old flush.
@@ -122,43 +138,16 @@ impl Socket {
         matches!(
             self.state,
             SocketState::Connecting { .. } | SocketState::Connected { .. }
-        ) || self.pending.is_some()
+        )
     }
 
-    /// Accepts handles and returns whether they can start CONNECT now.
-    pub fn connect(&mut self, handles: Handles) -> bool {
-        debug_assert!(
-            self.can_connect(),
-            "only one waiting replacement per socket"
-        );
-        if matches!(self.state, SocketState::Disconnecting { .. }) {
-            self.pending = Some(Pending {
-                handles,
-                send_buffer: VecDeque::new(),
-            });
-            false
-        } else {
-            self.state = SocketState::Connecting {
-                handles,
-                send_buffer: VecDeque::new(),
-            };
-            true
-        }
-    }
-
-    /// Activates the replacement only after old work has ended.
-    pub fn activate_pending(&mut self) -> Option<ByteString> {
+    /// Accepts handles for a name that is free.
+    pub fn connect(&mut self, handles: Handles) {
         debug_assert!(matches!(self.state, SocketState::Disconnected));
-        let Pending {
-            handles,
-            send_buffer,
-        } = self.pending.take()?;
-        let auth = handles.auth.clone();
         self.state = SocketState::Connecting {
             handles,
-            send_buffer,
+            send_buffer: VecDeque::new(),
         };
-        Some(auth)
     }
 
     pub fn receive_connect(&mut self) -> VecDeque<Queued> {
@@ -228,8 +217,7 @@ impl Socket {
         }
     }
 
-    /// Ends only the current owner. The manager activates any waiting handles
-    /// after cancelling that owner's queued work.
+    /// Ends only the current owner, which releases its name.
     pub fn end(&mut self, ns: &str, terminal: Option<ServerPacket>) {
         let handles = match std::mem::take(&mut self.state) {
             SocketState::Disconnected => return,
@@ -279,16 +267,6 @@ impl Socket {
             }
             SocketState::Disconnected => SocketState::Disconnected,
         };
-        if matches!(self.state, SocketState::Disconnected) {
-            self.activate_pending();
-        }
-    }
-
-    pub fn shutdown(&mut self, ns: &str) {
-        self.end(ns, None);
-        if let Some(pending) = self.pending.take() {
-            pending.handles.end(ns, None);
-        }
     }
 
     /// Closes admission without giving up ownership of accepted work.
@@ -314,23 +292,6 @@ impl Socket {
             }
         }
     }
-
-    pub fn disconnect_pending(&mut self, ns: &str, capacity: &Arc<Semaphore>) -> bool {
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|pending| Arc::ptr_eq(&pending.handles.capacity, capacity))
-        {
-            self.pending
-                .take()
-                .expect("the pending handles matched")
-                .handles
-                .end(ns, None);
-            true
-        } else {
-            false
-        }
-    }
 }
 
 #[cfg(test)]
@@ -349,6 +310,7 @@ mod tests {
             closed: CancellationToken::new(),
             server_packet_tx,
             terminal_packet_tx,
+            release: Release::default(),
         });
         socket.receive_connect();
         let (live_tx, _live_rx) = oneshot::channel();

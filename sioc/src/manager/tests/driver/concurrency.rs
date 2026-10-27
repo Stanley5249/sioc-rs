@@ -163,6 +163,8 @@ async fn a_panicking_handle_wakes_idle_driver_and_closes_handles() {
     .await
     .expect("poison wakes the idle driver and closes engine handles")
     .unwrap_err();
+    // The shutdown guard ends the poisoned core's handles.
+    tx.closed().await;
     assert!(matches!(
         tx.send(event(r#"["closed"]"#)).await,
         Err(SocketError::Closed)

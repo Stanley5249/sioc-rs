@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::SocketError;
 use crate::manager::backoff::Backoff;
-use crate::manager::socket::{Blocked, Handles};
+use crate::manager::socket::{Blocked, Handles, Release};
 use crate::manager::state::{ManagerCore, ManagerOutput};
 use crate::packet::{ClientPacket, DynAck, ServerPacket};
 
@@ -25,7 +25,10 @@ pub enum Effect {
 
 /// The application's ends of one `connect`, and its result.
 pub struct TestHandles {
-    pub result: Result<(), SocketError>,
+    /// `Ok(Some(release))` while the previous handles still flush.
+    pub result: Result<Option<CancellationToken>, SocketError>,
+    /// Cancelled once the core drops these handles.
+    pub release: CancellationToken,
     pub capacity: Arc<Semaphore>,
     pub reply_capacity: Arc<Semaphore>,
     pub closed: CancellationToken,
@@ -96,6 +99,7 @@ impl Rig {
         let closed = CancellationToken::new();
         let (server_packet_tx, server_packet_rx) = mpsc::channel(server_capacity);
         let (terminal_packet_tx, terminal_packet_rx) = oneshot::channel();
+        let release = CancellationToken::new();
         let handles = Handles {
             auth: auth.into(),
             capacity: Arc::clone(&capacity),
@@ -103,9 +107,10 @@ impl Rig {
             closed: closed.clone(),
             server_packet_tx,
             terminal_packet_tx,
+            release: Release(release.clone()),
         };
         let result = self.core.connect(ns.into(), handles);
-        if result.is_ok() {
+        if matches!(result, Ok(None)) {
             self.capacities.insert(
                 ns.into(),
                 (Arc::clone(&capacity), Arc::clone(&reply_capacity)),
@@ -113,6 +118,7 @@ impl Rig {
         }
         TestHandles {
             result,
+            release,
             capacity,
             reply_capacity,
             closed,

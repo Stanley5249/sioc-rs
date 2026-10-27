@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use crate::error::{ManagerError, SocketError};
 use crate::manager::backoff::Backoff;
 use crate::manager::decoder::{Decoded, Decoder};
-use crate::manager::socket::{Blocked, Handles, Queued, Socket, SocketState};
+use crate::manager::socket::{Availability, Blocked, Handles, Queued, Socket, SocketState};
 use crate::packet::{ClientPacket, ServerPacket};
 use crate::parser::packet::{Ns, Packet};
 
@@ -133,30 +133,38 @@ impl ManagerCore {
     }
 
     /// Takes new handles for `ns`, like `Manager.socket` followed by
-    /// `Socket.connect`.
+    /// `Socket.connect`. Returns the previous participation's release token
+    /// instead while it still flushes, so the caller waits and retries
+    /// without leaving anything in the core.
     ///
     /// # Errors
     ///
     /// Returns [`SocketError::NamespaceConflict`] while live handles hold the
     /// name, or [`SocketError::Closed`] after the driver shut down.
-    pub fn connect(&mut self, ns: ByteString, handles: Handles) -> Result<(), SocketError> {
+    pub fn connect(
+        &mut self,
+        ns: ByteString,
+        handles: Handles,
+    ) -> Result<Option<CancellationToken>, SocketError> {
         if self.shut_down {
             return Err(SocketError::Closed);
         }
         let socket = self.sockets.entry(ns.clone()).or_default();
-        if !socket.can_connect() {
-            return Err(SocketError::NamespaceConflict { ns });
+        match socket.availability() {
+            Availability::Free => {}
+            Availability::Busy(release) => return Ok(Some(release)),
+            Availability::Taken => return Err(SocketError::NamespaceConflict { ns }),
         }
         tracing::debug!(%ns, "namespace opening");
         // A partial binary packet of the old handles never reaches new ones.
         self.decoder.disconnect(&ns);
         let auth = handles.auth.clone();
-        let activated = socket.connect(handles);
-        if activated && self.engine_runs() {
+        socket.connect(handles);
+        if self.engine_runs() {
             self.write_buffer.push_back(Write::Connect { ns, auth });
         }
         self.settle();
-        Ok(())
+        Ok(None)
     }
 
     /// Accepts an event from the handles that own `slot`, like `Socket.emit`:
@@ -174,12 +182,6 @@ impl ManagerCore {
         let Some(socket) = self.sockets.get_mut(ns) else {
             return Err(SocketError::Closed);
         };
-        if let Some(pending) = &mut socket.pending
-            && pending.handles.owns(&slot)
-        {
-            pending.send_buffer.push_back((packet, slot));
-            return Ok(());
-        }
         match &mut socket.state {
             SocketState::Connecting {
                 handles,
@@ -243,10 +245,6 @@ impl ManagerCore {
         let Some(socket) = self.sockets.get_mut(ns) else {
             return;
         };
-        if socket.disconnect_pending(ns, capacity) {
-            self.release();
-            return;
-        }
         if !socket.handles().is_some_and(|handles| {
             Arc::ptr_eq(&handles.capacity, capacity) && !handles.closed.is_cancelled()
         }) {
@@ -346,7 +344,7 @@ impl ManagerCore {
                 // The sockets end but the client stays, like the JS `Manager`
                 // and `Socket`s outliving `reconnect_failed`.
                 for (ns, socket) in &mut self.sockets {
-                    socket.shutdown(ns);
+                    socket.end(ns, None);
                 }
             }
         }
@@ -393,13 +391,6 @@ impl ManagerCore {
             Write::Disconnect { ns } => {
                 let socket = self.sockets.get_mut(&ns).expect("DISCONNECT has an owner");
                 socket.end(&ns, None);
-                if let Some(auth) = socket.activate_pending() {
-                    self.decoder.disconnect(&ns);
-                    self.write_buffer.push_back(Write::Connect {
-                        ns: ns.clone(),
-                        auth,
-                    });
-                }
                 encode(&ns, &Packet::Disconnect)
             }
             Write::Packet { ns, packet, slot } => {
@@ -432,7 +423,7 @@ impl ManagerCore {
     /// internal error. The caller then closes the engine itself.
     pub fn shutdown(&mut self) {
         for (ns, socket) in &mut self.sockets {
-            socket.shutdown(ns);
+            socket.end(ns, None);
         }
         self.write_buffer.clear();
         self.decoder.reset();
@@ -502,13 +493,6 @@ impl ManagerCore {
                 });
                 self.decoder.disconnect(ns);
                 socket.end(ns, Some(packet));
-                if let Some(auth) = socket.activate_pending() {
-                    self.write_buffer.push_back(Write::Connect {
-                        ns: ns.clone(),
-                        auth,
-                    });
-                }
-                self.settle();
                 self.release();
                 return None;
             }

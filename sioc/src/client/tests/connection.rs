@@ -146,8 +146,9 @@ async fn reconnection_gives_up_after_its_attempts() {
         .open()
         .unwrap();
 
-    let (_tx, mut rx) = client.connect("/").await.unwrap();
+    let (tx, mut rx) = client.connect("/").await.unwrap();
     gate.add_permits(16);
+    tx.closed().await;
     assert!(rx.recv().await.is_none());
     assert_eq!(attempts.load(Ordering::Relaxed), 3);
 

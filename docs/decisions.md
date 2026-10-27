@@ -16,7 +16,7 @@ Each section covers one area or component. A rejected approach records why it fa
 ## Manager
 
 - Handles apply complete transitions to one synchronous core under a short-lived mutex, and one driver owns Engine I/O, timers, and blocked deliveries. The actor's request channel, per-namespace input handoff, dynamic polling, and ACK-route channels repeated ownership that the core can enforce directly.
-- Compared with the actor, `connect` accepts a waiting replacement immediately rather than waiting for old inbox cleanup, but its CONNECT and bounded events still wait for the old participation to finish. Confirmed outgoing packets follow core acceptance order rather than actor input polling order, and server termination reclaims queued work immediately rather than waiting for inbox EOF.
+- Compared with the actor, `connect` waits outside the core for the old participation's release rather than for old inbox cleanup. Confirmed outgoing packets follow core acceptance order rather than actor input polling order, and server termination reclaims queued work immediately rather than waiting for inbox EOF.
 - A cancelled output reservation is restarted, because the engine is the channel's only writer. Storing the pending future separately added state without another responsibility.
 - One owner closes admission, drains the incoming direction, and collects the result, for normal closure, failure, and shutdown alike.
 - Packet selection keeps its output permit until the event is handed off. A readiness snapshot let engine polling revoke the permit after the event left its inbox, so cleanup discarded an unsent event.
@@ -38,7 +38,7 @@ Each section covers one area or component. A rejected approach records why it fa
 - Events and ACK replies have separate capacity, but queued replies belong only to their captured Engine connection. Calling both a persistent send buffer suggested that replies survived Engine loss.
 - CONNECT is queued when a namespace activates on a running engine or a new engine opens. A separate due flag duplicated those transitions and made engine startup clear an intent it did not use.
 - Local disconnect retains the accepting participation until its queued events and DISCONNECT are submitted or cancelled. Marking it disconnected immediately orphaned its queued work, prevented server termination from cancelling the flush, and registered old ACK waiters in replacement state.
-- A Socket admits at most one waiting replacement while flushing, and only activates it after old work ends. Immediate repeated activation created unlimited capacity pools behind a stalled Engine, even though each individual pool was bounded.
+- `connect` waits for the flushing participation's release token and then retries, so a name owns one capacity pool at a time and a cancelled wait leaves nothing behind. Immediate repeated activation created unlimited capacity pools behind a stalled Engine, and the single waiting replacement that followed kept a second buffer with its own branch in every transition.
 - A held delivery keeps its original receiver and close token instead of resolving the name again, so replacement handles never receive stale server packets.
 - Ack waiters belong to the connected or disconnecting participation, and only the per-Socket counter outlives it. Keeping waiters beside the persistent name let cleanup and new handles share mutable state.
 - Closing the admission semaphore wakes blocked sends and rejects already acquired slots at the atomic core transition. Token checks alone left a race between observing closure and accepting a packet.
@@ -98,6 +98,7 @@ Each section covers one area or component. A rejected approach records why it fa
 - The Engine.IO wire codec is internal, and the engine's message and handshake types are public under `eioc::engine`. A public `packet` module exposed encoding helpers that no caller outside the crate used.
 - A transport error names the type of the packet that arrived instead of carrying the frame, which kept an internal type in a public error. The payload was never in the error message.
 - `eioc::engine::Engine` keeps public endpoint fields and is non-exhaustive. A constructor or an opaque handle would only move the breaking change when an endpoint is added, and the manager needs each endpoint on its own to drop the sender for half-close. sioc builds its fake engines from its own wrapper instead of `eioc::engine::Engine`.
+- Rejected: a public sender future for flush completion beside `closed`. Receiver EOF and `Client::join` already show completion, and a `disconnected` future read like socket.io-client's `Socket.disconnected`, which is also true during a temporary Engine loss.
 - A frame that breaks binary reassembly reports a `sioc::parse` code, because socket.io-parser's decoder raises it. Its `sioc::manager` code read as a connection-management failure.
 
 ## Tests
