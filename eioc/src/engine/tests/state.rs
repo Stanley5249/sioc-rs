@@ -254,8 +254,24 @@ fn closing_again_is_accepted() {
 
 // Logs
 
-/// A subscriber that keeps every event at any level as text.
-struct Capture(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+/// A subscriber that keeps every event at any level as text, in a buffer
+/// for each thread.
+///
+/// It is the global default because tracing caches a callsite's interest
+/// from the default of the thread that first reaches it, so a scoped
+/// default misses a callsite that a parallel test reached first.
+struct Capture;
+
+thread_local! {
+    static LOGS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Installs [`Capture`] once and empties this thread's buffer.
+fn capture_logs() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| tracing::subscriber::set_global_default(Capture).unwrap());
+    LOGS.with_borrow_mut(Vec::clear);
+}
 
 impl tracing::Subscriber for Capture {
     fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
@@ -283,7 +299,7 @@ impl tracing::Subscriber for Capture {
 
         let mut text = Text(String::new());
         event.record(&mut text);
-        self.0.lock().unwrap().push(text.0);
+        LOGS.with_borrow_mut(|logs| logs.push(text.0));
     }
 
     fn enter(&self, _: &tracing::span::Id) {}
@@ -293,8 +309,7 @@ impl tracing::Subscriber for Capture {
 
 #[test]
 fn logs_name_message_frames_by_type_and_length_without_the_payload() {
-    let logs = std::sync::Arc::default();
-    let _guard = tracing::subscriber::set_default(Capture(std::sync::Arc::clone(&logs)));
+    capture_logs();
     let now = Instant::now();
     let payload = r#"40{"token":"secret"}"#;
 
@@ -309,7 +324,7 @@ fn logs_name_message_frames_by_type_and_length_without_the_payload() {
     core.on_frame(ServerFrame::Ping("probe".into()), now);
     core.take_pong();
 
-    let logs = logs.lock().unwrap().join("\n");
+    let logs = LOGS.with_borrow(|logs| logs.join("\n"));
     assert!(!logs.contains("secret"), "{logs}");
     assert!(logs.contains("packet=\"message\" bytes=20"), "{logs}");
     assert!(logs.contains("packet=\"binary\" bytes=6"), "{logs}");
