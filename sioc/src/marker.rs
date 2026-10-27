@@ -22,18 +22,20 @@ use std::marker::PhantomData;
 use bytes::Bytes;
 
 use crate::error::{AckIdError, AttachmentsError};
+use crate::packet::DynAckId;
 
 /// Determines how acknowledgement IDs are handled at the type level.
 pub trait AckMarker {
     /// [`AckId`] when an ack is expected, `()` when not.
     type Id: Sized;
 
-    /// Validates and extracts an ack ID from the wire-level `Option`.
+    /// Validates the [`DynAckId`] of a received event and gives it the
+    /// expected ack type.
     ///
     /// # Errors
     ///
     /// Returns an error if the presence of an ID does not match the policy.
-    fn parse(id: Option<u64>) -> Result<Self::Id, AckIdError>;
+    fn parse(id: Option<DynAckId>) -> Result<Self::Id, AckIdError>;
 
     /// Inserts the ack ID into `map` for debug output.
     fn format(id: &Self::Id, map: &mut DebugMap<'_, '_>);
@@ -46,7 +48,7 @@ pub struct NoAck;
 impl AckMarker for NoAck {
     type Id = ();
 
-    fn parse(id: Option<u64>) -> Result<Self::Id, AckIdError> {
+    fn parse(id: Option<DynAckId>) -> Result<Self::Id, AckIdError> {
         match id {
             Some(_) => Err(AckIdError::Unexpected),
             None => Ok(()),
@@ -66,38 +68,50 @@ where
 {
     type Id = AckId<A>;
 
-    fn parse(id: Option<u64>) -> Result<Self::Id, AckIdError> {
-        id.map(AckId::new).ok_or(AckIdError::Missing)
+    fn parse(id: Option<DynAckId>) -> Result<Self::Id, AckIdError> {
+        id.map(|id| AckId {
+            id,
+            marker: PhantomData,
+        })
+        .ok_or(AckIdError::Missing)
     }
 
     fn format(id: &Self::Id, map: &mut DebugMap<'_, '_>) {
-        map.entry(&"id", &id.0);
+        map.entry(&"id", &id.get());
     }
 }
 
-/// A raw ack ID wrapped with the expected ack payload type `A`.
+/// The id of an ack the server asked for, with the expected ack payload type
+/// `A`, like the callback that socket.io-client's `Socket.ack` builds from
+/// `packet.id`. Parsing a received [`DynEvent`](crate::packet::DynEvent) turns
+/// its [`DynAckId`] into this typed id.
 ///
 /// This ensures that when you send an ack via
 /// [`SocketSender::acknowledge`](crate::client::SocketSender::acknowledge), the
-/// response type matches what the sender originally requested.
+/// response type matches what the sender originally requested, and that the
+/// reply goes only to the namespace connection that delivered the event.
 #[must_use = "AckId must be used to acknowledge the event"]
-pub struct AckId<A>(u64, PhantomData<A>);
+pub struct AckId<A> {
+    id: DynAckId,
+    marker: PhantomData<A>,
+}
 
 impl<A> std::fmt::Debug for AckId<A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("AckId").field(&self.0).finish()
+        f.debug_tuple("AckId").field(&self.id.get()).finish()
     }
 }
 
 impl<A> AckId<A> {
-    fn new(id: u64) -> Self {
-        Self(id, PhantomData)
+    /// Returns the raw wire-level `u64` ID.
+    #[must_use]
+    pub fn get(&self) -> u64 {
+        self.id.get()
     }
 
-    /// Consumes the wrapper and returns the raw wire-level `u64` ID.
-    #[must_use]
-    pub fn get(self) -> u64 {
-        self.0
+    /// Drops the expected ack type, keeping the id and its connection.
+    pub(crate) fn into_dyn(self) -> DynAckId {
+        self.id
     }
 }
 
@@ -233,11 +247,23 @@ mod tests {
 
     #[test]
     fn has_ack_format_inserts_id() {
-        let id = <HasAck<()>>::parse(Some(42)).unwrap();
+        let id = <HasAck<()>>::parse(Some(DynAckId::new(42))).unwrap();
         assert_eq!(
             fmt_markers(|m| HasAck::<()>::format(&id, m)),
             r#"{"id": 42}"#
         );
+    }
+
+    #[test]
+    fn ack_id_debug_shows_only_the_wire_id() {
+        let mut id = DynAckId::new(42);
+        id.bind(
+            &bytestring::ByteString::from_static("/admin"),
+            &tokio_util::sync::CancellationToken::new(),
+        );
+        assert_eq!(format!("{id:?}"), "DynAckId(42)");
+        let id = <HasAck<()>>::parse(Some(id)).unwrap();
+        assert_eq!(format!("{id:?}"), "AckId(42)");
     }
 
     #[test]
@@ -297,12 +323,12 @@ mod tests {
 
     #[test]
     fn no_ack_parse_some_fails() {
-        assert!(NoAck::parse(Some(42)).is_err());
+        assert!(NoAck::parse(Some(DynAckId::new(42))).is_err());
     }
 
     #[test]
     fn has_ack_parse_some_succeeds() {
-        let id = <HasAck<()>>::parse(Some(7)).unwrap();
+        let id = <HasAck<()>>::parse(Some(DynAckId::new(7))).unwrap();
         assert_eq!(id.get(), 7);
     }
 

@@ -15,7 +15,7 @@ use crate::event::Emit;
 use crate::manager::driver::Manager;
 use crate::manager::state::ManagerCore;
 use crate::marker::{AckMarker, HasAck, NoAck, NoBinary};
-use crate::packet::{ClientPacket, ServerPacket};
+use crate::packet::{ClientPacket, DynAckId, DynEvent, ServerPacket};
 
 struct TestEmit;
 
@@ -122,7 +122,7 @@ async fn rejects_invalid_binary_attachment_counts_before_enqueueing() {
             let packet = if is_ack {
                 ClientPacket::Ack {
                     payload: "[]".into(),
-                    id: 0,
+                    id: DynAckId::new(0),
                     attachments,
                 }
             } else {
@@ -160,8 +160,13 @@ async fn emit_returns_error_once_the_manager_ended() {
 
 #[tokio::test]
 async fn acknowledge_sends_ack_packet_with_correct_id() {
-    let (sender, _receiver, manager) = socket_sender();
-    let id = HasAck::<()>::parse(Some(5)).unwrap();
+    let (sender, mut receiver, manager) = socket_sender();
+    assert!(matches!(receiver.try_recv(), Ok(ServerPacket::Connect(_))));
+    manager.with_core(|core| core.receive(ServerMessage::Text(r#"25["ask"]"#.into())));
+    let Ok(ServerPacket::Event(DynEvent { id: Some(id), .. })) = receiver.try_recv() else {
+        panic!("the server asked for an ack");
+    };
+    let id = HasAck::<()>::parse(Some(id)).unwrap();
     sender.acknowledge(id, ()).await.unwrap();
     assert_eq!(messages(&manager), ["35[]"]);
 }

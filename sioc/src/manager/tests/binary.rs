@@ -49,7 +49,7 @@ fn binary_ack_replies_leave_with_their_attachments() {
         "/",
         ClientPacket::Ack {
             payload: "[{\"_placeholder\":true,\"num\":0}]".into(),
-            id: 4,
+            id: rig.ack_id("/", 4),
             attachments: Some(vec![Bytes::from_static(b"r")]),
         },
     );

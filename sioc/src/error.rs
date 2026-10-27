@@ -107,11 +107,14 @@ pub enum SocketError {
         /// The namespace that is already open on the client.
         ns: ByteString,
     },
-    /// The namespace or the whole session has closed.
+    /// The namespace or the whole session has closed, or the connection that
+    /// delivered the event an ack replies to has ended.
     #[error("socket closed")]
     #[diagnostic(
         code(sioc::socket::closed),
-        help("the namespace was disconnected or the client ended")
+        help(
+            "the namespace was disconnected, the client ended, or an ack outlived its connection"
+        )
     )]
     Closed,
 

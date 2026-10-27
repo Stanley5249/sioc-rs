@@ -52,9 +52,9 @@ Each section covers one area or component. A rejected approach records why it fa
 
 - Unsent events of live handles retain their permits across Engine reconnect, but queued ACK replies are discarded. Buffering both across sessions replayed old replies on the next Engine.
 - Confirmed events and replies share submission order, so a reply flood cannot overtake an accepted event. The actor needed alternating polls because its separate input channels otherwise let ready replies starve events.
-- Replies made while unconfirmed are discarded. A reply waiting for capacity captures a connection token before waiting and is discarded if that connection ends, while `AckId` stays a wire id without a session tag.
+- A reply goes only to the connection that delivered its event, because the server's ack id carries that connection's token, and a reply for an ended connection fails with the closed error. Capturing the connection current when `acknowledge` started let a reply held across a reconnect answer a new request on servers that count ids per socket, such as python-socketio and socketioxide.
 - Ack ids count per namespace name and never restart. Restarting at 0 on reopen let a late ack for the closed namespace answer an event of the new one.
-- Rejected: a session tag on server ack ids. The tag was added and reverted, because the server draws ids from one counter per namespace that never resets, so the server already ignores a stale id, and the JS client sends acks without a check.
+- Rejected: a session counter on server ack ids. It was added and reverted on the premise that the server ignores a stale id, which holds only for one long-lived socket.io process, so the existing connection token now ties the id to its connection instead of a counter.
 - Registering an ack reclaims waiters whose handles were dropped or timed out. Without that, unanswered requests accumulated waiters.
 
 ## Reconnection

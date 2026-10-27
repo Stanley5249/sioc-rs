@@ -10,7 +10,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::packet::{ClientPacket, DynAck, ServerPacket};
+use crate::packet::{ClientPacket, DynAck, DynEvent, ServerPacket};
 
 /// A packet and its bounded queue slot, held until Engine submission.
 pub type Queued = (ClientPacket, OwnedSemaphorePermit);
@@ -209,10 +209,19 @@ impl Socket {
         }
     }
 
-    pub fn deliver(&self, ns: &ByteString, packet: ServerPacket) -> Option<Blocked> {
+    /// Delivers to live handles. An event's ack id remembers the connection
+    /// it arrived on, so its reply can never reach another one.
+    pub fn deliver(&self, ns: &ByteString, mut packet: ServerPacket) -> Option<Blocked> {
         let handles = self
             .handles()
             .filter(|handles| !handles.closed.is_cancelled())?;
+        if let (
+            ServerPacket::Event(DynEvent { id: Some(id), .. }),
+            SocketState::Connected { connection, .. },
+        ) = (&mut packet, &self.state)
+        {
+            id.bind(ns, connection);
+        }
         match handles.server_packet_tx.try_send(packet) {
             Ok(()) => None,
             Err(TrySendError::Full(packet)) => Some(Blocked {

@@ -199,42 +199,51 @@ impl ManagerCore {
         Ok(())
     }
 
-    /// Returns the current connection of the handles that own `capacity`, so
-    /// a reply can wait for capacity without outliving that connection.
+    /// Returns the token of the confirmed connection of `ns`, which delivered
+    /// events bind their ack ids to.
+    #[cfg(test)]
     #[must_use]
-    pub fn connection(&self, ns: &str, capacity: &Arc<Semaphore>) -> Option<CancellationToken> {
+    pub fn connection(&self, ns: &str) -> Option<CancellationToken> {
         match &self.sockets.get(ns)?.state {
-            SocketState::Connected {
-                handles,
-                connection,
-                ..
-            } if Arc::ptr_eq(&handles.capacity, capacity) => Some(connection.clone()),
+            SocketState::Connected { connection, .. } => Some(connection.clone()),
             _ => None,
         }
     }
 
     /// Accepts an ACK reply, like the function `Socket.ack` returns, if the
-    /// connection it answers is still current. Otherwise discards it, like
-    /// writing to a closed engine.
+    /// connection that delivered its event is still current and belongs to
+    /// the handles that own `slot`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SocketError::Closed`] if that connection has ended.
     pub fn acknowledge(
         &mut self,
         ns: &ByteString,
         packet: ClientPacket,
         slot: OwnedSemaphorePermit,
-        connection: &CancellationToken,
-    ) {
+    ) -> Result<(), SocketError> {
+        let ClientPacket::Ack { id, .. } = &packet else {
+            unreachable!("only replies are acknowledged");
+        };
+        // A namespace has at most one uncancelled connection token, so a live
+        // token of `ns` is its current connection.
+        let delivered = id
+            .connection(ns)
+            .is_some_and(|connection| !connection.is_cancelled());
         let current = self.sockets.get(ns).is_some_and(|socket| {
             matches!(&socket.state, SocketState::Connected { handles, .. } if handles.owns(&slot))
         });
-        if !current || connection.is_cancelled() {
-            tracing::debug!(%ns, "discarded ack for an ended connection");
-            return;
+        if !delivered || !current {
+            tracing::debug!(%ns, id = id.get(), "rejected ack for an ended connection");
+            return Err(SocketError::Closed);
         }
         self.write_buffer.push_back(Write::Packet {
             ns: ns.clone(),
             packet,
             slot,
         });
+        Ok(())
     }
 
     /// Disconnects the handles that own `capacity`, like `Socket.disconnect`.
@@ -646,10 +655,13 @@ fn wire_packet(socket: &mut Socket, packet: ClientPacket) -> (Packet, Option<Vec
             attachments,
         } => {
             let packet = match &attachments {
-                None => Packet::Ack { payload, id },
+                None => Packet::Ack {
+                    payload,
+                    id: id.get(),
+                },
                 Some(attachments) => Packet::BinaryAck {
                     payload,
-                    id,
+                    id: id.get(),
                     count: attachments.len(),
                 },
             };

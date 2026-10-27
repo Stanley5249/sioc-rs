@@ -49,7 +49,7 @@ fn server_end_fails_waiters_discards_queued_packets_and_bypasses_a_full_receiver
         rig.messages();
         let (unsent_packet, mut unsent) = event_ack("[\"b\"]");
         rig.send("/", unsent_packet);
-        rig.send("/", ack(3));
+        rig.send("/", ack(rig.ack_id("/", 3)));
 
         rig.server(end);
 
@@ -79,7 +79,7 @@ fn disconnect_after_confirmation_sends_accepted_packets_then_disconnect_then_clo
     let handles = rig.connected("/");
 
     rig.send("/", event("[\"e1\"]"));
-    rig.send("/", ack(4));
+    rig.send("/", ack(rig.ack_id("/", 4)));
     rig.send("/", event("[\"e2\"]"));
     assert_eq!(rig.disconnect("/"), []);
     assert!(handles.closed.is_cancelled());
@@ -196,6 +196,7 @@ fn old_handles_cannot_touch_the_new_handles_of_their_name() {
     let mut rig = Rig::new();
     let _keep_engine = rig.connected("/keep");
     let old = rig.connected("/");
+    let old_id = rig.ack_id("/", 1);
     rig.disconnect("/");
     rig.messages();
     let new = rig.connect("/", "{}", 32);
@@ -207,7 +208,12 @@ fn old_handles_cannot_touch_the_new_handles_of_their_name() {
     assert!(old.capacity.is_closed());
     rig.core.disconnect(&"/".into(), &old.capacity);
     assert!(!new.closed.is_cancelled());
-    assert_eq!(rig.core.connection("/", &old.capacity), None);
+    // A reply bound to the old connection finds no way into the new one.
+    let reply_slot = new.reply_capacity.clone().try_acquire_owned().unwrap();
+    assert!(matches!(
+        rig.core.acknowledge(&"/".into(), ack(old_id), reply_slot),
+        Err(SocketError::Closed)
+    ));
     rig.send("/", event("[\"new\"]"));
     assert_eq!(rig.messages(), ["2[\"new\"]"]);
 }
