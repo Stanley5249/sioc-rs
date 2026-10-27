@@ -96,15 +96,6 @@ pub struct AckId<A> {
     marker: PhantomData<A>,
 }
 
-impl<A> Clone for AckId<A> {
-    fn clone(&self) -> Self {
-        Self {
-            id: self.id.clone(),
-            marker: PhantomData,
-        }
-    }
-}
-
 impl<A> std::fmt::Debug for AckId<A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("AckId").field(&self.id.get()).finish()
@@ -261,6 +252,18 @@ mod tests {
             fmt_markers(|m| HasAck::<()>::format(&id, m)),
             r#"{"id": 42}"#
         );
+    }
+
+    #[test]
+    fn ack_id_debug_shows_only_the_wire_id() {
+        let mut id = DynAckId::new(42);
+        id.bind(
+            &bytestring::ByteString::from_static("/admin"),
+            &tokio_util::sync::CancellationToken::new(),
+        );
+        assert_eq!(format!("{id:?}"), "DynAckId(42)");
+        let id = <HasAck<()>>::parse(Some(id)).unwrap();
+        assert_eq!(format!("{id:?}"), "AckId(42)");
     }
 
     #[test]
