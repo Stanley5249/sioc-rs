@@ -115,10 +115,19 @@ pub enum SocketError {
     )]
     Closed,
 
-    /// Event payload serialization failed.
+    /// Event or auth payload serialization failed.
     #[error("failed to serialize payload")]
     #[diagnostic(code(sioc::socket::payload))]
     Payload(#[from] PayloadError),
+    /// The auth payload of
+    /// [`SocketBuilder::auth`](crate::client::SocketBuilder::auth) is not a
+    /// JSON object.
+    #[error("auth payload is not a JSON object")]
+    #[diagnostic(
+        code(sioc::socket::auth),
+        help("Socket.IO servers accept only an object as the CONNECT payload")
+    )]
+    Auth,
 }
 
 /// Error converting a [`DynEvent`](crate::packet::DynEvent) into a typed

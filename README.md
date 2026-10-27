@@ -24,6 +24,13 @@ let client = ClientBuilder::new(url).open()?;
 let (tx, mut rx) = client.connect("/").await?;
 ```
 
+To send an auth payload with the namespace's CONNECT, like socket.io-client's `auth` option, configure the namespace with `client.socket`. The payload must serialize to a JSON object.
+
+```rust
+let auth = serde_json::json!({ "token": "secret" });
+let (tx, mut rx) = client.socket("/admin").auth(&auth).connect().await?;
+```
+
 ### Emit
 
 Derive `EventType` and `SerializePayload` on your type. `EventType` provides the event name for routing and defaults to the struct name in snake case. `SerializePayload` serializes the fields as a JSON array to match the Socket.IO wire format: `42["message","Hello World!"]`.

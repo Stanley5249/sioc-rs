@@ -21,7 +21,7 @@ pub mod prelude {
 
     pub use crate::ack::{Ack, AckHandle, Acknowledge};
     pub use crate::binary::{AttachmentsBuilder, MAX_ATTACHMENTS, Placeholder};
-    pub use crate::client::{Client, ClientBuilder, SocketReceiver, SocketSender};
+    pub use crate::client::{Client, ClientBuilder, SocketBuilder, SocketReceiver, SocketSender};
     pub use crate::config::{ChannelConfig, ReconnectionConfig};
     pub use crate::event::{Emit, Event, EventHandler, EventRouter};
     pub use crate::marker::{
