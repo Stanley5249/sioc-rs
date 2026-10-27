@@ -1,19 +1,19 @@
-//! Client settings: channel capacities and reconnection.
+//! Client settings: queue capacities and reconnection.
 
 use std::time::Duration;
 
-/// Channel buffer capacities for each internal MPSC queue.
+/// Capacities of the client's bounded queues, in packets or messages.
 ///
 /// Construct via [`From<()>`] or [`Default`] for defaults, or [`From<usize>`]
-/// for uniform sizing, then set fields for per-channel control. The fields
-/// follow the client's internal channels, which may change, so the type is
+/// for uniform sizing, then set fields for per-queue control. The fields
+/// follow the client's queues, which may change, so the type is
 /// non-exhaustive.
 ///
 /// ```
 /// use sioc::prelude::ChannelConfig;
 ///
 /// let mut channels = ChannelConfig::from(64);
-/// channels.socket = 256;
+/// channels.receiver = 256;
 /// ```
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
@@ -23,16 +23,18 @@ pub struct ChannelConfig {
     pub engine: usize,
     /// Transport channel: encoded frames to send to the transport.
     pub transport: usize,
-    /// Manager capacities: the channel of messages from the engine, and for
-    /// each namespace the events and, separately, the ACK replies that the
-    /// manager holds for the engine. Events wait before confirmation and
-    /// across reconnect, and replies are discarded when their engine ends.
-    /// Each has this capacity.
+    /// Manager inbox: messages from the engine.
     pub manager: usize,
-    /// Per-namespace inbox: server packets delivered to each
+    /// Per-namespace send buffer: events that each
+    /// [`SocketSender`](crate::client::SocketSender) emitted and the engine
+    /// has not taken yet, and separately as many ACK replies. Events wait
+    /// before confirmation and across reconnect, and replies are discarded
+    /// when their engine ends. A full buffer makes `emit` wait.
+    pub sender: usize,
+    /// Per-namespace inbox: server packets queued for each
     /// [`SocketReceiver`](crate::client::SocketReceiver), plus one separate
     /// slot for the terminal packet.
-    pub socket: usize,
+    pub receiver: usize,
 }
 
 impl Default for ChannelConfig {
@@ -41,7 +43,8 @@ impl Default for ChannelConfig {
             engine: 32,
             transport: 32,
             manager: 32,
-            socket: 32,
+            sender: 32,
+            receiver: 32,
         }
     }
 }
@@ -58,7 +61,8 @@ impl From<usize> for ChannelConfig {
             engine: n,
             transport: n,
             manager: n,
-            socket: n,
+            sender: n,
+            receiver: n,
         }
     }
 }
@@ -108,8 +112,8 @@ mod tests {
     fn channel_config_default_is_32() {
         let c = ChannelConfig::default();
         assert_eq!(
-            (c.engine, c.transport, c.manager, c.socket),
-            (32, 32, 32, 32)
+            (c.engine, c.transport, c.manager, c.sender, c.receiver),
+            (32, 32, 32, 32, 32)
         );
     }
 
@@ -117,14 +121,17 @@ mod tests {
     fn channel_config_from_unit_matches_default() {
         let c = ChannelConfig::from(());
         assert_eq!(
-            (c.engine, c.transport, c.manager, c.socket),
-            (32, 32, 32, 32)
+            (c.engine, c.transport, c.manager, c.sender, c.receiver),
+            (32, 32, 32, 32, 32)
         );
     }
 
     #[test]
     fn channel_config_from_usize_uniform() {
         let c = ChannelConfig::from(8_usize);
-        assert_eq!((c.engine, c.transport, c.manager, c.socket), (8, 8, 8, 8));
+        assert_eq!(
+            (c.engine, c.transport, c.manager, c.sender, c.receiver),
+            (8, 8, 8, 8, 8)
+        );
     }
 }

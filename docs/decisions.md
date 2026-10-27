@@ -92,6 +92,7 @@ Each section covers one area or component. A rejected approach records why it fa
 ## Configuration
 
 - A zero channel capacity is a builder error. It used to panic inside Tokio.
+- Each capacity field bounds one resource. After the shared core, `manager` sized both the engine's message channel and every namespace's send buffer, so tuning one resized the other. `sender` now sizes the send buffers and `receiver`, formerly `socket`, the receivers.
 
 ## Public API
 

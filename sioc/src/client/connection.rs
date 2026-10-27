@@ -131,11 +131,10 @@ where
         self
     }
 
-    /// Override the positive channel buffer capacities (default: 32 for all
-    /// channels).
+    /// Override the positive queue capacities (default: 32 for all queues).
     ///
     /// Accepts `()` for defaults, a `usize` for uniform sizing, or a
-    /// [`ChannelConfig`] for per-channel control.
+    /// [`ChannelConfig`] for per-queue control.
     pub fn channels(mut self, config: impl Into<ChannelConfig>) -> Self {
         self.channels = config.into();
         self
@@ -183,7 +182,8 @@ where
             ("engine", self.channels.engine),
             ("transport", self.channels.transport),
             ("manager", self.channels.manager),
-            ("socket", self.channels.socket),
+            ("sender", self.channels.sender),
+            ("receiver", self.channels.receiver),
         ] {
             if capacity == 0 {
                 return Err(ClientBuilderError::ZeroCapacity { channel });
@@ -393,8 +393,8 @@ impl SocketBuilder<'_> {
             &client.handle.0,
             ns,
             auth?,
-            client.channels.manager,
-            client.channels.socket,
+            client.channels.sender,
+            client.channels.receiver,
         )
         .await
     }
