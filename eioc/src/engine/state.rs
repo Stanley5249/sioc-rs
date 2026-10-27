@@ -55,12 +55,8 @@ impl EngineCore {
     /// client does, so a quirky server cannot end the session. After the
     /// session closed, frames are discarded.
     pub fn on_frame(&mut self, frame: ServerFrame, now: Instant) -> Option<ServerMessage> {
-        match &frame {
-            ServerFrame::Binary(bytes) => {
-                tracing::trace!(bytes = bytes.len(), "received binary frame");
-            }
-            frame => tracing::trace!(?frame, "received packet"),
-        }
+        let (packet, bytes) = frame.summary();
+        tracing::trace!(packet, bytes, "received packet");
 
         match (&mut self.state, frame) {
             (SessionState::Opening { .. }, ServerFrame::Open(handshake)) => {
@@ -93,8 +89,8 @@ impl EngineCore {
                 Some(ServerMessage::Binary(bytes))
             }
             (SessionState::Open { .. }, ServerFrame::Noop) | (SessionState::Closed, _) => None,
-            (SessionState::Opening { .. } | SessionState::Open { .. }, frame) => {
-                tracing::warn!(?frame, "ignored out-of-place packet");
+            (SessionState::Opening { .. } | SessionState::Open { .. }, _) => {
+                tracing::warn!(packet, bytes, "ignored out-of-place packet");
 
                 None
             }
@@ -114,7 +110,8 @@ impl EngineCore {
             ClientMessage::Text(payload) => ClientFrame::Message(payload),
             ClientMessage::Binary(bytes) => ClientFrame::Binary(bytes),
         };
-        tracing::trace!(?frame, "sent packet");
+        let (packet, bytes) = frame.summary();
+        tracing::trace!(packet, bytes, "sent packet");
 
         Some(frame)
     }

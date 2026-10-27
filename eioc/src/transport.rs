@@ -64,6 +64,20 @@ impl ServerFrame {
             Frame::Binary(bytes) => Self::Binary(bytes),
         })
     }
+
+    /// The packet type and payload length for logs, which never carry the
+    /// payload itself, because a message holds application data.
+    pub(crate) fn summary(&self) -> (&'static str, usize) {
+        match self {
+            Self::Open(_) => ("open", 0),
+            Self::Ping(payload) => ("ping", payload.len()),
+            Self::Pong(payload) => ("pong", payload.len()),
+            Self::Message(payload) => ("message", payload.len()),
+            Self::Upgrade => ("upgrade", 0),
+            Self::Noop => ("noop", 0),
+            Self::Binary(bytes) => ("binary", bytes.len()),
+        }
+    }
 }
 
 /// A frame the engine sends, like the packets of `Transport.send`. The
@@ -76,6 +90,18 @@ pub enum ClientFrame {
     Binary(Bytes),
     /// The answer to the server's last ping.
     Pong(ByteString),
+}
+
+impl ClientFrame {
+    /// The packet type and payload length for logs, like
+    /// [`ServerFrame::summary`].
+    pub(crate) fn summary(&self) -> (&'static str, usize) {
+        match self {
+            Self::Message(payload) => ("message", payload.len()),
+            Self::Binary(bytes) => ("binary", bytes.len()),
+            Self::Pong(payload) => ("pong", payload.len()),
+        }
+    }
 }
 
 impl From<ClientFrame> for Frame {
