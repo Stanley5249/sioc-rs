@@ -338,7 +338,7 @@ pub enum ManagerError {
     /// Received a text frame while a binary reassembly was in progress, which
     /// socket.io-parser's `Decoder.add` rejects with "got plaintext data when
     /// reconstructing a packet".
-    #[error("unexpected text frame: {0:?}")]
+    #[error("unexpected text frame of {} bytes", .0.len())]
     #[diagnostic(
         code(sioc::parse::unexpected_text),
         help(
@@ -350,7 +350,7 @@ pub enum ManagerError {
     /// Received a binary frame with no pending reassembly, which
     /// socket.io-parser's `Decoder.add` rejects with "got binary data when not
     /// reconstructing a packet".
-    #[error("unexpected binary frame: {0:?}")]
+    #[error("unexpected binary frame of {} bytes", .0.len())]
     #[diagnostic(
         code(sioc::parse::unexpected_binary),
         help(
@@ -400,6 +400,14 @@ mod tests {
         for error in errors {
             assert!(!error.is_internal(), "{error:?}");
         }
+    }
+
+    #[test]
+    fn unexpected_frame_messages_show_the_length_without_the_payload() {
+        let text = ManagerError::UnexpectedText(r#"2["secret"]"#.into()).to_string();
+        let binary = ManagerError::UnexpectedBinary(Bytes::from_static(b"secret")).to_string();
+        assert_eq!(text, "unexpected text frame of 11 bytes");
+        assert_eq!(binary, "unexpected binary frame of 6 bytes");
     }
 
     #[test]

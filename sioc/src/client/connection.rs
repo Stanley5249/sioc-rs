@@ -389,13 +389,6 @@ impl SocketBuilder<'_> {
     /// or [`SocketError::Closed`] if the client has ended.
     pub async fn connect(self) -> Result<(SocketSender, SocketReceiver), SocketError> {
         let Self { client, ns, auth } = self;
-        crate::client::connect(
-            &client.handle.0,
-            ns,
-            auth?,
-            client.channels.sender,
-            client.channels.receiver,
-        )
-        .await
+        crate::client::connect(&client.handle.0, ns, auth?, client.channels).await
     }
 }

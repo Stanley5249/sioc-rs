@@ -56,9 +56,18 @@ async fn emits_while_handling_a_server_flood() {
         result_tx,
     } = session_rx.recv().await.unwrap();
 
-    let (tx, mut rx) = crate::client::connect(&manager, "/".into(), ByteString::new(), 2, 1)
-        .await
-        .unwrap();
+    let (tx, mut rx) = crate::client::connect(
+        &manager,
+        "/".into(),
+        ByteString::new(),
+        ChannelConfig {
+            sender: 2,
+            receiver: 1,
+            ..ChannelConfig::default()
+        },
+    )
+    .await
+    .unwrap();
 
     // The engine reads client messages independently of the server direction.
     let reader = tokio::spawn(async move {
@@ -319,4 +328,88 @@ async fn dropping_last_sender_releases_a_full_unconfirmed_buffer() {
         .await
         .expect("dropping the final sender releases buffered work")
         .unwrap();
+}
+
+/// Lets every task run until all are waiting, which paused time makes the only
+/// way the clock moves.
+async fn settle() {
+    tokio::time::sleep(Duration::from_secs(1)).await;
+}
+
+fn payloads(rx: &mut crate::client::SocketReceiver) -> Vec<String> {
+    let mut payloads = Vec::new();
+    while let Ok(packet) = rx.try_recv() {
+        match packet {
+            ServerPacket::Connect(_) => payloads.push("connect".to_owned()),
+            ServerPacket::Event(event) => payloads.push(event.payload.to_string()),
+            other => panic!("unexpected packet {other:?}"),
+        }
+    }
+    payloads
+}
+
+/// Only `receiver` sizes a namespace's receiver, so with every other capacity
+/// large, exactly `receiver` packets queue and the next one is held.
+#[tokio::test(start_paused = true)]
+async fn the_receiver_capacity_alone_bounds_queued_server_events() {
+    let channels = ChannelConfig {
+        receiver: 2,
+        ..ChannelConfig::from(64)
+    };
+    let mut manager = TestManager::spawn_with_channels(None, channels).await;
+    let (_tx, mut rx) = manager.open_with_channels("/", &channels).await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    for event in ["e1", "e2", "e3", "e4"] {
+        manager
+            .session()
+            .server_message_tx
+            .send(ServerMessage::Text(format!(r#"2["{event}"]"#).into()))
+            .await
+            .unwrap();
+    }
+    settle().await;
+
+    // CONNECT and `e1` fill the queue, and the driver holds `e2`.
+    assert_eq!(payloads(&mut rx), ["connect", r#"["e1"]"#]);
+
+    // The queue drained, so the held `e2` goes in first, and `e3` and `e4`
+    // follow in order.
+    assert!(matches!(rx.recv().await, Some(ServerPacket::Event(e)) if &*e.payload == r#"["e2"]"#));
+    settle().await;
+    assert_eq!(payloads(&mut rx), [r#"["e3"]"#, r#"["e4"]"#]);
+    settle().await;
+    assert_eq!(payloads(&mut rx), Vec::<String>::new());
+}
+
+/// A small `sender` leaves a large `receiver` alone, so every packet queues.
+#[tokio::test(start_paused = true)]
+async fn a_small_sender_capacity_does_not_hold_server_events() {
+    let channels = ChannelConfig {
+        sender: 1,
+        receiver: 8,
+        ..ChannelConfig::from(64)
+    };
+    let mut manager = TestManager::spawn_with_channels(None, channels).await;
+    let (_tx, mut rx) = manager.open_with_channels("/", &channels).await;
+    manager.send_server_message(CONNECT_RESPONSE).await;
+    for event in ["e1", "e2", "e3", "e4"] {
+        manager
+            .session()
+            .server_message_tx
+            .send(ServerMessage::Text(format!(r#"2["{event}"]"#).into()))
+            .await
+            .unwrap();
+    }
+    settle().await;
+
+    assert_eq!(
+        payloads(&mut rx),
+        [
+            "connect",
+            r#"["e1"]"#,
+            r#"["e2"]"#,
+            r#"["e3"]"#,
+            r#"["e4"]"#
+        ]
+    );
 }

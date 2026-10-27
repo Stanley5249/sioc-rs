@@ -218,7 +218,15 @@ async fn blocked_replies(
 ) -> (SocketSender, SocketReceiver, Vec<DynAckId>) {
     let (tx, mut rx) = within(
         "open",
-        crate::client::connect(&manager.manager, "/".into(), ByteString::new(), 1, 32),
+        crate::client::connect(
+            &manager.manager,
+            "/".into(),
+            ByteString::new(),
+            ChannelConfig {
+                sender: 1,
+                ..ChannelConfig::from(32)
+            },
+        ),
     )
     .await
     .unwrap();
