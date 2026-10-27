@@ -7,7 +7,7 @@ Invariants protect correctness, so a change that breaks one needs a new entry in
 - **Ownership:** Each piece of mutable state has one owner, such as a task or a synchronous core, and others act through it. Handles may share a core through one mutex when each call applies a whole synchronous transition, no lock spans an await or a user connector, and a panic wakes the driver for shutdown.
 - **Bounded memory:** Every channel the server can fill is bounded. An unbounded channel needs a library limit on its items, stated in a comment on the channel.
 - **Progress:** A full output holds up only the data bound for it, never other inputs, shutdown, or cleanup. A `select!` loop with several data inputs waits for each output, such as a permit or a timer, as its own branch instead of awaiting inside a handler. Every branch future is cancel safe, and a future that must survive, such as an HTTP request in flight, is owned outside the `select!` and polled by reference.
-- **Shutdown:** A component shuts down by dropping its senders and finishes after every input channel returns `None`. A failed send between library components is therefore a bug, and an item is discarded only when its destination has ended or the application dropped its receiver.
+- **Shutdown:** Each component has one way its peers learn that it ended, and its cleanup never waits on the application. An item is discarded only when its destination has ended or the application dropped its receiver, so nothing is lost silently.
 - **Wakeups:** Every wait has a wakeup that its condition triggers, and no two components wait on each other. A channel's end hides behind its unread items, so a reader that can stall under backpressure also watches a signal that ends with the sender, such as a value-less `watch` channel.
 - **Accounting:** A queued item and its permit have one holder until submission or cancellation. A closing participation stays unusable until its old work is gone.
 
@@ -15,6 +15,7 @@ Invariants protect correctness, so a change that breaks one needs a new entry in
 
 - Put protocol rules in a synchronous core that takes and returns plain data when they are worth testing apart from I/O. Concurrency that belongs to one component, such as a transport's requests, may stay in its async code.
 - Run independent I/O directions as separate futures, so a stall in one never holds up the other.
+- Tasks joined by channels shut down by half-close. A task drops its senders and finishes after every input returns `None`, so a failed send between them is a bug. Handles that share a core end through the core instead.
 - Add a task, channel, buffer, lifecycle flag, or manual `poll` only for a responsibility nothing else holds, and say why in a doc comment when it is not obvious.
 
 ## Protocol and naming
@@ -37,8 +38,7 @@ Invariants protect correctness, so a change that breaks one needs a new entry in
 
 `rustfmt.toml`, Clippy, and the workspace lints cover formatting, imports, and missing docs. Beyond them:
 
-- A `mod.rs` holds only module docs, `mod` declarations, and re-exports.
-- Call a function in another module of the same crate by its `crate::` path instead of importing the module.
+- Prefer a `mod.rs` that holds only module docs, `mod` declarations, and re-exports.
 - Write a Cargo requirement to its leftmost nonzero component, such as `"1"` or `"0.7"`, so downstream crates can share a compatible version. The lockfile pins exact versions.
 
 ## Tests
