@@ -257,6 +257,38 @@ async fn failed_upgrade_falls_back_to_long_polling() {
 }
 
 #[tokio::test]
+async fn successful_upgrade_finishes_the_get_in_flight_before_handing_over() {
+    let server = http_server("4data").await;
+    let (server_frame_tx, mut server_frame_rx) = mpsc::channel(4);
+    let (_transport_tx, mut client_frame_rx) = mpsc::channel(4);
+    let client = Client::new();
+    let (stream, _peer) = crate::websocket::tests::ws_pair().await;
+    let upgrade = async {
+        server.get_received.cancelled().await;
+        server.respond.cancel();
+        Ok(stream)
+    };
+    let stream = crate::polling::forward::forward_frames_until_upgrade(
+        &client,
+        &server.url,
+        &server_frame_tx,
+        &mut client_frame_rx,
+        upgrade,
+        1_000_000,
+    )
+    .await
+    .unwrap();
+    assert!(stream.is_some());
+    // The GET in flight at the upgrade still delivers its frame, and no
+    // further GET follows.
+    assert!(matches!(
+        server_frame_rx.try_recv().unwrap(),
+        ServerFrame::Message(m) if m == "data"
+    ));
+    server_frame_rx.try_recv().unwrap_err();
+}
+
+#[tokio::test]
 async fn transport_rejects_a_first_frame_other_than_open() {
     let server = http_server("4data").await;
     server.respond.cancel();
