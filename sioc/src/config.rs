@@ -4,8 +4,8 @@ use std::time::Duration;
 
 /// Capacities of the client's bounded queues, in packets or messages.
 ///
-/// Construct via [`From<()>`] or [`Default`] for defaults, or [`From<usize>`]
-/// for uniform sizing, then set fields for per-queue control. The fields
+/// Construct via [`Default`] for defaults, or [`From<usize>`] for uniform
+/// sizing, then set fields for per-queue control. The fields
 /// follow the client's queues, which may change, so the type is
 /// non-exhaustive.
 ///
@@ -49,12 +49,6 @@ impl Default for ChannelConfig {
     }
 }
 
-impl From<()> for ChannelConfig {
-    fn from((): ()) -> Self {
-        Self::default()
-    }
-}
-
 impl From<usize> for ChannelConfig {
     fn from(n: usize) -> Self {
         Self {
@@ -75,9 +69,12 @@ impl From<usize> for ChannelConfig {
 /// restarts once an Engine.IO handshake succeeds, like socket.io-client, so it
 /// counts only failed connection attempts in a row.
 ///
+/// The type is non-exhaustive, so start from [`Default`] and set fields.
+///
 /// Pass it to
 /// [`ClientBuilder::reconnection`](crate::client::ClientBuilder::reconnection).
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct ReconnectionConfig {
     /// The number of attempts before giving up, or `None` for no limit, like
     /// `reconnectionAttempts` (default: `None`).
@@ -111,15 +108,6 @@ mod tests {
     #[test]
     fn channel_config_default_is_32() {
         let c = ChannelConfig::default();
-        assert_eq!(
-            (c.engine, c.transport, c.manager, c.sender, c.receiver),
-            (32, 32, 32, 32, 32)
-        );
-    }
-
-    #[test]
-    fn channel_config_from_unit_matches_default() {
-        let c = ChannelConfig::from(());
         assert_eq!(
             (c.engine, c.transport, c.manager, c.sender, c.receiver),
             (32, 32, 32, 32, 32)

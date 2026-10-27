@@ -99,11 +99,9 @@ impl Server {
     /// Opens a client that reconnects after 50 milliseconds, to keep the
     /// reconnection tests short.
     fn client(&self, transport: TransportStrategy, capacity: usize) -> Client {
-        let reconnection = ReconnectionConfig {
-            delay: Duration::from_millis(50),
-            delay_max: Duration::from_millis(50),
-            ..ReconnectionConfig::default()
-        };
+        let mut reconnection = ReconnectionConfig::default();
+        reconnection.delay = Duration::from_millis(50);
+        reconnection.delay_max = Duration::from_millis(50);
         ClientBuilder::new(self.url.clone())
             .transport(transport)
             .channels(capacity)
