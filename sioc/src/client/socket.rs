@@ -9,6 +9,7 @@ use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::ack::Acknowledge;
+use crate::config::ChannelConfig;
 use crate::error::SocketError;
 use crate::event::Emit;
 use crate::manager::driver::Manager;
@@ -49,8 +50,9 @@ impl Drop for SenderShared {
 }
 
 /// Opens `ns` on `manager` and returns its handles, like `Manager.socket`
-/// followed by `Socket.connect`. `capacity` bounds the queued events and,
-/// separately, the queued replies, and `server_capacity` the receiver.
+/// followed by `Socket.connect`. `channels.sender` bounds the queued events
+/// and, separately, the queued replies, and `channels.receiver` the
+/// receiver.
 ///
 /// While the previous handles of `ns` still flush, waits for their release
 /// and tries again. Cancel safe: a waiting call holds only a token clone.
@@ -63,11 +65,10 @@ pub(crate) async fn connect(
     manager: &Arc<Manager>,
     ns: ByteString,
     auth: ByteString,
-    capacity: usize,
-    server_capacity: usize,
+    channels: ChannelConfig,
 ) -> Result<(SocketSender, SocketReceiver), SocketError> {
     loop {
-        match try_connect(manager, ns.clone(), auth.clone(), capacity, server_capacity)? {
+        match try_connect(manager, ns.clone(), auth.clone(), channels)? {
             Ok(handles) => return Ok(handles),
             Err(release) => release.cancelled().await,
         }
@@ -80,13 +81,12 @@ fn try_connect(
     manager: &Arc<Manager>,
     ns: ByteString,
     auth: ByteString,
-    capacity: usize,
-    server_capacity: usize,
+    channels: ChannelConfig,
 ) -> Result<Result<(SocketSender, SocketReceiver), CancellationToken>, SocketError> {
-    let capacity = Arc::new(Semaphore::new(capacity));
-    let reply_capacity = Arc::new(Semaphore::new(capacity.available_permits()));
+    let capacity = Arc::new(Semaphore::new(channels.sender));
+    let reply_capacity = Arc::new(Semaphore::new(channels.sender));
     let closed = CancellationToken::new();
-    let (server_packet_tx, server_packet_rx) = mpsc::channel(server_capacity);
+    let (server_packet_tx, server_packet_rx) = mpsc::channel(channels.receiver);
     let (terminal_packet_tx, terminal_packet_rx) = oneshot::channel();
     let handles = Handles {
         auth: Auth(auth),

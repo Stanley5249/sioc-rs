@@ -119,6 +119,24 @@ impl TestManager {
         (tx, rx)
     }
 
+    /// Opens a namespace with the capacities that `SocketBuilder::connect`
+    /// takes from `channels`, and consumes its CONNECT packet.
+    pub async fn open_with_channels(
+        &mut self,
+        ns: &str,
+        channels: &ChannelConfig,
+    ) -> (SocketSender, SocketReceiver) {
+        let handles = futures_util::FutureExt::now_or_never(crate::client::connect(
+            &self.manager,
+            ns.into(),
+            ByteString::new(),
+            *channels,
+        ))
+        .expect("the harness never reuses a flushing name")
+        .unwrap();
+        assert!(self.recv_client_text().await.starts_with('0'));
+        handles
+    }
     /// Opens a namespace as `Client::connect` does, with room for 32 events.
     pub fn connect(
         &self,
@@ -130,8 +148,10 @@ impl TestManager {
             &self.manager,
             ns.into(),
             auth,
-            32,
-            server_packet_capacity,
+            ChannelConfig {
+                receiver: server_packet_capacity,
+                ..ChannelConfig::default()
+            },
         ))
         .expect("the harness never reuses a flushing name")
     }

@@ -9,6 +9,7 @@ use futures_util::FutureExt;
 use tokio::sync::mpsc::error::TryRecvError;
 
 use crate::client::{SocketReceiver, SocketSender};
+use crate::config::ChannelConfig;
 use crate::error::{PayloadError, SocketError};
 use crate::event::Emit;
 use crate::manager::driver::Manager;
@@ -40,8 +41,7 @@ fn socket_sender() -> (SocketSender, SocketReceiver, Arc<Manager>) {
         &manager,
         "/".into(),
         "".into(),
-        8,
-        8,
+        ChannelConfig::from(8),
     ))
     .unwrap()
     .unwrap();
@@ -171,7 +171,7 @@ fn reconnect(
     manager: &Arc<Manager>,
 ) -> impl Future<Output = Result<(SocketSender, SocketReceiver), SocketError>> + use<> {
     let manager = Arc::clone(manager);
-    async move { crate::client::connect(&manager, "/".into(), "".into(), 8, 8).await }
+    async move { crate::client::connect(&manager, "/".into(), "".into(), ChannelConfig::from(8)).await }
 }
 
 #[tokio::test]
