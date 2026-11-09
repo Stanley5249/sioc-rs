@@ -14,13 +14,9 @@ Socket.IO numbers its libraries and its protocols separately. `sioc` speaks Sock
 
 ## Design
 
-- Async networking built on [`tokio`](https://docs.rs/tokio), [`reqwest`](https://docs.rs/reqwest), and [`tokio-tungstenite`](https://docs.rs/tokio-tungstenite).
-- Shared synchronous manager core behind a short-lived mutex. Handles apply atomic transitions directly, and one background task owns Engine.IO, timers, and blocked incoming deliveries.
-- Derive macros for events and acks.
-- Reconnection like the JavaScript client. After a dropped connection, the client backs off, opens a new Engine.IO session, and connects every open namespace again.
-- Events are handled in match arms.
-- Application state lives in the enclosing scope.
-- Zero-copy packet parsing via [`bytestring`](https://docs.rs/bytestring) and [`bytes`](https://docs.rs/bytes).
+- Derive macros type every event and ack, and events arrive in a match loop where the application state lives.
+- Reconnection works like the JavaScript client. After a dropped connection, the client backs off, opens a new Engine.IO session, and connects every open namespace again.
+- Networking uses [`tokio`](https://docs.rs/tokio), [`reqwest`](https://docs.rs/reqwest), and [`tokio-tungstenite`](https://docs.rs/tokio-tungstenite).
 
 ## License
 
