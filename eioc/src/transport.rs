@@ -66,16 +66,19 @@ impl ServerFrame {
     }
 
     /// The packet type and payload length for logs, which never carry the
-    /// payload itself, because a message holds application data.
-    pub(crate) fn summary(&self) -> (&'static str, usize) {
+    /// payload itself, because a message holds application data. Open has
+    /// no length, because the transport has already decoded it into a
+    /// [`Handshake`], and the engine logs the session id once it accepts the
+    /// handshake.
+    pub(crate) fn summary(&self) -> (&'static str, Option<usize>) {
         match self {
-            Self::Open(_) => ("open", 0),
-            Self::Ping(payload) => ("ping", payload.len()),
-            Self::Pong(payload) => ("pong", payload.len()),
-            Self::Message(payload) => ("message", payload.len()),
-            Self::Upgrade => ("upgrade", 0),
-            Self::Noop => ("noop", 0),
-            Self::Binary(bytes) => ("binary", bytes.len()),
+            Self::Open(_) => ("open", None),
+            Self::Ping(payload) => ("ping", Some(payload.len())),
+            Self::Pong(payload) => ("pong", Some(payload.len())),
+            Self::Message(payload) => ("message", Some(payload.len())),
+            Self::Upgrade => ("upgrade", Some(0)),
+            Self::Noop => ("noop", Some(0)),
+            Self::Binary(bytes) => ("binary", Some(bytes.len())),
         }
     }
 }
