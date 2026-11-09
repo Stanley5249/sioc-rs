@@ -5,7 +5,7 @@ use serde::Deserialize;
 use sioc::prelude::*;
 use thiserror::Error;
 
-use crate::client::event::CustomGameOptions;
+use crate::prelude::*;
 
 // Game state
 

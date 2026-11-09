@@ -3,18 +3,7 @@
 use miette::Result;
 use sioc::prelude::*;
 
-use crate::server::event::{
-    AfkWarning, BigTeamUpdate, ChatColorChange, ChatRedaction, DisableRematch, DisableStayParty,
-    ErrorBanned, ErrorJoinQueue, ErrorKicked, ErrorQueueFull, ErrorSetUsername, ErrorUserId,
-    FriendAdded, FriendOffline, FriendOnline, FriendPresence, FriendRemoved, FriendRequestReceived,
-    GameLost, GameOver, GameStart, GameUpdate, GameWon, GioError, JoinedParty, LeftParty,
-    MainMenuChatUserLeft, ModerationWarning, Notify, PartyChatHistory, PartyInvite,
-    PartyInviteRequest, PartyJoinError, PartyJoinedQueue, PartyUpdate, PartyUserLeft, PingTileOn,
-    PongServer, PongWorker, PreGameStart, PublicCustomsUpdate, QueueChatHistory, QueueLeft,
-    QueueUpdate, QueueWaiting, QueueWaitingOver, Rank, RecvChatMessage, RematchUpdate,
-    RemovedFromQueue, ServerDown, ServerRestart, Stars, StayPartyUpdate, TeamJoinedQueue,
-    TeamUpdate, Teammates2v2, WarnPopup,
-};
+use crate::prelude::*;
 
 /// Dispatches a server-to-client event by name.
 #[derive(Debug, EventRouter)]

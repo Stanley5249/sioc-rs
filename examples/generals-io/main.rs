@@ -14,6 +14,7 @@ mod client;
     reason = "the schema covers the whole generals.io protocol, and the bot uses only some of it"
 )]
 mod constants;
+mod prelude;
 #[expect(
     dead_code,
     reason = "the schema covers the whole generals.io protocol, and the bot uses only some of it"

@@ -4,6 +4,8 @@ A bot for [generals.io](https://generals.io) built with `sioc`.
 
 The bot uses a state machine for queuing, play, game over, and rematches. It joins a game, sends a greeting, and surrenders automatically.
 
+This example is a small demo. For a full generals.io client and bot utilities, see [shuai](https://github.com/Stanley5249/shuai).
+
 ## Setup
 
 - `GENERALS_IO_USER_ID`: Your generals.io user ID. In browser developer tools, open the Network tab (Fetch/XHR or Socket section) and find Socket.IO packets. Look for packets like `42["stars_and_rank","your-user-id"]`.
