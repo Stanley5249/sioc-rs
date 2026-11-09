@@ -11,7 +11,7 @@ use eioc::prelude::{TransportStrategy, WebSocketConnector};
 use tokio::task::JoinHandle;
 use url::Url;
 
-use crate::client::{SocketReceiver, SocketSender};
+use crate::client::{SocketBuilder, SocketReceiver, SocketSender};
 use crate::config::{ChannelConfig, ReconnectionConfig};
 use crate::error::{ClientBuilderError, ClientError, ManagerError, SocketError};
 use crate::manager::backoff::Backoff;
@@ -267,11 +267,7 @@ impl Client {
     /// `Manager.socket`. Nothing is sent until
     /// [`SocketBuilder::connect`].
     pub fn socket(&self, ns: impl Into<ByteString>) -> SocketBuilder<'_> {
-        SocketBuilder {
-            client: self,
-            ns: ns.into(),
-            auth: Ok(ByteString::new()),
-        }
+        SocketBuilder::new(&self.handle.0, ns.into(), self.channels)
     }
 
     /// Opens a namespace with no auth payload. Shorthand for
@@ -304,91 +300,5 @@ impl Client {
         drop(handle);
         task.await??;
         Ok(())
-    }
-}
-
-/// Options for one namespace connection, like socket.io-client's
-/// `SocketOptions`. Created by [`Client::socket`].
-///
-/// ```rust,no_run
-/// # async fn run(client: sioc::prelude::Client) -> sioc::error::Result<()> {
-/// let auth = serde_json::json!({ "token": "secret" });
-/// let (tx, mut rx) = client.socket("/chat").auth(&auth).connect().await?;
-/// # Ok(())
-/// # }
-/// ```
-#[must_use = "call connect() to open the namespace"]
-pub struct SocketBuilder<'a> {
-    client: &'a Client,
-    ns: ByteString,
-    /// The encoded CONNECT payload, empty for none, or the error that
-    /// `connect` reports, like `reqwest::RequestBuilder::json`.
-    auth: Result<ByteString, SocketError>,
-}
-
-impl std::fmt::Debug for SocketBuilder<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // The auth payload often holds a secret, so it stays out of logs.
-        f.debug_struct("SocketBuilder")
-            .field("ns", &self.ns)
-            .finish_non_exhaustive()
-    }
-}
-
-impl SocketBuilder<'_> {
-    /// Sets the CONNECT payload, like socket.io-client's `auth` option. The
-    /// client sends it again on every reconnection. A later call replaces
-    /// the earlier one.
-    ///
-    /// `auth` must serialize to a JSON object, because the socket.io parser
-    /// rejects any other CONNECT payload and the server then closes the
-    /// whole connection. [`connect`](Self::connect) reports a failure, so
-    /// nothing invalid reaches the server.
-    pub fn auth<T: serde::Serialize>(mut self, auth: &T) -> Self {
-        self.auth = crate::payload::to_json(auth)
-            .map_err(SocketError::from)
-            .and_then(|json| {
-                // serde_json writes an object, and only an object, with a
-                // leading brace and no whitespace before it.
-                if json.starts_with('{') {
-                    Ok(json.into())
-                } else {
-                    Err(SocketError::Auth)
-                }
-            });
-        self
-    }
-
-    /// Opens the namespace and returns a sender/receiver pair, like
-    /// socket.io-client's `Socket.connect`.
-    ///
-    /// Returns once the new handles own the namespace, not once the server
-    /// confirms it. Confirmation arrives as a
-    /// [`ServerPacket::Connect`](crate::packet::ServerPacket::Connect) on the
-    /// [`SocketReceiver`], and events emitted before it wait in the bounded
-    /// send buffer.
-    ///
-    /// If earlier handles of the namespace disconnected and still flush their
-    /// accepted packets and DISCONNECT, waits until that flush is submitted to
-    /// Engine or cancelled, so the new CONNECT follows their DISCONNECT. Rust
-    /// wait: socket.io-client writes DISCONNECT at once. The wait has no
-    /// timeout of its own and lasts as long as the flush, which a stalled
-    /// Engine extends until its session ends. Of several calls that wait for
-    /// one name, one takes it and the others fail with
-    /// [`SocketError::NamespaceConflict`]. Cancel safe: a waiting call holds
-    /// no ownership.
-    ///
-    /// Keep a [`SocketSender`] alive while the receiver is in use, because
-    /// dropping the last one disconnects the namespace.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SocketError::Payload`] if the auth payload fails to
-    /// serialize, [`SocketError::Auth`] if it is not a JSON object,
-    /// [`SocketError::NamespaceConflict`] if the namespace is already open,
-    /// or [`SocketError::Closed`] if the client has ended.
-    pub async fn connect(self) -> Result<(SocketSender, SocketReceiver), SocketError> {
-        let Self { client, ns, auth } = self;
-        crate::client::connect(&client.handle.0, ns, auth?, client.channels).await
     }
 }
