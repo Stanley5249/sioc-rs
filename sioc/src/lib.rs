@@ -6,13 +6,20 @@ pub mod client;
 pub mod config;
 pub mod error;
 pub mod event;
+pub mod marker;
+pub mod packet;
+pub mod payload;
+
 // The manager runs inside the task that `ClientBuilder::open` spawns, behind
 // `Client::join` and the namespace handles, so it has no public surface.
 mod manager;
-pub mod marker;
-pub mod packet;
 mod parser;
-pub mod payload;
+
+/// The Socket.IO protocol revision implemented by this crate, like
+/// socket.io-parser's `protocol`. It never goes on the wire, because the
+/// server learns the revision from the Engine.IO version
+/// ([`eioc::ENGINE_IO_VERSION`]).
+pub const SOCKET_IO_VERSION: &str = "5";
 
 /// Convenience re-exports for common usage.
 pub mod prelude {
