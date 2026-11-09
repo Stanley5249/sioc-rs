@@ -30,7 +30,7 @@ pub struct TestHandles {
     /// Cancelled once the core drops these handles.
     pub release: CancellationToken,
     pub capacity: Arc<Semaphore>,
-    pub reply_capacity: Arc<Semaphore>,
+    pub ack_capacity: Arc<Semaphore>,
     pub closed: CancellationToken,
     pub server_packet_rx: mpsc::Receiver<ServerPacket>,
     pub terminal_packet_rx: oneshot::Receiver<ServerPacket>,
@@ -95,7 +95,7 @@ impl Rig {
     /// handles. The effects stay for `effects`.
     pub fn connect(&mut self, ns: &str, auth: &str, server_capacity: usize) -> TestHandles {
         let capacity = Arc::new(Semaphore::new(8));
-        let reply_capacity = Arc::new(Semaphore::new(8));
+        let ack_capacity = Arc::new(Semaphore::new(8));
         let closed = CancellationToken::new();
         let (server_packet_tx, server_packet_rx) = mpsc::channel(server_capacity);
         let (terminal_packet_tx, terminal_packet_rx) = oneshot::channel();
@@ -103,7 +103,7 @@ impl Rig {
         let handles = Handles {
             auth: Auth(auth.into()),
             capacity: Arc::clone(&capacity),
-            reply_capacity: Arc::clone(&reply_capacity),
+            ack_capacity: Arc::clone(&ack_capacity),
             closed: closed.clone(),
             server_packet_tx,
             terminal_packet_tx,
@@ -113,14 +113,14 @@ impl Rig {
         if matches!(result, Ok(None)) {
             self.capacities.insert(
                 ns.into(),
-                (Arc::clone(&capacity), Arc::clone(&reply_capacity)),
+                (Arc::clone(&capacity), Arc::clone(&ack_capacity)),
             );
         }
         TestHandles {
             result,
             release,
             capacity,
-            reply_capacity,
+            ack_capacity,
             closed,
             server_packet_rx,
             terminal_packet_rx,
@@ -184,10 +184,10 @@ impl Rig {
     }
 
     pub fn try_send(&mut self, ns: &str, packet: ClientPacket) -> Result<(), SocketError> {
-        let (capacity, reply_capacity) = self.capacities[ns].clone();
+        let (capacity, ack_capacity) = self.capacities[ns].clone();
         let ns = ByteString::from(ns);
         if matches!(packet, ClientPacket::Ack { .. }) {
-            let slot = reply_capacity
+            let slot = ack_capacity
                 .try_acquire_owned()
                 .map_err(|_| SocketError::Closed)?;
             self.core.acknowledge(&ns, packet, slot)

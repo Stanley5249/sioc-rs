@@ -154,7 +154,7 @@ fn slots_acquired_before_disconnect_cannot_accept_late_work() {
     rig.connected("/keep");
     let old = rig.connected("/");
     let event_slot = old.capacity.clone().try_acquire_owned().unwrap();
-    let reply_slot = old.reply_capacity.clone().try_acquire_owned().unwrap();
+    let ack_slot = old.ack_capacity.clone().try_acquire_owned().unwrap();
     let late = rig.ack_id("/", 99);
     rig.disconnect("/");
     assert!(matches!(
@@ -162,13 +162,13 @@ fn slots_acquired_before_disconnect_cannot_accept_late_work() {
         Err(SocketError::Closed)
     ));
     assert!(matches!(
-        rig.core.acknowledge(&"/".into(), ack(late), reply_slot),
+        rig.core.acknowledge(&"/".into(), ack(late), ack_slot),
         Err(SocketError::Closed)
     ));
     rig.core.disconnect(&"/".into(), &old.capacity);
     assert_eq!(rig.messages(), ["1"]);
     assert_eq!(old.capacity.available_permits(), 8);
-    assert_eq!(old.reply_capacity.available_permits(), 8);
+    assert_eq!(old.ack_capacity.available_permits(), 8);
 }
 
 #[test]

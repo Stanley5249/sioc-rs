@@ -72,7 +72,7 @@ pub struct Handles {
     /// Event admission capacity and participation identity.
     pub capacity: Arc<Semaphore>,
     /// Independent reply capacity.
-    pub reply_capacity: Arc<Semaphore>,
+    pub ack_capacity: Arc<Semaphore>,
     pub closed: CancellationToken,
     pub server_packet_tx: mpsc::Sender<ServerPacket>,
     /// Terminal packets bypass a full data queue.
@@ -95,12 +95,12 @@ impl Drop for Release {
 impl Handles {
     pub fn owns(&self, slot: &OwnedSemaphorePermit) -> bool {
         Arc::ptr_eq(&self.capacity, slot.semaphore())
-            || Arc::ptr_eq(&self.reply_capacity, slot.semaphore())
+            || Arc::ptr_eq(&self.ack_capacity, slot.semaphore())
     }
 
     fn close_admission(&self) {
         self.capacity.close();
-        self.reply_capacity.close();
+        self.ack_capacity.close();
         self.closed.cancel();
     }
 
@@ -326,7 +326,7 @@ mod tests {
         socket.connect(Handles {
             auth: Auth("{}".into()),
             capacity: Arc::new(Semaphore::new(1)),
-            reply_capacity: Arc::new(Semaphore::new(1)),
+            ack_capacity: Arc::new(Semaphore::new(1)),
             closed: CancellationToken::new(),
             server_packet_tx,
             terminal_packet_tx,

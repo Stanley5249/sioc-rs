@@ -209,9 +209,9 @@ fn old_handles_cannot_touch_the_new_handles_of_their_name() {
     rig.core.disconnect(&"/".into(), &old.capacity);
     assert!(!new.closed.is_cancelled());
     // A reply bound to the old connection finds no way into the new one.
-    let reply_slot = new.reply_capacity.clone().try_acquire_owned().unwrap();
+    let ack_slot = new.ack_capacity.clone().try_acquire_owned().unwrap();
     assert!(matches!(
-        rig.core.acknowledge(&"/".into(), ack(old_id), reply_slot),
+        rig.core.acknowledge(&"/".into(), ack(old_id), ack_slot),
         Err(SocketError::Closed)
     ));
     rig.send("/", event("[\"new\"]"));

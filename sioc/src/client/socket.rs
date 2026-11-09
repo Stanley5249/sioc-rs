@@ -38,7 +38,7 @@ struct SenderShared {
     /// namespace ends, and which identifies these handles.
     capacity: Arc<Semaphore>,
     /// The namespace's ACK reply capacity.
-    reply_capacity: Arc<Semaphore>,
+    ack_capacity: Arc<Semaphore>,
     closed: CancellationToken,
 }
 
@@ -186,14 +186,14 @@ fn try_connect(
     channels: ChannelConfig,
 ) -> Result<Result<(SocketSender, SocketReceiver), CancellationToken>, SocketError> {
     let capacity = Arc::new(Semaphore::new(channels.sender));
-    let reply_capacity = Arc::new(Semaphore::new(channels.sender));
+    let ack_capacity = Arc::new(Semaphore::new(channels.sender));
     let closed = CancellationToken::new();
     let (server_packet_tx, server_packet_rx) = mpsc::channel(channels.receiver);
     let (terminal_packet_tx, terminal_packet_rx) = oneshot::channel();
     let handles = Handles {
         auth: Auth(auth),
         capacity: Arc::clone(&capacity),
-        reply_capacity: Arc::clone(&reply_capacity),
+        ack_capacity: Arc::clone(&ack_capacity),
         closed: closed.clone(),
         server_packet_tx,
         terminal_packet_tx,
@@ -211,7 +211,7 @@ fn try_connect(
             manager: Arc::clone(manager),
             ns,
             capacity,
-            reply_capacity,
+            ack_capacity,
             closed,
         }),
     };
@@ -237,7 +237,7 @@ impl SocketSender {
             manager,
             ns,
             capacity,
-            reply_capacity,
+            ack_capacity,
             closed,
         } = &*self.shared;
         if closed.is_cancelled() {
@@ -269,7 +269,7 @@ impl SocketSender {
             // Ending the connection never strands this wait: engine loss
             // discards the queued replies, which returns their slots, and
             // ending the handles closes the capacity.
-            let slot = Arc::clone(reply_capacity)
+            let slot = Arc::clone(ack_capacity)
                 .acquire_owned()
                 .await
                 .map_err(|_| SocketError::Closed)?;

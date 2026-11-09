@@ -1,4 +1,4 @@
-//! Replies end with their connection while unsent events survive.
+//! Outgoing acks end with their connection while unsent events survive.
 
 use std::future::Future;
 
@@ -14,7 +14,7 @@ use crate::marker::{AckMarker, HasAck};
 use crate::packet::{DynAckId, ServerPacket};
 
 #[tokio::test(start_paused = true)]
-async fn queued_and_blocked_replies_end_with_their_engine_while_events_survive() {
+async fn queued_and_blocked_acks_end_with_their_engine_while_events_survive() {
     let mut manager = TestManager::spawn_with_channels(
         Some(crate::manager::backoff::Backoff::new(
             std::time::Duration::ZERO,
@@ -111,7 +111,7 @@ async fn queued_and_blocked_replies_end_with_their_engine_while_events_survive()
 }
 
 #[tokio::test]
-async fn replies_while_unconfirmed_are_rejected_instead_of_buffered() {
+async fn acks_while_unconfirmed_are_rejected_instead_of_buffered() {
     let mut manager = TestManager::spawn_reconnecting().await;
     let (tx, mut rx) = manager.open("/").await;
     manager.send_server_message(CONNECT_RESPONSE).await;
@@ -133,7 +133,7 @@ async fn replies_while_unconfirmed_are_rejected_instead_of_buffered() {
 }
 
 #[tokio::test]
-async fn local_disconnect_drains_replies_before_releasing_the_name() {
+async fn local_disconnect_drains_acks_before_releasing_the_name() {
     let mut manager = TestManager::spawn_with_channels(
         None,
         ChannelConfig {
@@ -174,7 +174,7 @@ async fn local_disconnect_drains_replies_before_releasing_the_name() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_delayed_reply_does_not_cross_into_the_next_engine() {
+async fn a_delayed_ack_does_not_cross_into_the_next_engine() {
     let mut manager = TestManager::spawn_reconnecting().await;
     let (tx, mut rx) = manager.open("/").await;
     manager.send_server_message(CONNECT_RESPONSE).await;
@@ -213,9 +213,7 @@ async fn a_delayed_reply_does_not_cross_into_the_next_engine() {
 /// Handles of `/` whose event and reply capacities are 1, with three ids the
 /// server asked for. The first reply enters the blocked engine, the second
 /// holds the only reply slot, and the third waits for it.
-async fn blocked_replies(
-    manager: &mut TestManager,
-) -> (SocketSender, SocketReceiver, Vec<DynAckId>) {
+async fn blocked_acks(manager: &mut TestManager) -> (SocketSender, SocketReceiver, Vec<DynAckId>) {
     let (tx, mut rx) = within(
         "open",
         crate::client::connect(
@@ -252,7 +250,7 @@ async fn is_pending<F: Future>(future: std::pin::Pin<&mut F>) -> bool {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_reply_waiting_for_capacity_is_rejected_when_its_connection_ends() {
+async fn an_ack_waiting_for_capacity_is_rejected_when_its_connection_ends() {
     let mut manager = TestManager::spawn_with_channels(
         Some(crate::manager::backoff::Backoff::new(
             std::time::Duration::ZERO,
@@ -266,7 +264,7 @@ async fn a_reply_waiting_for_capacity_is_rejected_when_its_connection_ends() {
         },
     )
     .await;
-    let (tx, mut rx, ids) = blocked_replies(&mut manager).await;
+    let (tx, mut rx, ids) = blocked_acks(&mut manager).await;
 
     let TestSession {
         server_message_tx,
@@ -316,7 +314,7 @@ async fn a_reply_waiting_for_capacity_is_rejected_when_its_connection_ends() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_reply_waiting_for_capacity_fails_when_the_handles_disconnect() {
+async fn an_ack_waiting_for_capacity_fails_when_the_handles_disconnect() {
     let mut manager = TestManager::spawn_with_channels(
         None,
         ChannelConfig {
@@ -325,7 +323,7 @@ async fn a_reply_waiting_for_capacity_fails_when_the_handles_disconnect() {
         },
     )
     .await;
-    let (tx, _rx, ids) = blocked_replies(&mut manager).await;
+    let (tx, _rx, ids) = blocked_acks(&mut manager).await;
 
     let waiting = tx.send(ack(ids[2].clone()));
     tokio::pin!(waiting);

@@ -43,7 +43,7 @@ fn binary_packets_leave_with_their_attachments_before_other_messages() {
 }
 
 #[test]
-fn binary_ack_replies_leave_with_their_attachments() {
+fn binary_acks_leave_with_their_attachments() {
     let mut rig = Rig::new();
     rig.connected("/");
     rig.send(

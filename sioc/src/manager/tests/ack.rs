@@ -82,7 +82,7 @@ fn dropping_the_ack_handle_keeps_the_event() {
 }
 
 #[test]
-fn a_reply_requires_the_current_engine_confirmation() {
+fn an_ack_requires_the_current_engine_confirmation() {
     let mut rig = Rig::reconnecting();
     rig.connect("/", "{}", 32);
     rig.handshake();
@@ -108,13 +108,13 @@ fn a_reply_requires_the_current_engine_confirmation() {
 }
 
 #[test]
-fn a_reply_captured_for_an_ended_connection_is_rejected() {
+fn an_ack_captured_for_an_ended_connection_is_rejected() {
     let mut rig = Rig::reconnecting();
     let handles = rig.connected("/");
     let connection = rig.core.connection("/").expect("the socket is connected");
     let stale = rig.ack_id("/", 1);
     // A reply that waited for capacity across the reconnect stays behind.
-    let slot = std::sync::Arc::clone(&handles.reply_capacity)
+    let slot = std::sync::Arc::clone(&handles.ack_capacity)
         .try_acquire_owned()
         .unwrap();
 
@@ -133,7 +133,7 @@ fn a_reply_captured_for_an_ended_connection_is_rejected() {
 }
 
 #[test]
-fn replies_and_events_keep_their_submission_order() {
+fn acks_and_events_keep_their_submission_order() {
     let mut rig = Rig::new();
     rig.connected("/");
     rig.send("/", event("[\"e1\"]"));
@@ -164,7 +164,7 @@ fn binary_ack(id: DynAckId) -> ClientPacket {
 }
 
 #[test]
-fn delivery_binds_the_id_so_its_reply_goes_out_on_that_connection() {
+fn delivery_binds_the_id_so_its_ack_goes_out_on_that_connection() {
     let mut rig = Rig::new();
     let mut handles = rig.connected("/");
 
@@ -176,7 +176,7 @@ fn delivery_binds_the_id_so_its_reply_goes_out_on_that_connection() {
 }
 
 #[test]
-fn a_reply_with_a_reused_wire_id_goes_only_to_the_connection_that_asked() {
+fn an_ack_with_a_reused_wire_id_goes_only_to_the_connection_that_asked() {
     let mut rig = Rig::reconnecting();
     let mut handles = rig.connected("/");
     rig.server("25[\"ask\"]");
@@ -199,7 +199,7 @@ fn a_reply_with_a_reused_wire_id_goes_only_to_the_connection_that_asked() {
 }
 
 #[test]
-fn a_reply_with_an_id_from_replaced_handles_is_rejected() {
+fn an_ack_with_an_id_from_replaced_handles_is_rejected() {
     let mut rig = Rig::new();
     let _keep_engine = rig.connected("/keep");
     let mut a = rig.connected("/");
@@ -222,7 +222,7 @@ fn a_reply_with_an_id_from_replaced_handles_is_rejected() {
 }
 
 #[test]
-fn a_reply_through_another_namespace_is_rejected() {
+fn an_ack_through_another_namespace_is_rejected() {
     let mut rig = Rig::new();
     let mut a = rig.connected("/a");
     rig.connected("/b");
@@ -236,7 +236,7 @@ fn a_reply_through_another_namespace_is_rejected() {
 }
 
 #[test]
-fn a_bound_binary_reply_sends_its_header_and_attachment_but_a_stale_one_sends_neither() {
+fn a_bound_binary_ack_sends_its_header_and_attachment_but_a_stale_one_sends_neither() {
     let mut rig = Rig::reconnecting();
     let mut handles = rig.connected("/");
     rig.server("25[\"ask\"]");
