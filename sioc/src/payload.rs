@@ -189,18 +189,45 @@ where
     where
         V: serde::de::SeqAccess<'de>,
     {
-        let name: String = seq
-            .next_element()?
+        seq.next_element_seed(EventName(E::NAME))?
             .ok_or_else(|| serde::de::Error::invalid_length(0, &E::NAME))?;
 
-        if name != E::NAME {
-            return Err(serde::de::Error::invalid_value(
-                serde::de::Unexpected::Str(&name),
-                &E::NAME,
-            ));
-        }
-
         E::deserialize_payload(&mut seq).map(EventPayload)
+    }
+}
+
+/// Checks that the event name equals the expected one in place. A `&'de str`
+/// fails on a name with JSON escapes, which `serde_json` cannot borrow, and a
+/// `String` allocates for every event.
+struct EventName(&'static str);
+
+impl<'de> serde::de::DeserializeSeed<'de> for EventName {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<(), D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_str(self)
+    }
+}
+
+impl serde::de::Visitor<'_> for EventName {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(formatter, "the event name {:?}", self.0)
+    }
+
+    fn visit_str<E>(self, name: &str) -> Result<(), E>
+    where
+        E: serde::de::Error,
+    {
+        if name == self.0 {
+            Ok(())
+        } else {
+            Err(E::invalid_value(serde::de::Unexpected::Str(name), &self.0))
+        }
     }
 }
 
