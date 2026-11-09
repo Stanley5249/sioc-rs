@@ -13,9 +13,11 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::error::AttachmentsError;
 
-/// Maximum attachments in a binary packet, matching the JavaScript parser's
-/// default. The limit bounds reconstruction state independently of channel
-/// capacities.
+/// Maximum attachments in a binary packet. The protocol sets no limit, but
+/// socket.io-parser's `Decoder` rejects a packet above its `maxAttachments`
+/// option, which defaults to 10, so a JavaScript server would refuse a larger
+/// packet from this client. The limit also bounds reconstruction state
+/// independently of channel capacities.
 pub const MAX_ATTACHMENTS: usize = 10;
 
 /// A binary attachment placeholder serialised as
