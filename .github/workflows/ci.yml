@@ -1,10 +1,13 @@
 name: CI
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+
+env:
+  NEXTEST_PROFILE: ci
 
 permissions:
   contents: read
@@ -14,16 +17,34 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
-  deny:
-    timeout-minutes: 10
+  validation:
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' }}
+      - uses: oven-sh/setup-bun@v2
+      - uses: astral-sh/setup-uv@v7
       - uses: taiki-e/install-action@v2
         with:
           tool: just, cargo-deny
-      - run: just deny
+      - run: rustup toolchain install nightly-2026-07-20 --profile minimal --component rustfmt
+      - run: bun install --frozen-lockfile
+      - run: uv sync --locked
+      # just runs independent checks together and reports their timing.
+      - run: just --time --timestamp check-all
+      # Cargo work shares target/ and runs in order; preserve later results.
+      - if: ${{ !cancelled() }}
+        run: cargo doc --locked --no-deps --workspace --examples
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - if: ${{ !cancelled() }}
+        run: cargo deny --locked check
 
   msrv:
     timeout-minutes: 20
@@ -33,60 +54,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just
-      - run: just msrv
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' }}
+      - run: cargo +1.88 check --locked --workspace --all-targets
 
-  # Later steps run with `!cancelled()` so one failing check does not hide
-  # the next one's results.
-  lint:
-    timeout-minutes: 20
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just
-      - run: just fmt-check-rs
-      - if: ${{ !cancelled() }}
-        run: just lint
-
-  lint-py:
-    timeout-minutes: 10
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just
-      - run: just fmt-check-py
-      - if: ${{ !cancelled() }}
-        run: just lint-py
-
-  lint-js:
-    timeout-minutes: 10
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just
-      - run: bun install --frozen-lockfile
-      - run: just fmt-check-js
-      - if: ${{ !cancelled() }}
-        run: just lint-js
-
-  # Smoke runs here because `just test` already built the example client.
+  # Reference-server tests share the compiled Rust test binaries.
   test:
     timeout-minutes: 30
     runs-on: ${{ matrix.os }}
@@ -99,16 +70,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' }}
       - uses: astral-sh/setup-uv@v7
       - uses: oven-sh/setup-bun@v2
       - uses: taiki-e/install-action@v2
         with:
-          tool: just
+          tool: cargo-nextest
       - run: bun install --frozen-lockfile
-      - run: just test
+      - run: cargo nextest run --locked --workspace --all-targets --run-ignored all
       - if: ${{ !cancelled() }}
-        run: just smoke
+        run: cargo test --locked --workspace --doc
 
   coverage:
     timeout-minutes: 30
@@ -120,33 +91,19 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' }}
       - uses: taiki-e/install-action@v2
         with:
-          tool: just, cargo-llvm-cov
-      - run: just coverage
+          tool: cargo-llvm-cov, cargo-nextest
+      - run: cargo llvm-cov nextest --locked --workspace --all-targets --lcov --output-path lcov.info
       - uses: codecov/codecov-action@v7
         with:
           files: lcov.info
           fail_ci_if_error: true
 
-  doc:
-    timeout-minutes: 20
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just
-      - run: just doc
-
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [deny, msrv, lint, lint-py, lint-js, test, doc]
+    needs: [validation, msrv, test]
     runs-on: ubuntu-latest
     permissions:
       contents: write

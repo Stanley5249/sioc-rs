@@ -1,3 +1,6 @@
+//! Routes a `DynEvent` into an event enum by hand, without the `EventRouter`
+//! derive.
+
 use bytestring::ByteString;
 use serde::Deserialize;
 use sioc::error::EventError;
@@ -47,11 +50,11 @@ impl<'de> serde::de::Visitor<'de> for MyEventVisitor {
     where
         V: serde::de::SeqAccess<'de>,
     {
-        let name: &str = seq
+        let name: String = seq
             .next_element()?
             .ok_or_else(|| serde::de::Error::invalid_length(0, &"event name"))?;
 
-        match name {
+        match name.as_str() {
             <Event<A> as EventHandler>::Payload::NAME => {
                 let payload = <Event<A> as EventHandler>::Payload::deserialize_payload(&mut seq)?;
                 Ok(MyEventPayload::A(payload))
@@ -61,7 +64,7 @@ impl<'de> serde::de::Visitor<'de> for MyEventVisitor {
                 Ok(MyEventPayload::B(payload))
             }
             _ => Err(serde::de::Error::unknown_variant(
-                name,
+                &name,
                 &[
                     <Event<A> as EventHandler>::Payload::NAME,
                     <Event<B> as EventHandler>::Payload::NAME,
@@ -103,7 +106,7 @@ fn main() -> Result<(), EventError> {
 
     let my_event = MyEvent::try_from(event)?;
 
-    println!("{:?}", my_event);
+    println!("{my_event:?}");
 
     Ok(())
 }

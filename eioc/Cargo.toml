@@ -10,6 +10,9 @@ license = "MIT OR Apache-2.0"
 keywords = ["async", "engine-io", "networking", "websocket"]
 categories = ["asynchronous", "network-programming", "web-programming"]
 
+[lints]
+workspace = true
+
 [dependencies]
 base64.workspace = true
 bytes.workspace = true
@@ -23,12 +26,12 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
-tokio-util.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
 
 [features]
 default = ["rustls-tls"]

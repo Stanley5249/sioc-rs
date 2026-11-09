@@ -1,38 +1,20 @@
-# Agent guidelines
+# sioc-rs
 
-## Build and test
+A Socket.IO client for Rust. The crate READMEs describe each layer and its protocol revision, and module docs identify the JavaScript references.
 
-Always use `--workspace --all-targets` for cargo checks and tests. The only exception is the MSRV check, which omits `--all-targets` so dev-dependencies do not gate the supported compiler version.
+## Docs
 
-```sh
-just ci
-just lint
-just lint-py
-just lint-js
-just test
-just smoke
-```
+Each fact has one home. Read a file before the task it names.
 
-Python and TypeScript test servers share the root `pyproject.toml` and `package.json`; `just smoke` runs the example clients against them.
+- `README.md`: usage, compatibility, and development setup. Read before any task, with `just --list` or the `justfile` for commands.
+- `sioc/README.md` and `eioc/README.md`: what each crate is and which protocol revision it speaks.
+- `CONTRIBUTING.md`: what to check before submitting, titles, and commit conventions. Read before writing a commit, an issue, or a pull request.
+- `docs/conventions.md`: how code, tests, and docs are written. Read before writing or reviewing them.
+- Module docs: how each part works now, and its invariants. Read the ones you touch.
+- `docs/decisions.md`: mistakes and rejected approaches, each with what replaced it. Read the section for an area before changing it.
+- `examples/AGENTS.md`: rules for the examples. Read before changing them.
 
-## Running examples
+## Always
 
-```sh
-RUST_LOG=info cargo run --example glhf
-RUST_LOG=glhf=trace,sioc=trace cargo run --example glhf
-```
-
-Use `--example <name>` at workspace root; omit `-p`. `sioc=trace` shows all wire packets; `eioc=trace` is library internals only.
-
-## Code style
-
-Re-export public surface through `prelude`. Never put `Result` or `Error` aliases in `prelude` because they shadow `std` and cause ambiguity; import by explicit path (`use eioc::error::{Error, Result}`).
-
-Variable names should be descriptive and avoid unnecessary abbreviations. Prefer `packet` and `event` over `pkt` and `evt`. For short-lived variables, single-letter names like `p` and `e` are acceptable.
-
-## Commits
-
-Use Conventional Commits; `cliff.toml` groups release notes by type, so pick the type a reader of the notes expects.
-
-- Scope with the folder or file name the change lives in. Use `deps` for dependency updates and `agents` for agent instructions.
-- Mark a change to the public API breaking with `!` and a `BREAKING CHANGE:` footer. A dependency bump counts when the dependency's types appear in the public API.
+- Include `--workspace --all-targets` in `cargo` commands to unify features across the workspace.
+- Set `RUST_LOG=sioc=trace` to log every wire packet, and `RUST_LOG=eioc=trace` to log library internals.

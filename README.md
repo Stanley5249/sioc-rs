@@ -7,11 +7,11 @@
 [![License](https://img.shields.io/crates/l/sioc.svg)](https://crates.io/crates/sioc)
 [![MSRV](https://img.shields.io/badge/rustc-1.88+-blue.svg)](https://blog.rust-lang.org/2025/06/05/Rust-1.88.0.html)
 
-A type-safe, async [Socket.IO protocol v5](https://socket.io/docs/v4/socket-io-protocol/) client for Rust.
+A type-safe, async client for Rust that speaks [Socket.IO protocol revision 5](https://socket.io/docs/v4/socket-io-protocol/), the protocol of Socket.IO 3.x and 4.x servers.
 
-## Quick Start
+## Quick start
 
-### Open and Connect
+### Open and connect
 
 Create a client and connect to a namespace. The default namespace is `"/"`. `tx` is cheap to clone and share across tasks.
 
@@ -24,9 +24,18 @@ let client = ClientBuilder::new(url).open()?;
 let (tx, mut rx) = client.connect("/").await?;
 ```
 
+To send an auth payload with the namespace's CONNECT, like socket.io-client's `auth` option, configure the namespace with `client.socket`. The payload must serialize to a JSON object.
+
+```rust
+let auth = serde_json::json!({ "token": "secret" });
+let (tx, mut rx) = client.socket("/admin").auth(&auth).connect().await?;
+```
+
 ### Emit
 
 Derive `EventType` and `SerializePayload` on your type. `EventType` provides the event name for routing and defaults to the struct name in snake case. `SerializePayload` serializes the fields as a JSON array to match the Socket.IO wire format: `42["message","Hello World!"]`.
+
+For custom emission, implement `Emit` to prepare a `sioc::packet::ClientPacket` and use `AckHandle::new` for acknowledgement handles. Create namespace handles through `Client::connect`; the manager owns their channels and wire encoding.
 
 ```rust
 #[derive(Debug, EventType, SerializePayload)]
@@ -68,7 +77,7 @@ while let Some(event) = rx.listen::<ChatEvent>().await? {
 
 Socket.IO acks let the two sides confirm receipt of an event. `sioc` models this through the type system so the compiler catches mismatches at build time.
 
-**Client requests an ack.** Associate an ack type with an event using `ack = "TypeName"`. When you emit that event, `emit` returns `Ack<A>` instead of `()`, and you can await the response with an optional timeout.
+**Client requests an ack.** Associate an ack type with an event using `ack = "TypeName"`. When you emit that event, `emit` returns `AckHandle<A>` instead of `()`, and you can await the `Ack<A>` response with an optional timeout.
 
 ```rust
 use std::time::Duration;
@@ -123,7 +132,7 @@ while let Some(event) = rx.listen::<ChatEvent>().await? {
 
 ### Binary
 
-JSON cannot represent binary data directly, so Socket.IO sends it as _binary attachments_, separate frames that accompany the JSON packet. The Socket.IO JS library finds and replaces binary objects automatically at runtime. `sioc` requires you to register binary data via an `AttachmentsBuilder` closure and embed the returned `Placeholder` in your struct. On the receiving side, use `data.slot()` to index into `attachments`.
+JSON cannot represent binary data directly, so Socket.IO sends it as _binary attachments_, separate frames that accompany the JSON packet. The Socket.IO JS library finds and replaces binary objects automatically at runtime. `sioc` requires you to register binary data via an `AttachmentsBuilder` closure and embed the returned `Placeholder` in your struct. On the receiving side, use `data.get(&attachments)` for checked access. Binary packets carry between one and `MAX_ATTACHMENTS` attachments, matching the JavaScript parser's default limit.
 
 One type can derive both `SerializePayload` and `DeserializePayload` when the event flows both ways.
 
@@ -164,7 +173,7 @@ while let Some(event) = rx.listen::<ChatEvent>().await? {
             attachments, // Vec<Bytes>
             ..
         }) => {
-            let bytes = &attachments[data.slot()];
+            let bytes = data.get(&attachments)?;
             println!("image {name}: {} bytes", bytes.len());
         }
     }
@@ -173,32 +182,53 @@ while let Some(event) = rx.listen::<ChatEvent>().await? {
 
 ## Status
 
-Early development. Expect breaking changes. Benchmarks and test coverage are not yet comprehensive. This does not attempt to pass the JavaScript Socket.IO test suite.
+Early development. Expect breaking changes. End-to-end tests run against the reference JavaScript server.
 
 ## Comparison
 
-### Rust-socketio-client
+### rust-socketio
 
-[rust-socketio](https://github.com/1c3t3a/rust-socketio) is another Socket.IO client for Rust, but its callback-based model creates friction in async Rust:
+[rust-socketio](https://github.com/1c3t3a/rust-socketio) provides a callback API. Its asynchronous API accepts `Send + Sync + 'static` callbacks that return boxed futures. Sharing mutable state between callbacks and other tasks may require synchronization.
 
-1. Callbacks must be `Send + Sync + 'static`, forcing smart pointers and interior mutability for any shared state.
-2. Storing async callbacks requires boxed futures, which adds heap allocation and dynamic dispatch overhead.
-
-`sioc` replaces callbacks with channels and enums. Event handling lives in match arms and state lives in the enclosing scope, with no boxing or shared-state boilerplate.
+With `sioc`, the caller receives events through `SocketReceiver` and handles them in a match loop. Application state can stay in that loop.
 
 ### Socketioxide
 
-[socketioxide](https://github.com/Totodore/socketioxide) is a Socket.IO server implementation that integrates with [Tower](https://github.com/tower-rs/tower) and [Tokio](https://github.com/tokio-rs/tokio) stack.
+[socketioxide](https://github.com/Totodore/socketioxide) is a Socket.IO server implementation that integrates with [Tower](https://github.com/tower-rs/tower) and [Tokio](https://github.com/tokio-rs/tokio). It uses registered async handlers and extractors for event data and shared application state.
 
-Server and client use fundamentally different architectures, so `socketioxide`'s design doesn't translate to a client. `sioc` uses `tokio` as well, with networking built on top of `reqwest` and `tokio-tungstenite`.
-
-`socketioxide` uses callbacks for event handling, which is less of an issue for stateless servers. `sioc` offers stronger type safety for events and acks through its derive macros and type system.
+`sioc` is a client. Its derive macros associate event and acknowledgement types, and received events go to the caller's receive loop. Networking uses `tokio`, `reqwest`, and `tokio-tungstenite`.
 
 ## Examples
 
-[`quick-start`](examples/quick-start) is a minimal chat client paired with Python and JavaScript Socket.IO servers.
+See [examples](examples/README.md) for runnable clients and reference servers.
 
-[`generals-io`](examples/generals-io) is the client for [generals.io](https://generals.io), the online strategy game that motivated this crate.
+## Development
+
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening an issue or a pull request.
+
+Run `just --list` to browse commands. Unsuffixed aggregate recipes cover Rust; `-all` variants add other languages or end-to-end tests. See [`justfile`](justfile) for recipe details.
+
+### Required
+
+For basic Rust development:
+
+- [just](https://just.systems/man/en/packages.html) to run recipes.
+- [rustup](https://rustup.rs/) for stable Rust and the components declared in [`rust-toolchain.toml`](rust-toolchain.toml).
+
+Run `just install` to set up the pinned nightly formatter, then `just check` for Rust formatting and lint checks.
+
+### Optional
+
+Install tools for the workflows needed:
+
+- **Tests:** [cargo-nextest](https://nexte.st/docs/installation/pre-built-binaries/) for `just test` and `just test-e2e`.
+- **Dependency checks:** [cargo-deny](https://embarkstudios.github.io/cargo-deny/cli/index.html) for `just deny`.
+- **JavaScript tooling and end-to-end tests:** [Bun](https://bun.sh/docs/installation).
+- **Python example and tooling:** [uv](https://docs.astral.sh/uv/getting-started/installation/).
+- **Coverage:** [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov#installation), cargo-nextest, and `rustup component add llvm-tools-preview`.
+- **MSRV checks:** The Rust toolchain specified by `check-msrv` in `justfile`.
+
+Run `just install-all` to also install JavaScript and Python dependencies. Install the Rust CLI tools separately. `just ci` runs the Rust merge gate with cargo-nextest; `just ci-all` also requires Bun and uv. Dependency policy checks remain separate through `just deny` and are enforced in GitHub Actions.
 
 ## Origin
 

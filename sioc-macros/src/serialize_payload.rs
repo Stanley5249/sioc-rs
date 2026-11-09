@@ -1,7 +1,8 @@
-use crate::attrs::{SiocField, SiocInput};
 use darling::FromDeriveInput;
 use proc_macro2::TokenStream;
 use quote::quote;
+
+use crate::attrs::{SiocField, SiocInput};
 
 pub fn expand(input: &syn::DeriveInput) -> darling::Result<TokenStream> {
     let input = SiocInput::from_derive_input(input)?;
@@ -16,15 +17,17 @@ pub fn expand(input: &syn::DeriveInput) -> darling::Result<TokenStream> {
         }
     };
 
+    crate::attrs::validate_flatten(&fields)?;
+    let sequence = crate::attrs::fresh_type_ident(&input.generics, "__SiocSequence");
     let (impl_generics, type_generics, where_clause) = input.generics.split_for_impl();
     let ident = &input.ident;
     let body = generate_body(&fields);
 
     Ok(quote! {
         impl #impl_generics ::sioc::prelude::SerializePayload for #ident #type_generics #where_clause {
-            fn serialize_payload<S>(&self, __seq: &mut S) -> ::std::result::Result<(), S::Error>
+            fn serialize_payload<#sequence>(&self, __seq: &mut #sequence) -> ::std::result::Result<(), #sequence::Error>
             where
-                S: ::serde::ser::SerializeSeq,
+                #sequence: ::serde::ser::SerializeSeq,
             {
                 #body
             }

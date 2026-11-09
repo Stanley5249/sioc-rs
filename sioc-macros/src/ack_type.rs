@@ -1,9 +1,10 @@
 //! Derive macro implementation for the `AckType` trait.
 
-use crate::attrs::SiocInput;
 use darling::FromDeriveInput;
 use proc_macro2::TokenStream;
 use quote::quote;
+
+use crate::attrs::SiocInput;
 
 /// Expands `#[derive(AckType)]` into an `AckType` trait implementation.
 ///

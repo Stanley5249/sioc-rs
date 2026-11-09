@@ -1,6 +1,6 @@
 /**
  * Quick-start Socket.IO chat server with a bot on the reference JavaScript
- * implementation, serving the same events as `server.py`.
+ * implementation.
  */
 
 import { createServer } from "node:http";
@@ -55,8 +55,7 @@ sio.on("connection", (socket) => {
     }
     console.info(`server <- ack       confirm: ${leave ? "yes" : "no"}`);
     if (leave) {
-      // Close the whole connection, not just the namespace, so smoke tests
-      // cover the client shutting down after a server-closed transport.
+      // This example ends the whole session after the client confirms.
       socket.disconnect(true);
     }
   });
@@ -68,37 +67,12 @@ sio.on("connection", (socket) => {
   });
 });
 
-function listen(): Promise<void> {
-  return new Promise((resolve) => {
-    app.listen(3000, "localhost", resolve);
+function main(): void {
+  app.listen(3000, "127.0.0.1", () => {
+    console.info("listening on http://127.0.0.1:3000");
   });
 }
 
-/**
- * Serve until a client command finishes, for smoke tests.
- *
- * The client starts only after the port is bound, so no sleep or retry is
- * needed, and the server exits even when the client fails.
- */
-async function serveClient(command: string[]): Promise<number> {
-  await listen();
-  const child = Bun.spawn(command, { stdio: ["inherit", "inherit", "inherit"] });
-  const code = await child.exited;
-  await sio.close();
-  return code;
-}
-
-async function main(): Promise<void> {
-  // Everything after `--client` is the client command, so smoke tests need
-  // no shell quoting.
-  const clientIndex = Bun.argv.indexOf("--client");
-  if (clientIndex !== -1) {
-    process.exit(await serveClient(Bun.argv.slice(clientIndex + 1)));
-  }
-  await listen();
-  console.info("listening on http://localhost:3000");
-}
-
 if (import.meta.main) {
-  await main();
+  main();
 }

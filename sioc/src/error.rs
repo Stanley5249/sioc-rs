@@ -1,24 +1,21 @@
 //! Error types for the `sioc` crate.
 //!
 //! Each fallible operation returns a specific error type.  [`enum@Error`] is a
-//! top-level convenience wrapper that aggregates all of them via [`From`] impls,
-//! intended for application-level code that wants a single error type.
+//! top-level convenience wrapper that aggregates all of them via [`From`]
+//! impls, intended for application-level code that wants a single error type.
 
-use crate::manager::ManagerAction;
-use crate::packet::{DynAck, Signal};
 use bytes::Bytes;
 use bytestring::ByteString;
-use eioc::engine::EngineAction;
 use miette::Diagnostic;
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use tokio::task::JoinError;
 use tokio::time::error::Elapsed;
 
 /// JSON serialization or deserialization failure.
 #[derive(Debug, Error, Diagnostic)]
 #[error("payload error for `{type_name}`: {source}")]
-#[diagnostic(code(sioc::payload))]
+#[diagnostic(code(sioc::payload::json))]
 pub struct PayloadError {
     type_name: &'static str,
     #[source]
@@ -28,7 +25,7 @@ pub struct PayloadError {
 impl PayloadError {
     /// Creates a `PayloadError` for type `T`.
     #[must_use]
-    pub fn new<T>(source: serde_path_to_error::Error<serde_json::Error>) -> Self {
+    pub(crate) fn new<T>(source: serde_path_to_error::Error<serde_json::Error>) -> Self {
         Self {
             type_name: std::any::type_name::<T>(),
             source,
@@ -43,6 +40,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 #[derive(Debug, Error, Diagnostic)]
 #[error(transparent)]
 #[diagnostic(transparent)]
+#[non_exhaustive]
 pub enum Error {
     /// Error from [`ClientBuilder::open`](crate::client::ClientBuilder::open).
     Builder(#[from] ClientBuilderError),
@@ -50,15 +48,25 @@ pub enum Error {
     Client(#[from] ClientError),
     /// Error from a [`SocketSender`](crate::client::SocketSender) operation.
     Socket(#[from] SocketError),
-    /// Error converting a [`DynEvent`](crate::packet::DynEvent) into a typed event.
+    /// Error converting a [`DynEvent`](crate::packet::DynEvent) into a typed
+    /// event.
     Event(#[from] EventError),
     /// Error receiving or parsing an acknowledgement.
     Ack(#[from] AckError),
 }
 
-/// Error returned by [`ClientBuilder::open`](crate::client::ClientBuilder::open).
+/// Error returned by
+/// [`ClientBuilder::open`](crate::client::ClientBuilder::open).
 #[derive(Debug, Error, Diagnostic)]
+#[non_exhaustive]
 pub enum ClientBuilderError {
+    /// A bounded channel requires a positive capacity.
+    #[error("channel capacity for {channel} must be positive")]
+    #[diagnostic(code(sioc::builder::zero_capacity))]
+    ZeroCapacity {
+        /// The channel configuration field with a zero capacity.
+        channel: &'static str,
+    },
     /// URL construction failed.
     #[error("invalid URL")]
     #[diagnostic(code(sioc::builder::url))]
@@ -67,6 +75,7 @@ pub enum ClientBuilderError {
 
 /// Error returned by [`Client::join`](crate::client::Client::join).
 #[derive(Debug, Error, Diagnostic)]
+#[non_exhaustive]
 pub enum ClientError {
     /// Error propagated from the socket manager.
     #[error(transparent)]
@@ -81,20 +90,53 @@ pub enum ClientError {
 
 /// Error returned by [`SocketSender`](crate::client::SocketSender) operations.
 #[derive(Debug, Error, Diagnostic)]
+#[non_exhaustive]
 pub enum SocketError {
-    /// Directive channel to the socket manager is closed.
-    #[error("failed to send directive to socket manager")]
-    #[diagnostic(code(sioc::socket::send))]
-    Send(#[from] mpsc::error::SendError<ManagerAction>),
+    /// A binary packet has zero attachments or exceeds
+    /// [`MAX_ATTACHMENTS`](crate::binary::MAX_ATTACHMENTS).
+    #[error("invalid attachment count: {count}")]
+    #[diagnostic(code(sioc::socket::attachment_count))]
+    AttachmentCount {
+        /// The number of attachments supplied.
+        count: usize,
+    },
+    /// A namespace with this name is already open on the client.
+    #[error("namespace conflict: `{ns}`")]
+    #[diagnostic(code(sioc::socket::namespace_conflict))]
+    NamespaceConflict {
+        /// The namespace that is already open on the client.
+        ns: ByteString,
+    },
+    /// The namespace or the whole session has closed, or the connection that
+    /// delivered the event an ack replies to has ended.
+    #[error("socket closed")]
+    #[diagnostic(
+        code(sioc::socket::closed),
+        help(
+            "the namespace was disconnected, the client ended, or an ack outlived its connection"
+        )
+    )]
+    Closed,
 
-    /// Event payload serialization failed.
+    /// Event or auth payload serialization failed.
     #[error("failed to serialize payload")]
     #[diagnostic(code(sioc::socket::payload))]
     Payload(#[from] PayloadError),
+    /// The auth payload of
+    /// [`SocketBuilder::auth`](crate::client::SocketBuilder::auth) is not a
+    /// JSON object.
+    #[error("auth payload is not a JSON object")]
+    #[diagnostic(
+        code(sioc::socket::auth),
+        help("Socket.IO servers accept only an object as the CONNECT payload")
+    )]
+    Auth,
 }
 
-/// Error converting a [`DynEvent`](crate::packet::DynEvent) into a typed [`Event`](crate::event::Event).
+/// Error converting a [`DynEvent`](crate::packet::DynEvent) into a typed
+/// [`Event`](crate::event::Event).
 #[derive(Debug, Error, Diagnostic)]
+#[non_exhaustive]
 pub enum EventError {
     /// Event payload deserialization failed.
     #[error("failed to deserialize event payload")]
@@ -114,12 +156,15 @@ pub enum EventError {
 
 /// Error returned when receiving or parsing a typed acknowledgement.
 #[derive(Debug, Error, Diagnostic)]
+#[non_exhaustive]
 pub enum AckError {
-    /// Server dropped the ack channel before responding.
+    /// The client stopped waiting for the server's answer, because the
+    /// namespace closed or the Engine.IO session dropped after the event went
+    /// out.
     #[error("failed to receive ack")]
     #[diagnostic(
         code(sioc::ack::recv),
-        help("the ack sender was dropped before responding; the connection may have been lost")
+        help("the namespace closed or the connection dropped before the server answered")
     )]
     Recv(#[from] oneshot::error::RecvError),
 
@@ -139,8 +184,10 @@ pub enum AckError {
     Timeout(#[from] Elapsed),
 }
 
-/// Ack ID presence mismatch between the inbound packet and the event type's policy.
+/// Ack ID presence mismatch between the inbound packet and the event type's
+/// policy.
 #[derive(Debug, Error, Diagnostic)]
+#[non_exhaustive]
 pub enum AckIdError {
     /// Event declares `HasAck` but the server sent no ack ID.
     #[error("ack ID was missing")]
@@ -163,9 +210,20 @@ pub enum AckIdError {
     Unexpected,
 }
 
-/// Attachment presence mismatch between the inbound packet and the type's binary policy.
+/// Attachment presence mismatch between the inbound packet and the type's
+/// binary policy.
 #[derive(Debug, Error, Diagnostic)]
+#[non_exhaustive]
 pub enum AttachmentsError {
+    /// A placeholder references an attachment outside the supplied list.
+    #[error("attachment slot {slot} is outside {count} attachments")]
+    #[diagnostic(code(sioc::attachments::invalid_slot))]
+    InvalidSlot {
+        /// The requested zero-based slot.
+        slot: usize,
+        /// The number of supplied attachments.
+        count: usize,
+    },
     /// Type declares `HasBinary` but no attachments were in the packet.
     #[error("attachments were missing")]
     #[diagnostic(
@@ -191,8 +249,21 @@ pub enum AttachmentsError {
 ///
 /// Callers receive this wrapped in [`ManagerError::Packet`].
 #[derive(Debug, Error, Diagnostic)]
-#[allow(missing_docs)]
+#[non_exhaustive]
 pub enum PacketError {
+    /// A binary packet has zero attachments or exceeds
+    /// [`MAX_ATTACHMENTS`](crate::binary::MAX_ATTACHMENTS).
+    #[error("invalid attachment count: {count}")]
+    #[diagnostic(code(sioc::parse::attachment_count))]
+    AttachmentCount {
+        /// The count declared by the packet.
+        count: usize,
+    },
+
+    /// A binary placeholder has a missing, non-integer, or out-of-range slot.
+    #[error("invalid binary placeholder")]
+    #[diagnostic(code(sioc::parse::invalid_placeholder))]
+    InvalidPlaceholder,
     /// JSON payload in the packet is malformed.
     #[error(transparent)]
     #[diagnostic(code(sioc::parse::json))]
@@ -211,7 +282,10 @@ pub enum PacketError {
     /// First byte does not map to any known packet type.
     #[error("unknown packet type {id}")]
     #[diagnostic(code(sioc::parse::unknown_packet_type))]
-    InvalidId { id: char },
+    InvalidId {
+        /// The first byte of the packet.
+        id: char,
+    },
 
     /// Binary packet header has no attachment count before the `-` separator.
     #[error("binary packet missing attachment count prefix")]
@@ -221,7 +295,10 @@ pub enum PacketError {
     /// Text event packet carries a non-zero attachment count.
     #[error("text event packet has unexpected attachment count ({count})")]
     #[diagnostic(code(sioc::parse::unexpected_attachments))]
-    UnexpectedAttachments { count: usize },
+    UnexpectedAttachments {
+        /// The attachment count the packet declared.
+        count: usize,
+    },
 
     /// Attachment count prefix is present but not a valid integer.
     #[error("attachment count is not a valid integer")]
@@ -246,7 +323,7 @@ pub enum PacketError {
 
 /// The top-level error type for Socket.IO manager operations.
 #[derive(Debug, Error, Diagnostic)]
-#[allow(missing_docs)]
+#[non_exhaustive]
 pub enum ManagerError {
     /// Error propagated from the Engine.IO transport layer.
     #[error(transparent)]
@@ -258,77 +335,89 @@ pub enum ManagerError {
     #[diagnostic(transparent)]
     Packet(#[from] PacketError),
 
-    /// Sending an action to the engine layer failed because the channel is closed.
-    #[error("engine action channel closed")]
+    /// Received a text frame while a binary reassembly was in progress, which
+    /// socket.io-parser's `Decoder.add` rejects with "got plaintext data when
+    /// reconstructing a packet".
+    #[error("unexpected text frame of {} bytes", .0.len())]
     #[diagnostic(
-        code(sioc::manager::send_engine),
-        help("the receiver was dropped; the socket is probably shut down")
-    )]
-    SendEngine(#[from] mpsc::error::SendError<EngineAction>),
-
-    /// Inbound packet delivery to a namespace channel failed.
-    #[error("manager send failed for namespace `{ns}`")]
-    #[diagnostic(
-        code(sioc::manager::send_socket),
-        help("the receiver was dropped; the socket is probably shut down")
-    )]
-    SendSocket {
-        ns: ByteString,
-        #[source]
-        source: mpsc::error::SendError<Signal>,
-    },
-
-    /// Server ack arrived but the caller's receiver was already dropped.
-    #[error("ack channel closed for namespace `{ns}`")]
-    #[diagnostic(
-        code(sioc::manager::send_ack),
-        help("the ack receiver was dropped; the namespace may have disconnected")
-    )]
-    SendAck { ns: ByteString, ack: DynAck },
-
-    /// Received a text frame while a binary reassembly was in progress.
-    #[error("unexpected text frame: {0:?}")]
-    #[diagnostic(
-        code(sioc::manager::unexpected_text),
+        code(sioc::parse::unexpected_text),
         help(
             "the server sent a text frame while binary reassembly was in progress; likely a server protocol bug"
         )
     )]
     UnexpectedText(ByteString),
 
-    /// Received a binary frame with no pending reassembly.
-    #[error("unexpected binary frame: {0:?}")]
+    /// Received a binary frame with no pending reassembly, which
+    /// socket.io-parser's `Decoder.add` rejects with "got binary data when not
+    /// reconstructing a packet".
+    #[error("unexpected binary frame of {} bytes", .0.len())]
     #[diagnostic(
-        code(sioc::manager::unexpected_binary),
+        code(sioc::parse::unexpected_binary),
         help(
             "the server sent a binary frame while no reassembly was pending; likely a server protocol bug"
         )
     )]
     UnexpectedBinary(Bytes),
 
-    /// Operation on a namespace that is not open.
-    #[error("unknown namespace `{ns}`")]
-    #[diagnostic(
-        code(sioc::manager::unknown_namespace),
-        help("connect the namespace before sending or receiving on it")
-    )]
-    UnknownNamespace { ns: ByteString },
+    /// The engine dropped its message receiver, or finished, while the
+    /// manager still held the sender, which the engine keeps reading until the
+    /// manager drops it. Rust task: the JS engine is one object.
+    #[error("engine finished before the manager closed it")]
+    #[diagnostic(code(sioc::manager::engine_ended), help("library bug, please report"))]
+    EngineEnded,
+}
 
-    /// Ack ID in a server response has no registered handler.
-    #[error("ack for unknown ID {id} in namespace `{ns}`")]
-    #[diagnostic(
-        code(sioc::manager::unknown_ack_id),
-        help(
-            "the server sent an ack for an unregistered ID; the server may be replying to an already-acknowledged event"
-        )
-    )]
-    UnknownAckId { ns: ByteString, id: u64 },
+impl ManagerError {
+    /// Returns whether the error is a library bug, such as a broken channel
+    /// between library tasks, rather than a network or server fault.
+    ///
+    /// The client reconnects after any other error.
+    #[must_use]
+    pub fn is_internal(&self) -> bool {
+        // No wildcard arm, so a new variant must be classified here.
+        match self {
+            Self::Engine(error) => error.is_internal(),
+            Self::Packet(_) | Self::UnexpectedText(_) | Self::UnexpectedBinary(_) => false,
+            Self::EngineEnded => true,
+        }
+    }
+}
 
-    /// Attempted to open a namespace that is already open.
-    #[error("namespace conflict: `{ns}`")]
-    #[diagnostic(
-        code(sioc::manager::namespace_conflict),
-        help("the namespace is already open; drop the existing handle before reconnecting")
-    )]
-    NamespaceConflict { ns: ByteString },
+#[cfg(test)]
+mod tests {
+    use eioc::error::EngineError;
+
+    use super::*;
+
+    #[test]
+    fn manager_error_server_faults_are_not_internal() {
+        let errors = [
+            ManagerError::Engine(EngineError::HeartbeatTimeout.into()),
+            ManagerError::Packet(PacketError::Empty),
+            ManagerError::UnexpectedText(ByteString::new()),
+            ManagerError::UnexpectedBinary(Bytes::new()),
+        ];
+        for error in errors {
+            assert!(!error.is_internal(), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn unexpected_frame_messages_show_the_length_without_the_payload() {
+        let text = ManagerError::UnexpectedText(r#"2["secret"]"#.into()).to_string();
+        let binary = ManagerError::UnexpectedBinary(Bytes::from_static(b"secret")).to_string();
+        assert_eq!(text, "unexpected text frame of 11 bytes");
+        assert_eq!(binary, "unexpected binary frame of 6 bytes");
+    }
+
+    #[test]
+    fn manager_error_channel_failures_are_internal() {
+        let errors = [
+            ManagerError::Engine(EngineError::ServerMessageClosed.into()),
+            ManagerError::EngineEnded,
+        ];
+        for error in errors {
+            assert!(error.is_internal(), "{error:?}");
+        }
+    }
 }

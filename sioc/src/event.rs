@@ -9,42 +9,49 @@
 //!
 //! The [`EventType`] trait (derived with `#[derive(EventType)]`) maps a Rust
 //! struct to this wire format.  [`Event`] wraps an inbound event with
-//! compile-time policy markers for ack and binary handling.  The [`EventHandler`]
-//! trait constructs typed events from raw parts and powers the `EventRouter`
-//! derive macro for multi-event dispatch enums.
+//! compile-time policy markers for ack and binary handling.  The
+//! [`EventHandler`] trait constructs typed events from raw parts and powers the
+//! `EventRouter` derive macro for multi-event dispatch enums.
 //!
-//! Outbound events are sent directly via [`SocketSender::emit`](crate::client::SocketSender::emit);
-//! blanket [`Emit`] impls handle serialization automatically for both
-//! plain events and binary closures.
+//! Outbound events are sent directly via
+//! [`SocketSender::emit`](crate::client::SocketSender::emit); blanket [`Emit`]
+//! impls handle serialization automatically for both plain events and binary
+//! closures.
 //!
 //! The generic parameters `A` ([`AckMarker`]) and `B` ([`BinaryMarker`])
 //! let the type system enforce whether a packet carries binary attachments
 //! or expects an acknowledgement; no runtime checks needed.
 
-use crate::ack::{AckHandle, AckType};
-use crate::binary::AttachmentsBuilder;
-use crate::client::Emit;
-use crate::error::{EventError, PayloadError};
-use crate::marker::{AckMarker, BinaryMarker, HasAck, HasBinary, NoAck, NoBinary};
-use crate::packet::{Directive, DynEvent};
-use crate::payload::{DeserializePayload, SerializePayload, event_from_json, event_to_json};
 use bytes::Bytes;
 use tokio::sync::oneshot;
 
-/// Maps a Rust struct to a Socket.IO event name and compile-time policies.
+use crate::ack::AckHandle;
+use crate::binary::AttachmentsBuilder;
+use crate::error::{EventError, PayloadError};
+use crate::marker::{
+    AckMarker, AckType, BinaryMarker, EventType, HasAck, HasBinary, NoAck, NoBinary,
+};
+use crate::packet::{ClientPacket, DynAckId, DynEvent};
+use crate::payload::{DeserializePayload, SerializePayload};
+
+/// Converts a typed event into a [`ClientPacket`] for emission.
 ///
-/// Prefer `#[derive(EventType)]` over a manual implementation.  The derive
-/// generates `NAME` and the associated types.  Add `#[derive(SerializePayload)]`
-/// for emit and `#[derive(DeserializePayload)]` for recv.
-pub trait EventType: Sized {
-    /// The Socket.IO event name used as the first element of the wire array.
-    const NAME: &'static str;
+/// `Output` is `()` for fire-and-forget events and [`AckHandle`] for events
+/// that expect an acknowledgement.
+pub trait Emit<A, B>
+where
+    A: AckMarker,
+    B: BinaryMarker,
+{
+    /// Return value after the packet is sent.
+    type Output;
 
-    /// Ack policy: [`NoAck`] or [`HasAck<A>`](crate::marker::HasAck).
-    type Ack: AckMarker;
-
-    /// Binary policy: [`NoBinary`] or [`HasBinary`].
-    type Binary: BinaryMarker;
+    /// Serializes into a [`ClientPacket`] and the output handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if payload serialization fails.
+    fn prepare(self) -> Result<(ClientPacket, Self::Output), PayloadError>;
 }
 
 /// A typed inbound event with compile-time ack and binary policy markers.
@@ -84,7 +91,7 @@ where
     type Error = EventError;
 
     fn try_from(value: DynEvent) -> Result<Self, EventError> {
-        let payload = event_from_json(&value.payload)?;
+        let payload = crate::payload::event_from_json(&value.payload)?;
         let id = E::Ack::parse(value.id)?;
         let attachments = E::Binary::parse(value.attachments)?;
         Ok(Self {
@@ -95,19 +102,22 @@ where
     }
 }
 
-/// Constructs a typed event from raw parts; used by the `EventRouter` derive macro.
+/// Constructs a typed event from raw parts; used by the `EventRouter` derive
+/// macro.
 pub trait EventHandler: Sized {
     /// The event type this handler processes.
     type Payload: EventType;
 
-    /// Builds `Self` from a deserialized payload, raw ack ID, and raw attachments.
+    /// Builds `Self` from a deserialized payload, raw ack ID, and raw
+    /// attachments.
     ///
     /// # Errors
     ///
-    /// Returns an error if the ack ID or attachment policy is violated, or deserialization fails.
+    /// Returns an error if the ack ID or attachment policy is violated, or
+    /// deserialization fails.
     fn handle(
         payload: Self::Payload,
-        id: Option<u64>,
+        id: Option<DynAckId>,
         attachments: Option<Vec<Bytes>>,
     ) -> Result<Self, EventError>;
 }
@@ -129,7 +139,7 @@ where
 
     fn handle(
         payload: Self::Payload,
-        id: Option<u64>,
+        id: Option<DynAckId>,
         attachments: Option<Vec<Bytes>>,
     ) -> Result<Self, EventError> {
         let id = E::Ack::parse(id)?;
@@ -148,13 +158,13 @@ where
 {
     type Output = ();
 
-    fn prepare(self) -> Result<(Directive, ()), PayloadError> {
-        let payload = event_to_json(&self)?;
+    fn prepare(self) -> Result<(ClientPacket, ()), PayloadError> {
+        let payload = crate::payload::event_to_json(&self)?;
 
         Ok((
-            Directive::Event {
+            ClientPacket::Event {
                 payload: payload.into(),
-                tx: None,
+                ack_tx: None,
                 attachments: None,
             },
             (),
@@ -169,16 +179,16 @@ where
 {
     type Output = AckHandle<A>;
 
-    fn prepare(self) -> Result<(Directive, AckHandle<A>), PayloadError> {
-        let (tx, rx) = oneshot::channel();
-        let payload = event_to_json(&self)?.into();
+    fn prepare(self) -> Result<(ClientPacket, AckHandle<A>), PayloadError> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let payload = crate::payload::event_to_json(&self)?.into();
         Ok((
-            Directive::Event {
+            ClientPacket::Event {
                 payload,
-                tx: Some(tx),
+                ack_tx: Some(ack_tx),
                 attachments: None,
             },
-            AckHandle::new(rx),
+            AckHandle::new(ack_rx),
         ))
     }
 }
@@ -190,13 +200,13 @@ where
 {
     type Output = ();
 
-    fn prepare(self) -> Result<(Directive, ()), PayloadError> {
+    fn prepare(self) -> Result<(ClientPacket, ()), PayloadError> {
         let mut builder = AttachmentsBuilder::new();
-        let payload = event_to_json(&self(&mut builder))?.into();
+        let payload = crate::payload::event_to_json(&self(&mut builder))?.into();
         Ok((
-            Directive::Event {
+            ClientPacket::Event {
                 payload,
-                tx: None,
+                ack_tx: None,
                 attachments: Some(builder.finish()),
             },
             (),
@@ -212,32 +222,33 @@ where
 {
     type Output = AckHandle<A>;
 
-    fn prepare(self) -> Result<(Directive, AckHandle<A>), PayloadError> {
-        let (tx, rx) = oneshot::channel();
+    fn prepare(self) -> Result<(ClientPacket, AckHandle<A>), PayloadError> {
+        let (ack_tx, ack_rx) = oneshot::channel();
         let mut builder = AttachmentsBuilder::new();
-        let payload = event_to_json(&self(&mut builder))?.into();
+        let payload = crate::payload::event_to_json(&self(&mut builder))?.into();
         Ok((
-            Directive::Event {
+            ClientPacket::Event {
                 payload,
-                tx: Some(tx),
+                ack_tx: Some(ack_tx),
                 attachments: Some(builder.finish()),
             },
-            AckHandle::new(rx),
+            AckHandle::new(ack_rx),
         ))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
+    use bytestring::ByteString;
+
     use super::*;
     use crate::binary::AttachmentsBuilder;
-    use crate::client::Emit;
     use crate::error::{AckIdError, AttachmentsError, EventError};
+    use crate::event::Emit;
     use crate::marker::{HasAck, HasBinary, NoAck, NoBinary};
     use crate::packet::DynEvent;
     use crate::payload::{DeserializePayload, SerializePayload};
-    use bytes::Bytes;
-    use bytestring::ByteString;
 
     fn bss(s: &'static str) -> ByteString {
         ByteString::from_static(s)
@@ -282,7 +293,7 @@ mod tests {
     fn ping_event(id: Option<u64>, attachments: Option<Vec<Bytes>>) -> DynEvent {
         DynEvent {
             payload: bss(r#"["ping"]"#),
-            id,
+            id: id.map(DynAckId::new),
             attachments,
         }
     }
@@ -292,7 +303,7 @@ mod tests {
         let att = vec![Bytes::from_static(b"\xFF")];
         let ev: Event<PingWithAckAndBinary> = DynEvent {
             payload: bss(r#"["ping"]"#),
-            id: Some(1),
+            id: Some(DynAckId::new(1)),
             attachments: Some(att),
         }
         .try_into()
@@ -372,38 +383,38 @@ mod tests {
 
     #[test]
     fn event_handler_handle_bad_ack_fails() {
-        Event::<Ping>::handle(Ping, Some(1), None).unwrap_err();
+        Event::<Ping>::handle(Ping, Some(DynAckId::new(1)), None).unwrap_err();
     }
 
     #[test]
     fn emit_no_ack_no_binary_prepare() {
-        let (directive, ()) = Ping.prepare().unwrap();
-        let Directive::Event {
+        let (client_packet, ()) = Ping.prepare().unwrap();
+        let ClientPacket::Event {
             payload,
-            tx,
+            ack_tx,
             attachments,
-        } = directive
+        } = client_packet
         else {
-            panic!("expected Event directive");
+            panic!("expected Event packet");
         };
         assert_eq!(&payload[..], r#"["ping"]"#);
-        assert!(tx.is_none());
+        assert!(ack_tx.is_none());
         assert!(attachments.is_none());
     }
 
     #[test]
     fn emit_has_ack_no_binary_prepare() {
-        let (directive, _handle) = PingWithAck.prepare().unwrap();
-        let Directive::Event {
+        let (client_packet, _handle) = PingWithAck.prepare().unwrap();
+        let ClientPacket::Event {
             payload,
-            tx,
+            ack_tx,
             attachments,
-        } = directive
+        } = client_packet
         else {
-            panic!("expected Event directive");
+            panic!("expected Event packet");
         };
         assert_eq!(&payload[..], r#"["ping"]"#);
-        assert!(tx.is_some());
+        assert!(ack_tx.is_some());
         assert!(attachments.is_none());
     }
 
@@ -413,17 +424,17 @@ mod tests {
             let _p = builder.attach(Bytes::from_static(b"\xFF"));
             PingWithBinary
         };
-        let (directive, ()) = closure.prepare().unwrap();
-        let Directive::Event {
+        let (client_packet, ()) = closure.prepare().unwrap();
+        let ClientPacket::Event {
             payload,
-            tx,
+            ack_tx,
             attachments,
-        } = directive
+        } = client_packet
         else {
-            panic!("expected Event directive");
+            panic!("expected Event packet");
         };
         assert_eq!(&payload[..], r#"["ping"]"#);
-        assert!(tx.is_none());
+        assert!(ack_tx.is_none());
         let att = attachments.expect("expected attachments");
         assert_eq!(att.len(), 1);
     }
@@ -456,17 +467,17 @@ mod tests {
             let _p = builder.attach(Bytes::from_static(b"\xFF"));
             PingWithAckAndBinary
         };
-        let (directive, _handle) = closure.prepare().unwrap();
-        let Directive::Event {
+        let (client_packet, _handle) = closure.prepare().unwrap();
+        let ClientPacket::Event {
             payload,
-            tx,
+            ack_tx,
             attachments,
-        } = directive
+        } = client_packet
         else {
-            panic!("expected Event directive");
+            panic!("expected Event packet");
         };
         assert_eq!(&payload[..], r#"["ping"]"#);
-        assert!(tx.is_some());
+        assert!(ack_tx.is_some());
         let att = attachments.expect("expected attachments");
         assert_eq!(att.len(), 1);
     }

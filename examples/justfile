@@ -1,0 +1,26 @@
+# Recipes for every example, run from the root as `just examples::<recipe>`.
+# They load .env beside this file; copy .env.example to start. A recipe's
+# [env] attribute and the shell both override .env.
+
+[windows]
+set shell := ["pwsh", "-NoLogo", "-NoProfile", "-Command"]
+
+set default-list
+set dotenv-load
+
+# Run the Rust chat client against a quick-start server.
+[env("RUST_LOG", "quick_start=info,sioc=trace")]
+quick-start *args:
+    cargo run --locked --example quick_start {{ args }}
+
+# Start the TypeScript quick-start server on 127.0.0.1:3000.
+quick-start-ts *args:
+    bun quick-start/server.ts {{ args }}
+
+# Start the Python quick-start server on 127.0.0.1:3000.
+quick-start-py *args:
+    uv run --locked python quick-start/server.py {{ args }}
+
+# Run the generals.io bot with the settings in .env.
+generals-io *args:
+    cargo run --locked --example glhf {{ args }}

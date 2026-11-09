@@ -1,0 +1,133 @@
+//! One polling session, from the handshake to the end or an upgrade.
+
+use reqwest::Client;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
+use url::Url;
+
+use crate::connector::WebSocketConnector;
+use crate::error::TransportError;
+use crate::packet::{Frame, Handshake, Packet};
+use crate::transport::{ClientFrame, ServerFrame};
+
+/// Runs the full polling transport lifecycle: handshake, GET/POST loops, and
+/// optional WebSocket upgrade.
+///
+/// Finishes once the engine closes `client_frame_rx`. If the server ends the
+/// session first, drops `server_frame_tx` and discards client frames until the
+/// engine closes `client_frame_rx`.
+///
+/// # Errors
+///
+/// Returns an error if a network, protocol, or channel failure occurs.
+///
+/// # Panics
+///
+/// Never in practice: a decoded polling payload always holds at least one
+/// frame.
+#[tracing::instrument(skip_all)]
+pub async fn run<C>(
+    client: Client,
+    base_url: Url,
+    connector: C,
+    server_frame_tx: mpsc::Sender<ServerFrame>,
+    mut client_frame_rx: mpsc::Receiver<ClientFrame>,
+) -> Result<(), TransportError>
+where
+    C: WebSocketConnector,
+{
+    let mut url = crate::polling::request::polling_url(base_url.clone());
+
+    let span = tracing::debug_span!("connect", %url);
+
+    // The server may batch packets after the Open packet, as engine.io-client
+    // accepts, so the rest of the response goes to the engine.
+    let mut frames = crate::polling::request::get_frames(&client, &url)
+        .instrument(span)
+        .await?
+        .into_iter();
+    let first = frames
+        .next()
+        .expect("a decoded payload holds at least one frame");
+    let Frame::Packet(Packet::Open(handshake)) = &first else {
+        return Err(TransportError::Open(first.kind()));
+    };
+
+    url.query_pairs_mut().append_pair("sid", &handshake.sid);
+    let can_upgrade = offers_websocket(handshake);
+    let sid = handshake.sid.clone();
+    let max_payload = handshake.max_payload;
+
+    let frames = std::iter::once(first).chain(frames);
+    let stream = if crate::polling::forward::send_server_frames(frames, &server_frame_tx).await? {
+        None
+    } else if can_upgrade {
+        let upgrade = crate::websocket::stream::connect(base_url, Some(&sid), connector);
+
+        crate::polling::forward::forward_frames_until_upgrade(
+            &client,
+            &url,
+            &server_frame_tx,
+            &mut client_frame_rx,
+            upgrade,
+            max_payload,
+        )
+        .await?
+    } else {
+        crate::polling::forward::forward_frames(
+            &client,
+            &url,
+            &server_frame_tx,
+            &mut client_frame_rx,
+            &CancellationToken::new(),
+            max_payload,
+        )
+        .await?;
+
+        None
+    };
+
+    if let Some(stream) = stream {
+        tracing::debug!("paused polling transport");
+
+        return crate::websocket::session::run(stream, false, server_frame_tx, client_frame_rx)
+            .await;
+    }
+
+    // The engine may queue frames before it learns the server ended the
+    // session, and the closed session cannot accept them.
+    drop(server_frame_tx);
+    while client_frame_rx.recv().await.is_some() {}
+
+    Ok(())
+}
+
+/// Whether the server offered a WebSocket upgrade.
+fn offers_websocket(handshake: &Handshake) -> bool {
+    handshake
+        .upgrades
+        .iter()
+        .any(|upgrade| upgrade == "websocket")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn handshake(upgrades: Vec<bytestring::ByteString>) -> Handshake {
+        Handshake {
+            sid: "x".into(),
+            upgrades,
+            ping_interval: 25_000,
+            ping_timeout: 5_000,
+            max_payload: 1_000_000,
+        }
+    }
+
+    #[test]
+    fn a_websocket_upgrade_is_offered_only_when_listed() {
+        assert!(offers_websocket(&handshake(vec!["websocket".into()])));
+        assert!(!offers_websocket(&handshake(vec![])));
+    }
+}
